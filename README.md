@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 工具启动准备与并发读取（内部验证） | 2026-11-12 | 1、大文件核验和环境准备移出共享锁，启动前仍原子核对最新登记、动作、取消、场景及依赖。[详情](CHANGELOG.md#resource-spawn-preparation-20261112)<br>2、非可取消任务使用启动／释放握手；MCP准备与协议阶段分别记录，保留原取消、退出及结果证据检查。[详情](CHANGELOG.md#resource-spawn-preparation-20261112)<br>3、56项不同的相关Rust检查、格式及全目标Clippy零警告通过；新候选、完整Windows检查与原生性能仍待验证。[详情](CHANGELOG.md#resource-spawn-preparation-20261112) |
 | 开发源码同步与检查修复 | 2026-11-12 | 1、405项源码同步到开发分支并逐一核对远端文件内容及模式，正式分支保持。[详情](CHANGELOG.md#source-ci-exit-20261112)<br>2、修正预期拒绝案例遗留的脚本退出状态；原12项断言和真实负向失败验证通过。[详情](CHANGELOG.md#source-ci-exit-20261112)<br>3、修正测试模块的样式导入处理，保留真实组件和生产样式，16项相关检查通过；云端完整检查继续单独核验。[详情](CHANGELOG.md#source-ci-exit-20261112) |
 | 任务进度与原生控件（内部验证） | 2026-11-12 | 1、进度通知直接推进任务，仅无通知700ms时补查，保留完整终态结果；45项相关任务及组件检查通过。[详情](CHANGELOG.md#task-events-native-controls-20261112)<br>2、验收助手使用单次原生激活、数值控件优先严格RangeValue接口；75项边界检查及离线编译通过，原生效果待验。[详情](CHANGELOG.md#task-events-native-controls-20261112) |
 | 说明读取与中文输入（内部审阅） | 2026-11-12 | 1、读取说明时不复制无关更新预览，其他动作保持完整校验；2项专项和8项直接回归通过。[详情](CHANGELOG.md#document-preview-copy-20261112)<br>2、6c候选文档100次实测P95为148.2598ms，达到原200ms目标；一次1061.8325ms慢样本及附加最大延迟失败保留。[详情](CHANGELOG.md#document-preview-native-20261112)<br>3、真实拼音输入转换及正常退出恢复通过；安装／便携包完成离线内容核对，持续运行与其余原生范围分别记录。[详情](CHANGELOG.md#document-preview-native-20261112) |

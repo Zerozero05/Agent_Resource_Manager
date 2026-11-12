@@ -135,7 +135,7 @@ fn protected_client(definition: &ActionDefinition) -> bool {
         "msedge" | "microsoftedge" | "edge" | "codex" | "chatgpt"
     ) || name.starts_with("codex-")
 }
-fn validate_idle_policy(definition: &ActionDefinition) -> Result<(), String> {
+fn validate_idle_policy_shape(definition: &ActionDefinition) -> Result<(), String> {
     if definition.idle_timeout_seconds.is_some_and(|n| n > 86400) {
         return Err("闲置时间须为0–86400秒；0表示关闭".into());
     }
@@ -147,11 +147,15 @@ fn validate_idle_policy(definition: &ActionDefinition) -> Result<(), String> {
     {
         return Err("闲置释放仅适用于已登记服务，不能用于正在执行的任务".into());
     }
-    if mcp::tool(definition).is_some() {
-        crate::resource_adapters::validate_bound_action(definition)?;
-    }
     if definition.idle_release_safe && protected_client(definition) {
         return Err("用户浏览器和Codex客户端不允许自动闲置结束".into());
+    }
+    Ok(())
+}
+fn validate_idle_policy(definition: &ActionDefinition) -> Result<(), String> {
+    validate_idle_policy_shape(definition)?;
+    if mcp::tool(definition).is_some() {
+        crate::resource_adapters::validate_bound_action(definition)?;
     }
     Ok(())
 }
@@ -228,7 +232,7 @@ fn validate_definition(
         return Err("动作标识、名称或运行方式无效".into());
     }
     definition.executable = canonical_path(&definition.executable, false)?;
-    validate_idle_policy(definition)?;
+    validate_idle_policy_shape(definition)?;
     definition.working_directory = canonical_path(&definition.working_directory, true)?;
     let root = crate::local::canonical(Path::new(&record.root_path))?;
     if !Path::new(&definition.working_directory).starts_with(&root) {
@@ -574,6 +578,82 @@ pub(crate) struct PreparedInvocation {
     pub args: Vec<String>,
 }
 
+// A single-use, fully verified command. Constructing it never starts a process;
+// callers must still admit the unchanged live resource under the manager lock.
+pub(crate) struct PreparedSpawn {
+    source: ResourceRecord,
+    registered: Value,
+    verified: ActionDefinition,
+    invocation: PreparedInvocation,
+    command: Command,
+    mcp: bool,
+}
+
+impl PreparedSpawn {
+    pub(crate) fn resource_id(&self) -> &str {
+        &self.invocation.resource_id
+    }
+
+    pub(crate) fn cancellable(&self) -> bool {
+        self.invocation.definition.cancellable
+    }
+
+    pub(crate) fn admit(&self, live: &ResourceRecord) -> Result<(), String> {
+        let registered = live
+            .actions
+            .iter()
+            .find(|action| action["id"] == self.invocation.definition.id)
+            .ok_or("资源或动作已改变，请重新读取后调用")?;
+        if !live.enabled
+            || live.id != self.invocation.resource_id
+            || live.revision != self.invocation.revision
+            || serde_json::to_value(live).map_err(|e| e.to_string())?
+                != serde_json::to_value(&self.source).map_err(|e| e.to_string())?
+            || registered != &self.registered
+            || serde_json::to_value(&self.verified).map_err(|e| e.to_string())?
+                != serde_json::to_value(&self.invocation.definition).map_err(|e| e.to_string())?
+        {
+            return Err("资源或动作已改变，请重新读取后调用".into());
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn prepare_spawn(
+    record: ResourceRecord,
+    request: PreparedInvocation,
+) -> Result<PreparedSpawn, String> {
+    if !record.enabled || record.id != request.resource_id || record.revision != request.revision {
+        return Err("资源或动作已改变，请重新读取后调用".into());
+    }
+    let registered = record
+        .actions
+        .iter()
+        .find(|action| action["id"] == request.definition.id)
+        .ok_or("未登记该动作")?
+        .clone();
+    // The constructor performs the fresh executable and complete adapter checks
+    // once, including command environment preparation, outside shared locks.
+    let (verified, mut command) =
+        crate::resource_adapters::prepare_verified_command(&record, &request.definition.id)?;
+    if serde_json::to_value(&verified).map_err(|e| e.to_string())?
+        != serde_json::to_value(&request.definition).map_err(|e| e.to_string())?
+    {
+        return Err("资源或动作已改变，请重新读取后调用".into());
+    }
+    let mcp = mcp::validate_shape(&request)?;
+    command
+        .args(&request.args)
+        .current_dir(&verified.working_directory);
+    Ok(PreparedSpawn {
+        source: record,
+        registered,
+        verified,
+        invocation: request,
+        command,
+        mcp,
+    })
+}
 struct Run {
     child: Option<Child>,
     mcp_session: Option<Arc<mcp::Control>>,
@@ -1040,6 +1120,7 @@ impl RuntimeRegistry {
         self: &Arc<Self>,
         prepared: PreparedInvocation,
         dependency_ids: Vec<String>,
+        command: Command,
     ) -> Result<Value, String> {
         let tool = mcp::tool(&prepared.definition).ok_or("未登记固定 MCP 动作")?;
         let mut state = self.state.lock().map_err(|_| "运行状态锁不可用")?;
@@ -1070,7 +1151,10 @@ impl RuntimeRegistry {
             }
             control
         } else {
-            let control = Arc::new(mcp::Control::spawn(&prepared)?);
+            let control = Arc::new(mcp::Control::start(
+                command,
+                mcp::connection_key(&prepared.definition),
+            )?);
             let metadata = json!({"runId":control.id,"sessionId":control.id,"resourceId":prepared.resource_id,"actionId":prepared.definition.id,"pid":control.pid,"mode":"service","cancellable":true,"status":"running","startedAt":now(),"finishedAt":null,"exitCode":null,"protocolSession":true,"keepAlive":false,"activeUses":0,"loginUses":0,"idleEligible":idle_safe(&prepared.definition)&&prepared.definition.idle_timeout_seconds!=Some(0),"lastActivityAt":now(),"idleTimeoutSeconds":prepared.definition.idle_timeout_seconds.unwrap_or(600)});
             state.runs.insert(
                 control.id.clone(),
@@ -1196,19 +1280,43 @@ impl RuntimeRegistry {
             events(json!({"run":run}));
         }
     }
+    #[cfg(test)]
     pub(crate) fn spawn(
         self: &Arc<Self>,
         prepared: PreparedInvocation,
         dependency_ids: Vec<String>,
     ) -> Result<Value, String> {
-        if mcp::validate(&prepared)? {
-            return self.spawn_mcp(prepared, dependency_ids);
-        }
+        let mcp = mcp::validate(&prepared)?;
         let mut command = Command::new(&prepared.definition.executable);
         crate::resource_adapters::apply_environment(&prepared.definition, &mut command)?;
         command
             .args(&prepared.args)
-            .current_dir(&prepared.definition.working_directory)
+            .current_dir(&prepared.definition.working_directory);
+        self.spawn_command(prepared, dependency_ids, command, mcp)
+    }
+    pub(crate) fn spawn_prepared(
+        self: &Arc<Self>,
+        prepared: PreparedSpawn,
+        dependency_ids: Vec<String>,
+    ) -> Result<Value, String> {
+        self.spawn_command(
+            prepared.invocation,
+            dependency_ids,
+            prepared.command,
+            prepared.mcp,
+        )
+    }
+    fn spawn_command(
+        self: &Arc<Self>,
+        prepared: PreparedInvocation,
+        dependency_ids: Vec<String>,
+        mut command: Command,
+        mcp: bool,
+    ) -> Result<Value, String> {
+        if mcp {
+            return self.spawn_mcp(prepared, dependency_ids, command);
+        }
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1570,9 +1678,18 @@ mod tests {
         std::thread::sleep(Duration::from_secs(15));
     }
     #[test]
-    #[ignore = "Safe short non-cancellable subprocess fixture"]
-    fn synthetic_short_wait() {
-        std::thread::sleep(Duration::from_secs(2));
+    #[ignore = "Safe gated non-cancellable subprocess fixture"]
+    fn synthetic_gated_wait() {
+        let root = std::env::current_dir().unwrap();
+        std::fs::write(root.join("noncancellable-started"), b"ready").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !root.join("noncancellable-release").is_file() {
+            assert!(
+                Instant::now() < deadline,
+                "Parent did not release the fixture"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
     #[test]
     #[ignore = "Safe nonzero subprocess fixture"]
@@ -1814,10 +1931,45 @@ mod tests {
     }
     #[test]
     fn noncancellable_task_keeps_launched_policy_and_close_waits_for_completion() {
-        let (_fixture, service, id) = setup("task", "synthetic_short_wait");
+        let (fixture, service, id) = setup("task", "synthetic_gated_wait");
+        let started_path = fixture.path().join("tool/noncancellable-started");
+        let release_path = fixture.path().join("tool/noncancellable-release");
         let started = service.control(&json!({"action":"start_task","request":{"action":"resource_invoke","id":id,"actionId":"test"}}), crate::dispatch).unwrap().unwrap();
         let task_id = &started["task"]["id"];
         let deadline = Instant::now() + Duration::from_secs(30);
+        struct ReleaseOnDrop {
+            path: std::path::PathBuf,
+            service: Arc<crate::tasks::TaskSystem>,
+            task_id: Value,
+            deadline: Instant,
+        }
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.path, b"finish");
+                while Instant::now() < self.deadline {
+                    match self.service.control(
+                        &json!({"action":"get_task","taskId":self.task_id}),
+                        crate::dispatch,
+                    ) {
+                        Ok(Some(value))
+                            if matches!(
+                                value["task"]["status"].as_str(),
+                                Some("queued" | "running")
+                            ) =>
+                        {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+        let release = ReleaseOnDrop {
+            path: release_path,
+            service: service.clone(),
+            task_id: task_id.clone(),
+            deadline,
+        };
         let run = loop {
             let runs = service
                 .execute(
@@ -1826,7 +1978,10 @@ mod tests {
                 )
                 .unwrap();
             if let Some(run) = runs["runs"].as_array().unwrap().first() {
-                break run.clone();
+                if started_path.is_file() {
+                    assert_eq!(run["status"], "running");
+                    break run.clone();
+                }
             }
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(20));
@@ -1850,10 +2005,50 @@ mod tests {
                 crate::dispatch
             )
             .is_err());
-        let closed = service
-            .control(&json!({"action":"prepare_close"}), crate::dispatch)
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let closing_task_id = task_id.clone();
+        let closing_service = Arc::downgrade(&service);
+        service.set_events(Arc::new(move |event| {
+            if event["task"]["id"] == closing_task_id
+                && closing_service
+                    .upgrade()
+                    .and_then(|service| service.release_idle_resources().ok())
+                    .is_some_and(|value| value["reason"] == "管理器正在退出")
+            {
+                let _ = entered_tx.send(());
+            }
+        }));
+        let close_service = service.clone();
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let close = std::thread::spawn(move || {
+            let result = close_service.control(&json!({"action":"prepare_close"}), crate::dispatch);
+            let _ = closed_tx.send(result);
+        });
+        // prepare_close emits the active task before waiting for its completion.
+        // The child remains gated while both cancellation and closing are checked.
+        entered_rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
+        assert!(matches!(
+            closed_rx.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        let held = service
+            .control(
+                &json!({"action":"get_task","taskId":task_id}),
+                crate::dispatch,
+            )
             .unwrap()
             .unwrap();
+        assert_eq!(held["task"]["status"], "running");
+        assert_eq!(held["task"]["cancellable"], false);
+        std::fs::write(&release.path, b"finish").unwrap();
+        let closed = closed_rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        close.join().unwrap();
         assert_eq!(closed["ready"], true);
         let task = service
             .control(
@@ -2294,5 +2489,164 @@ mod tests {
             json!({"released":[],"paused":false})
         );
         m.resource_runtime.stop(id).unwrap();
+    }
+
+    fn prepared_spawn_fixture() -> (tempfile::TempDir, ResourceRecord, PreparedInvocation) {
+        let dir = fixture();
+        let root = dir.path().join("proof-resource");
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("never-launched.exe");
+        // Deliberately not an executable: a successful proof must only prepare
+        // Command, never launch it before live admission.
+        std::fs::write(&executable, b"inert proof preparation fixture").unwrap();
+        let raw = json!({"id":"read","label":"Proof read","mode":"task","cancellable":true,
+            "executable":root.join(".").join("never-launched.exe"),"workingDirectory":root.join("."),
+            "executableSha256":fingerprint(&executable).unwrap(),
+            "args":[{"type":"literal","value":"--read"},{"type":"parameter","name":"query"}],
+            "parameters":[{"name":"query","label":"Query","kind":"text","required":true,"maxLength":80}]});
+        let record: ResourceRecord = serde_json::from_value(json!({
+            "id":"proof-resource","name":"Proof resource","kind":"cli","rootPath":root,
+            "repository":null,"version":"1.0.0","alias":"","notes":"Synthetic proof only",
+            "enabled":true,"ownership":"external","managementScope":"invoke","actions":[raw],
+            "capabilities":[],"updatePolicy":{"mode":"manual","intervalHours":24,"pinnedVersion":null,"skippedVersions":[]},
+            "revision":1,"createdAt":"2026-11-12T00:00:00Z","updatedAt":"2026-11-12T00:00:00Z"
+        })).unwrap();
+        let definition = verified_definition(&record, "read").unwrap();
+        let args = arguments(&definition, &json!({"query":"ordinary value with spaces"})).unwrap();
+        let request = PreparedInvocation {
+            resource_id: record.id.clone(),
+            revision: record.revision,
+            definition,
+            args,
+        };
+        (dir, record, request)
+    }
+
+    #[test]
+    fn prepared_spawn_admission_rejects_same_revision_raw_record_or_action_changes() {
+        let (_dir, record, request) = prepared_spawn_fixture();
+        let proof = prepare_spawn(record.clone(), request).unwrap();
+        proof.admit(&record).unwrap();
+        let mut variants = Vec::new();
+        let mut changed = record.clone();
+        changed.name.push_str(" changed");
+        variants.push(changed);
+        let mut changed = record.clone();
+        changed.root_path.push_str("-changed");
+        variants.push(changed);
+        let mut changed = record.clone();
+        changed.actions[0]["label"] = json!("Changed action");
+        variants.push(changed);
+        let mut changed = record.clone();
+        changed.actions[0]["args"][0]["value"] = json!("--changed");
+        variants.push(changed);
+        let mut changed = record.clone();
+        changed.actions[0]["unexpectedRawField"] = json!(true);
+        variants.push(changed);
+        let mut changed = record.clone();
+        changed.actions.clear();
+        variants.push(changed);
+        let mut changed = record.clone();
+        changed.enabled = false;
+        variants.push(changed);
+        for changed in variants {
+            assert_eq!(changed.revision, record.revision);
+            assert!(proof
+                .admit(&changed)
+                .unwrap_err()
+                .contains("资源或动作已改变"));
+        }
+        let mut changed = record.clone();
+        changed.revision += 1;
+        assert!(proof.admit(&changed).is_err());
+    }
+
+    #[test]
+    fn prepared_spawn_preserves_normalized_path_compatibility_and_exact_arguments_without_launch() {
+        let (_dir, record, request) = prepared_spawn_fixture();
+        let expected_args = request.args.clone();
+        let proof = prepare_spawn(record.clone(), request).unwrap();
+        assert_ne!(
+            record.actions[0]["executable"].as_str().unwrap(),
+            proof.verified.executable
+        );
+        assert_ne!(
+            record.actions[0]["workingDirectory"].as_str().unwrap(),
+            proof.verified.working_directory
+        );
+        assert_eq!(
+            proof.command.get_program(),
+            std::ffi::OsStr::new(&proof.verified.executable)
+        );
+        assert_eq!(
+            proof.command.get_current_dir().unwrap(),
+            Path::new(&proof.verified.working_directory)
+        );
+        assert_eq!(
+            proof
+                .command
+                .get_args()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            expected_args
+        );
+        assert_eq!(expected_args, ["--read", "ordinary value with spaces"]);
+        assert!(!proof.mcp);
+        proof.admit(&record).unwrap();
+    }
+
+    #[test]
+    fn prepared_spawn_rejects_changed_request_definition_and_changed_executable_before_launch() {
+        let (_dir, record, mut request) = prepared_spawn_fixture();
+        request.definition.label.push_str(" forged");
+        let error = prepare_spawn(record, request)
+            .err()
+            .expect("a forged definition must not create a proof");
+        assert!(error.contains("资源或动作已改变"));
+
+        let (_dir, record, request) = prepared_spawn_fixture();
+        std::fs::write(
+            &request.definition.executable,
+            b"changed inert executable bytes",
+        )
+        .unwrap();
+        let error = prepare_spawn(record, request)
+            .err()
+            .expect("changed bytes must not create a proof");
+        assert!(error.contains("摘要不一致"));
+    }
+
+    #[test]
+    fn prepared_spawn_retains_mcp_fixed_argument_and_complete_adapter_validation() {
+        let (_dir, mut record, mut request) = prepared_spawn_fixture();
+        request.definition.id = "edge-tabs".into();
+        request.definition.parameters.clear();
+        request.definition.args = vec![Argument::Literal {
+            value: "fixed-only".into(),
+        }];
+        request.definition.adapter_binding = Some(serde_json::from_value(json!({
+            "adapter":"edgeControl","rootPath":record.root_path,"rootIdentity":"unverified-synthetic-root",
+            "files":[],"nodePath":null
+        })).unwrap());
+        request.args = vec!["fixed-only".into()];
+        assert!(mcp::validate_shape(&request).unwrap());
+        request.args.push("unregistered-extra".into());
+        assert!(mcp::validate_shape(&request)
+            .unwrap_err()
+            .contains("额外参数"));
+        request.args.pop();
+        assert!(
+            mcp::validate(&request).is_err(),
+            "structural validity must not replace binding verification"
+        );
+        assert!(
+            mcp::Control::spawn(&request).is_err(),
+            "the direct test wrapper must retain full verification before spawning"
+        );
+        record.actions = vec![serde_json::to_value(&request.definition).unwrap()];
+        assert!(
+            prepare_spawn(record, request).is_err(),
+            "an unverified adapter cannot create an opaque command proof"
+        );
     }
 }

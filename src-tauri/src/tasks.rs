@@ -1590,6 +1590,46 @@ struct WorkerHook {
     internal_resource_automation: bool,
 }
 
+impl WorkerHook {
+    fn resource_spawn_with(
+        &self,
+        request: crate::resource_runtime::PreparedInvocation,
+        prepare: impl FnOnce(
+            crate::resources::ResourceRecord,
+            crate::resource_runtime::PreparedInvocation,
+        ) -> Result<crate::resource_runtime::PreparedSpawn, String>,
+    ) -> Result<Value, String> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(CANCELLED.into());
+        }
+        if request.definition.cancellable != self.cancellable {
+            return Err("动作取消策略已变化，请重新读取后调用".into());
+        }
+        let service = self
+            .service
+            .upgrade()
+            .ok_or("Task service is unavailable")?;
+        let record = service
+            .manager
+            .lock()
+            .map_err(|_| "Manager state lock failed")?
+            .resource_spawn_record(&request)?;
+        // File/adapter verification and command setup must not hold the live writer.
+        let prepared = prepare(record, request)?;
+        let manager = service
+            .manager
+            .lock()
+            .map_err(|_| "Manager state lock failed")?;
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(CANCELLED.into());
+        }
+        if prepared.cancellable() != self.cancellable {
+            return Err("动作取消策略已变化，请重新读取后调用".into());
+        }
+        manager.resource_spawn_prepared(prepared)
+    }
+}
+
 impl ManagerRuntime for WorkerHook {
     fn capability_evidence_store(
         &self,
@@ -1714,21 +1754,7 @@ impl ManagerRuntime for WorkerHook {
         &self,
         request: crate::resource_runtime::PreparedInvocation,
     ) -> Result<Value, String> {
-        if self.cancel.load(Ordering::Relaxed) {
-            return Err(CANCELLED.into());
-        }
-        if request.definition.cancellable != self.cancellable {
-            return Err("动作取消策略已变化，请重新读取后调用".into());
-        }
-        let service = self
-            .service
-            .upgrade()
-            .ok_or("Task service is unavailable")?;
-        let manager = service
-            .manager
-            .lock()
-            .map_err(|_| "Manager state lock failed")?;
-        manager.resource_spawn(request)
+        self.resource_spawn_with(request, crate::resource_runtime::prepare_spawn)
     }
     fn resource_store(&self, request: crate::resources::StoreRequest) -> Result<Value, String> {
         if self.cancellable && self.cancel.load(Ordering::Relaxed) {
@@ -7505,5 +7531,153 @@ mod tests {
             assert_eq!(after[field], before[field]);
         }
         assert!(root.is_dir());
+    }
+
+    fn spawn_admission_fixture() -> (
+        tempfile::TempDir,
+        Arc<TaskSystem>,
+        crate::resource_runtime::PreparedInvocation,
+    ) {
+        let (dir, service) = fixture();
+        let root = dir.path().join("never-launched-tool");
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("never-launched.exe");
+        std::fs::write(&executable, b"synthetic admission fixture; never executed").unwrap();
+        let id = service.execute(
+            json!({"action":"resource_register","name":"Admission fixture","kind":"cli","rootPath":root}),
+            crate::dispatch,
+        ).unwrap()["resource"]["id"].as_str().unwrap().to_owned();
+        service.execute(
+            json!({"action":"resource_action_set","id":id,"expectedRevision":1,"definition":{"id":"test","label":"Never launch","mode":"task","cancellable":true,"executable":executable,"workingDirectory":root,"args":[]}}),
+            crate::dispatch_local,
+        ).unwrap();
+        let record: crate::resources::ResourceRecord = serde_json::from_value(
+            service
+                .manager
+                .lock()
+                .unwrap()
+                .resource_store(crate::resources::StoreRequest::Get(id.clone()))
+                .unwrap(),
+        )
+        .unwrap();
+        let definition = crate::resource_runtime::verified_definition(&record, "test").unwrap();
+        let request = crate::resource_runtime::PreparedInvocation {
+            resource_id: id,
+            revision: record.revision,
+            definition,
+            args: vec![],
+        };
+        (dir, service, request)
+    }
+
+    #[test]
+    fn resource_spawn_verification_releases_writer_and_rechecks_live_admission() {
+        struct ReleaseOnDrop(Latch);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                release(&self.0);
+            }
+        }
+        for change in ["disabled", "revision", "action", "basic", "cancel"] {
+            let (_dir, service, request) = spawn_admission_fixture();
+            let id = request.resource_id.clone();
+            let definition = serde_json::to_value(&request.definition).unwrap();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let hook = WorkerHook {
+                service: Arc::downgrade(&service),
+                base: Mutex::new(WorkerBase {
+                    state: service.manager.lock().unwrap().state.clone(),
+                    previews: HashMap::new(),
+                    undo: vec![],
+                    redo: vec![],
+                }),
+                action: "resource_invoke".into(),
+                request: json!({"action":"resource_invoke","id":id,"actionId":"test"}),
+                cancel: cancel.clone(),
+                cancellable: true,
+                commit_started: AtomicBool::new(false),
+                internal_resource_automation: false,
+            };
+            let (gate_id, gate) = new_latch();
+            let _release = ReleaseOnDrop(gate.clone());
+            let worker = std::thread::spawn(move || {
+                hook.resource_spawn_with(request, |record, request| {
+                    hold(&gate_id)?;
+                    crate::resource_runtime::prepare_spawn(record, request)
+                })
+            });
+            entered(&gate);
+            // The preparation callback is paused: these operations must finish
+            // before it is released, rather than merely meet a timing threshold.
+            assert!(
+                service.manager.try_lock().is_ok(),
+                "{change}: live writer held during verification"
+            );
+            assert_eq!(
+                service
+                    .execute(
+                        json!({"action":"resource_runtime","id":id}),
+                        crate::dispatch,
+                    )
+                    .unwrap()["runs"],
+                json!([])
+            );
+            match change {
+                "disabled" => {
+                    service.execute(
+                    json!({"action":"resource_set_enabled","id":id,"expectedRevision":2,"enabled":false}), crate::dispatch,
+                ).unwrap();
+                }
+                "revision" => {
+                    service.execute(
+                    json!({"action":"resource_update","id":id,"expectedRevision":2,"changes":{"notes":"changed while verifying"}}), crate::dispatch,
+                ).unwrap();
+                }
+                "action" => {
+                    let mut changed = definition;
+                    changed["cancellable"] = json!(false);
+                    service.execute(
+                        json!({"action":"resource_action_set","id":id,"expectedRevision":2,"definition":changed}), crate::dispatch_local,
+                    ).unwrap();
+                }
+                "basic" => service.manager.lock().unwrap().basic_mode = true,
+                "cancel" => cancel.store(true, Ordering::Relaxed),
+                _ => unreachable!(),
+            }
+            release(&gate);
+            let error = worker.join().unwrap().unwrap_err();
+            match change {
+                "basic" => assert!(error.contains("基本模式"), "{error}"),
+                "cancel" => assert_eq!(error, CANCELLED),
+                _ => assert!(error.contains("资源或动作已改变"), "{change}: {error}"),
+            }
+            assert_eq!(
+                service
+                    .manager
+                    .lock()
+                    .unwrap()
+                    .resource_runtime
+                    .snapshot(Some(&id))
+                    .unwrap()["runs"],
+                json!([])
+            );
+        }
+    }
+
+    #[test]
+    fn direct_resource_spawn_still_rechecks_executable_contents() {
+        let (_dir, service, request) = spawn_admission_fixture();
+        std::fs::write(
+            &request.definition.executable,
+            b"changed after initial verification",
+        )
+        .unwrap();
+        let manager = service.manager.lock().unwrap();
+        let error = manager.resource_spawn(request).unwrap_err();
+        assert!(error.contains("摘要不一致"), "{error}");
+        assert_eq!(
+            manager.resource_runtime.snapshot(None).unwrap()["runs"],
+            json!([])
+        );
     }
 }

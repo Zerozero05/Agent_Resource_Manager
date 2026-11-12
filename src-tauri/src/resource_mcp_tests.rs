@@ -32,7 +32,13 @@ readline.createInterface({input:process.stdin,crlfDelay:Infinity}).on('line',lin
     calls++;
     const tool=q.params.name, args=q.params.arguments;
     if(!((tool==='browser_tabs'&&JSON.stringify(args)===JSON.stringify({action:'list'}))||(tool==='browser_snapshot'&&JSON.stringify(args)===JSON.stringify({depth:8}))))process.exit(35);
-    if(mode==='timeout'||(mode==='good-then-timeout'&&calls>1))return;
+    if(mode==='timeout')return;
+    if(mode==='good-then-timeout'&&calls>1){
+      const fs=require('node:fs');
+      fs.writeFileSync('mcp-cancel-request-started.tmp',JSON.stringify({pid:process.pid,starts,calls,tool,args}));
+      fs.renameSync('mcp-cancel-request-started.tmp','mcp-cancel-request-started');
+      return;
+    }
     if(mode==='await-marker'){
       const fs=require('node:fs');
       fs.writeFileSync('mcp-request-started','synthetic');
@@ -315,7 +321,8 @@ fn await_terminal_task(service: &Arc<crate::tasks::TaskSystem>, id: &Value) -> V
 #[cfg(windows)]
 #[test]
 fn cancelling_an_actual_task_system_mcp_call_keeps_its_stopped_protocol_result_and_evidence() {
-    let (_dir, service, id) = fixture("good-then-timeout");
+    let session_started = Instant::now();
+    let (dir, service, id) = fixture("good-then-timeout");
     let first = service
         .execute(
             json!({"action":"resource_invoke","id":id,"actionId":"edge-tabs","parameters":{}}),
@@ -323,9 +330,64 @@ fn cancelling_an_actual_task_system_mcp_call_keeps_its_stopped_protocol_result_a
         )
         .unwrap();
     assert_eq!(first["run"]["status"], "succeeded");
+    eprintln!(
+        "MCP cancellation shared session established in {:?}",
+        session_started.elapsed()
+    );
+    let expected_resource = json!(id);
+    let expected_session = first["run"]["sessionId"].clone();
+    let expected_pid = first["run"]["pid"].clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    service
+        .set_resource_events(Arc::new(move |event| {
+            let run = &event["run"];
+            if run["resourceId"] == expected_resource
+                && run["actionId"] == "edge-snapshot"
+                && run["mode"] == "task"
+                && run["status"] == "running"
+                && run["sessionId"] == expected_session
+                && run["pid"] == expected_pid
+            {
+                let _ = ready_tx.send((Instant::now(), run.clone()));
+            }
+        }))
+        .unwrap();
+    // Admission hashes the real Node executable before an MCP call exists. Its
+    // finite preparation budget is the registered action's 40 seconds, separate
+    // from the original eight-second protocol observation and cancellation gates.
+    let preparing = Instant::now();
+    let preparation_deadline = preparing + Duration::from_secs(40);
     let started=service.control(&json!({"action":"start_task","request":{"action":"resource_invoke","id":id,"actionId":"edge-snapshot","parameters":{}}}),crate::dispatch).unwrap().unwrap();
     let task_id = &started["task"]["id"];
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let (running_at, active_run) = ready_rx
+        .recv_timeout(preparation_deadline.saturating_duration_since(Instant::now()))
+        .unwrap_or_else(|error| {
+            panic!(
+                "real MCP call was not ready within its preparation budget: {error}; elapsed {:?}; task {}",
+                preparing.elapsed(),
+                task(&service, task_id)
+            )
+        });
+    assert!(running_at < preparation_deadline);
+    eprintln!(
+        "MCP cancellation preparation took {:?}; protocol observation keeps its eight-second budget",
+        running_at.duration_since(preparing)
+    );
+    let deadline = running_at + Duration::from_secs(8);
+    let receipt_path = dir.path().join("edge/mcp-cancel-request-started");
+    while !receipt_path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the shared Node process did not receive its second tools/call"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["pid"], first["run"]["pid"]);
+    assert_eq!(receipt["starts"], 1);
+    assert_eq!(receipt["calls"], 2);
+    assert_eq!(receipt["tool"], "browser_snapshot");
+    assert_eq!(receipt["args"], json!({"depth":8}));
     loop {
         let runs = service
             .execute(
@@ -333,17 +395,20 @@ fn cancelling_an_actual_task_system_mcp_call_keeps_its_stopped_protocol_result_a
                 crate::dispatch,
             )
             .unwrap();
-        if runs["runs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|run| run["actionId"] == "edge-snapshot" && run["status"] == "running")
-        {
+        assert!(
+            Instant::now() < deadline,
+            "observing the actual in-flight call exceeded its protocol budget: {runs}"
+        );
+        if runs["runs"].as_array().unwrap().iter().any(|run| {
+            run["runId"] == active_run["runId"]
+                && run["actionId"] == "edge-snapshot"
+                && run["status"] == "running"
+        }) {
             break;
         }
-        assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(10));
     }
+    let cancelling = Instant::now();
     service
         .control(
             &json!({"action":"cancel_task","taskId":task_id}),
@@ -352,6 +417,10 @@ fn cancelling_an_actual_task_system_mcp_call_keeps_its_stopped_protocol_result_a
         .unwrap()
         .unwrap();
     let done = await_terminal_task(&service, task_id);
+    assert!(
+        cancelling.elapsed() < Duration::from_secs(8),
+        "cancellation and its terminal task result exceeded eight seconds"
+    );
     assert_eq!(done["status"], "cancelled");
     assert_eq!(done["result"]["run"]["status"], "stopped");
     assert!(done["result"]["run"]["exitCode"].is_null());

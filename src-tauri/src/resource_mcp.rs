@@ -30,7 +30,15 @@ pub(super) fn tool(definition: &ActionDefinition) -> Option<&'static str> {
         _ => None,
     }
 }
+#[cfg(test)]
 pub(super) fn validate(prepared: &PreparedInvocation) -> Result<bool, String> {
+    let protocol = validate_shape(prepared)?;
+    if protocol {
+        crate::resource_adapters::validate_bound_action(&prepared.definition)?;
+    }
+    Ok(protocol)
+}
+pub(super) fn validate_shape(prepared: &PreparedInvocation) -> Result<bool, String> {
     if !matches!(
         prepared.definition.id.as_str(),
         "edge-tabs" | "edge-snapshot"
@@ -40,7 +48,6 @@ pub(super) fn validate(prepared: &PreparedInvocation) -> Result<bool, String> {
     if tool(&prepared.definition).is_none() {
         return Err("Edge 协议调用只允许本地明确接管的固定动作".into());
     }
-    crate::resource_adapters::validate_bound_action(&prepared.definition)?;
     let literals: Option<Vec<_>> = prepared
         .definition
         .args
@@ -248,6 +255,7 @@ pub(super) struct Control {
     session: Mutex<Session>,
 }
 impl Control {
+    #[cfg(test)]
     pub fn spawn(prepared: &PreparedInvocation) -> Result<Self, String> {
         if !validate(prepared)? {
             return Err("不是固定 Edge 协议动作".into());
@@ -259,7 +267,7 @@ impl Control {
             .current_dir(&prepared.definition.working_directory);
         Self::start(command, connection_key(&prepared.definition))
     }
-    fn start(mut command: Command, key: String) -> Result<Self, String> {
+    pub(super) fn start(mut command: Command, key: String) -> Result<Self, String> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

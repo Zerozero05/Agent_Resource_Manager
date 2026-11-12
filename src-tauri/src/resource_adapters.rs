@@ -595,14 +595,32 @@ pub(crate) fn validate_bound_action(definition: &ActionDefinition) -> Result<(),
     }
     Ok(())
 }
+#[cfg(test)]
 pub(crate) fn apply_environment(
+    definition: &ActionDefinition,
+    command: &mut Command,
+) -> Result<(), String> {
+    validate_bound_action(definition)?;
+    apply_environment_options(definition, command)
+}
+pub(crate) fn prepare_verified_command(
+    record: &ResourceRecord,
+    action_id: &str,
+) -> Result<(ActionDefinition, Command), String> {
+    let definition = crate::resource_runtime::verified_definition(record, action_id)?;
+    let mut command = Command::new(&definition.executable);
+    // verified_definition already performed complete adapter validation. This
+    // private environment step cannot create an unverified execution entry.
+    apply_environment_options(&definition, &mut command)?;
+    Ok((definition, command))
+}
+fn apply_environment_options(
     definition: &ActionDefinition,
     command: &mut Command,
 ) -> Result<(), String> {
     let Some(binding) = &definition.adapter_binding else {
         return Ok(());
     };
-    validate_bound_action(definition)?;
     match binding.adapter.as_str() {
         REACH => {
             let mut paths = vec![Path::new(&binding.root_path).join("Scripts")];

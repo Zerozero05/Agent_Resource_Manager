@@ -783,7 +783,18 @@ impl Manager {
         if let Some(runtime) = &self.runtime {
             return runtime.resource_spawn(request);
         }
-        // This check and spawn share the live manager lock with disable/configuration writes.
+        let record = self.resource_spawn_record(&request)?;
+        let prepared = crate::resource_runtime::prepare_spawn(record, request)?;
+        self.resource_spawn_prepared(prepared)
+    }
+
+    pub(crate) fn resource_spawn_record(
+        &self,
+        request: &crate::resource_runtime::PreparedInvocation,
+    ) -> Result<crate::resources::ResourceRecord, String> {
+        if self.basic_mode {
+            return Err("基本模式暂停第三方工具启动".into());
+        }
         let record: crate::resources::ResourceRecord =
             serde_json::from_value(self.resource_store(crate::resources::StoreRequest::Get(
                 request.resource_id.clone(),
@@ -792,13 +803,26 @@ impl Manager {
         if !record.enabled || record.revision != request.revision {
             return Err("资源或动作已改变，请重新读取后调用".into());
         }
-        let current_definition =
-            crate::resource_runtime::verified_definition(&record, &request.definition.id)?;
-        if serde_json::to_value(&current_definition).map_err(|e| e.to_string())?
-            != serde_json::to_value(&request.definition).map_err(|e| e.to_string())?
-        {
-            return Err("资源或动作已改变，请重新读取后调用".into());
+        Ok(record)
+    }
+
+    pub(crate) fn resource_spawn_prepared(
+        &self,
+        prepared: crate::resource_runtime::PreparedSpawn,
+    ) -> Result<Value, String> {
+        if self.basic_mode {
+            return Err("基本模式暂停第三方工具启动".into());
         }
+        if self.runtime.is_some() {
+            return Err("最终进程准入必须由当前管理器核对".into());
+        }
+        // Only cheap live admission and spawn share this lock with disable/configuration writes.
+        let record: crate::resources::ResourceRecord =
+            serde_json::from_value(self.resource_store(crate::resources::StoreRequest::Get(
+                prepared.resource_id().to_owned(),
+            ))?)
+            .map_err(|e| e.to_string())?;
+        prepared.admit(&record)?;
         let eligibility = self.scene_store(crate::resource_scenes::StoreRequest::Eligibility(
             crate::resource_relations::Endpoint {
                 kind: "tool".into(),
@@ -840,7 +864,7 @@ impl Manager {
             }
         }
         self.resource_runtime
-            .spawn(request, dependencies.into_iter().collect())
+            .spawn_prepared(prepared, dependencies.into_iter().collect())
     }
     pub fn save(&self) -> Result<(), String> {
         if self.basic_mode {
