@@ -9,7 +9,7 @@ const modules = new Map<string, Promise<string>>();
 async function moduleURL(url: URL): Promise<string> {
   const cached = modules.get(url.href); if (cached) return cached;
   const loading = (async () => {
-    let code = ts.transpileModule(await readFile(url, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+    let code = ts.transpileModule(await readFile(url, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, jsx: ts.JsxEmit.ReactJSX } }).outputText.replace(/import\s+['"][^'"]+\.css['"];?/g, '');
     const replacements = new Map<string, string>();
     for (const match of code.matchAll(/from\s+(['"])([^'"]+)\1/g)) {
       const value = match[2];
