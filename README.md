@@ -8,6 +8,8 @@ Windows-first desktop manager for local and GitHub Agent Skills and independent 
 
 正在准备的新候选减少任务进度的重复读取：优先使用进度通知，无通知时仍补查，完成后读取完整结果。相关组件与任务检查已通过，尚未以此宣称原生内存收敛；当前可用6c和既有数据保持。[本轮修改](CHANGELOG.md#task-events-native-controls-20261112)
 
+完整开发源码已同步到 [codex/agent-resource-manager 分支](https://github.com/Zerozero05/Agent_Resource_Manager/tree/codex/agent-resource-manager)，正式分支和既有发行保留。GitHub构建检查与本机原生验收分别记录，源码同步不代表完整验收或新版本发行。[源码与检查记录](CHANGELOG.md#source-ci-exit-20261112)
+
 程序、管理数据、缓存和导出的位置可在设置中查看和调整；未改路径的新便携包将管理数据保存在程序目录。既有Skill与工具不自动迁移。下述本机路径均为部署示例，不是其他用户的固定安装要求。
 
 最新正式发行版本为 **v0.2.11**，修复说明更新长期停留待办、旧自动文件范围和脚本参数误判，并精简变化页的批量选择。界面使用中文。应用版本以 `package.json` 为界面与打包版本来源。
@@ -192,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 开发源码同步与检查修复 | 2026-11-12 | 1、405项源码同步到开发分支并逐一核对远端文件内容及模式，正式分支保持。[详情](CHANGELOG.md#source-ci-exit-20261112)<br>2、修正预期拒绝案例遗留的脚本退出状态；原12项断言和真实负向失败验证通过，云端构建继续单独核验。[详情](CHANGELOG.md#source-ci-exit-20261112) |
 | 任务进度与原生控件（内部验证） | 2026-11-12 | 1、进度通知直接推进任务，仅无通知700ms时补查，保留完整终态结果；45项相关任务及组件检查通过。[详情](CHANGELOG.md#task-events-native-controls-20261112)<br>2、验收助手使用单次原生激活、数值控件优先严格RangeValue接口；75项边界检查及离线编译通过，原生效果待验。[详情](CHANGELOG.md#task-events-native-controls-20261112) |
 | 说明读取与中文输入（内部审阅） | 2026-11-12 | 1、读取说明时不复制无关更新预览，其他动作保持完整校验；2项专项和8项直接回归通过。[详情](CHANGELOG.md#document-preview-copy-20261112)<br>2、6c候选文档100次实测P95为148.2598ms，达到原200ms目标；一次1061.8325ms慢样本及附加最大延迟失败保留。[详情](CHANGELOG.md#document-preview-native-20261112)<br>3、真实拼音输入转换及正常退出恢复通过；安装／便携包完成离线内容核对，持续运行与其余原生范围分别记录。[详情](CHANGELOG.md#document-preview-native-20261112) |
 | 大清单原生更新与离线包（内部审阅） | 2026-11-12 | 1、4098项实际预览和候选准备完成，原运行文件保持。[详情](CHANGELOG.md#native-update-6a-20261112)<br>2、保留首次说明436.6527ms原目标失败及6样本范围，游戏输入服务已恢复。[详情](CHANGELOG.md#native-update-6a-20261112)<br>3、6a两包离线解包及当前正式数据核对完成，未公开发行。[详情](CHANGELOG.md#native-update-6a-20261112) |

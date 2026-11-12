@@ -101,3 +101,5 @@ foreach ($paths in @(@(), @('README.md'), @('README.md', 'CHANGELOG.md'))) {
 [IO.File]::WriteAllText((Join-Path $root 'results.json'), ($results | ConvertTo-Json -Depth 4), $utf8)
 $results | Format-Table -AutoSize
 "Evidence: $root"
+# Expected rejection cases leave a native nonzero code; all assertions above passed.
+exit 0
