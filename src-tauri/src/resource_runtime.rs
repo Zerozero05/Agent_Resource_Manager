@@ -1794,19 +1794,39 @@ mod tests {
             .unwrap()
             .contains("SYNTHETIC_OUTPUT_NOT_FOR_DATABASE"));
     }
+    struct UnrelatedWaitChild(Child);
+    impl UnrelatedWaitChild {
+        fn spawn() -> Self {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "resource_runtime::tests::synthetic_wait",
+                    "--ignored",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x08000000);
+            }
+            Self(command.spawn().unwrap())
+        }
+    }
+    impl Drop for UnrelatedWaitChild {
+        fn drop(&mut self) {
+            if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
     #[test]
     fn service_stop_uses_own_handle_and_is_available_after_disable() {
         let (_fixture, service, id) = setup("service", "synthetic_wait");
-        let mut unrelated = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "resource_runtime::tests::synthetic_wait",
-                "--ignored",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
         let run = service
             .execute(
                 json!({"action":"resource_invoke","id":id,"actionId":"test"}),
@@ -1814,6 +1834,8 @@ mod tests {
             )
             .unwrap()["run"]
             .clone();
+        assert_eq!(run["status"], "running");
+        let mut unrelated = UnrelatedWaitChild::spawn();
         service.execute(json!({"action":"resource_set_enabled","id":id,"expectedRevision":2,"enabled":false}),crate::dispatch).unwrap();
         let stopped = service
             .execute(
@@ -1822,9 +1844,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stopped["run"]["status"], "stopped");
-        assert!(unrelated.try_wait().unwrap().is_none());
-        unrelated.kill().unwrap();
-        unrelated.wait().unwrap();
+        assert!(unrelated.0.try_wait().unwrap().is_none());
+        unrelated.0.kill().unwrap();
+        unrelated.0.wait().unwrap();
         assert!(service
             .execute(
                 json!({"action":"resource_stop","runId":"not-owned","pid":1}),
@@ -1835,16 +1857,6 @@ mod tests {
     #[test]
     fn complete_exit_stops_owned_services_and_keeps_unrelated_processes() {
         let (_fixture, service, id) = setup("service", "synthetic_wait");
-        let mut unrelated = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "resource_runtime::tests::synthetic_wait",
-                "--ignored",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
         let run = service
             .execute(
                 json!({"action":"resource_invoke","id":id,"actionId":"test"}),
@@ -1852,6 +1864,8 @@ mod tests {
             )
             .unwrap()["run"]
             .clone();
+        assert_eq!(run["status"], "running");
+        let mut unrelated = UnrelatedWaitChild::spawn();
         let result = service
             .execute(json!({"action":"prepare_close"}), crate::dispatch)
             .unwrap();
@@ -1866,9 +1880,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status["run"]["status"], "stopped");
-        assert!(unrelated.try_wait().unwrap().is_none());
-        unrelated.kill().unwrap();
-        unrelated.wait().unwrap();
+        assert!(unrelated.0.try_wait().unwrap().is_none());
+        unrelated.0.kill().unwrap();
+        unrelated.0.wait().unwrap();
     }
     #[test]
     fn stop_bypasses_running_task_lock_and_nonzero_exit_is_failed() {

@@ -553,20 +553,64 @@ fn synthetic_failure() {
 }
 #[test]
 #[ignore = "Only an isolated subprocess fixture"]
-fn synthetic_wait() {
-    std::thread::sleep(Duration::from_secs(15));
-}
-#[test]
-#[ignore = "Only an isolated subprocess fixture"]
 fn synthetic_excess() {
     for _ in 0..100 {
         println!("{}", "z".repeat(1024));
     }
 }
+
+fn native_wait_fixture(root: &Path) -> PathBuf {
+    let source = root.join("probe_wait.rs");
+    let executable = root.join("probe-wait.exe");
+    fs::write(
+        &source,
+        "fn main() { std::thread::sleep(std::time::Duration::from_secs(15)); }\n",
+    )
+    .unwrap();
+    let mut compiler = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()));
+    compiler
+        .current_dir(root)
+        .args([
+            "--edition=2021",
+            "--crate-name",
+            "probe_wait_fixture",
+            "-C",
+            "debuginfo=0",
+        ])
+        .arg(&source)
+        .arg("-o")
+        .arg(&executable);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        compiler.creation_flags(0x08000000);
+        if let Some(linker) = std::env::var_os("CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER") {
+            compiler
+                .arg("-C")
+                .arg(format!("linker={}", PathBuf::from(linker).display()));
+        }
+        compiler.args(["-C", "link-arg=/DEBUG:NONE"]);
+    }
+    let output = compiler
+        .output()
+        .expect("Use the existing development Rust toolchain; no dependency is installed");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    executable
+}
+
 #[test]
 fn process_output_is_bounded_errors_are_private_and_timeout_stops_only_own_child() {
     let directory = fixture();
+    let profile_started = Instant::now();
     let profile = ProbeProfile::new(directory.path()).unwrap();
+    eprintln!(
+        "probe-phase profile_setup_ms={}",
+        profile_started.elapsed().as_millis()
+    );
     let output = run(&helper("synthetic_echo", Duration::from_secs(8)), &profile).unwrap();
     assert!(output.contains("SYNTHETIC_PROBE_OUTPUT_NEVER_PERSISTED"));
     let err = run(
@@ -580,24 +624,49 @@ fn process_output_is_bounded_errors_are_private_and_timeout_stops_only_own_child
         &profile
     )
     .is_err());
-    let mut unrelated = Command::new(std::env::current_exe().unwrap())
-        .args(helper("synthetic_wait", Duration::from_secs(8)).args)
+    // Process timeout/ownership needs a real native child, not a second copy of
+    // this large debug test binary. Compilation is outside the original bound.
+    let executable = native_wait_fixture(directory.path());
+    let unrelated_prepare = Instant::now();
+    let mut unrelated_command = Command::new(&executable);
+    unrelated_command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        unrelated_command.creation_flags(0x08000000);
+    }
+    let mut unrelated = OwnedChild(unrelated_command.spawn().unwrap());
+    eprintln!(
+        "probe-phase unrelated_start_ms={}",
+        unrelated_prepare.elapsed().as_millis()
+    );
     let start = Instant::now();
-    assert!(run(
-        &helper("synthetic_wait", Duration::from_millis(150)),
-        &profile
-    )
-    .unwrap_err()
-    .contains("超时"));
+    let timeout_probe = ProbeCommand {
+        expected_hash: resource_files::fingerprint(&executable).unwrap().sha256,
+        executable,
+        directory: directory.path().to_owned(),
+        args: vec![],
+        python: false,
+        timeout: Duration::from_millis(150),
+    };
+    let helper_elapsed = start.elapsed();
+    let run_started = Instant::now();
+    let result = run(&timeout_probe, &profile);
+    eprintln!(
+        "probe-phase executable_bytes={} timeout_helper_ms={} full_run_ms={} overall_ms={}",
+        fs::metadata(&timeout_probe.executable).unwrap().len(),
+        helper_elapsed.as_millis(),
+        run_started.elapsed().as_millis(),
+        start.elapsed().as_millis()
+    );
+    assert!(result.unwrap_err().contains("超时"));
     assert!(start.elapsed() < Duration::from_secs(5));
-    assert!(unrelated.try_wait().unwrap().is_none());
-    unrelated.kill().unwrap();
-    unrelated.wait().unwrap();
+    assert!(unrelated.0.try_wait().unwrap().is_none());
+    unrelated.0.kill().unwrap();
+    unrelated.0.wait().unwrap();
 }
 
 #[test]
