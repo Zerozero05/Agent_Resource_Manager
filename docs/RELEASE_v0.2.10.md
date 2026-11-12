@@ -19,7 +19,7 @@ Skill Manager 是面向 Windows 的本地与 GitHub Agent Skills 管理器：每
 | `USER_GUIDE.md` | 使用与故障处理指南。 |
 | `RELEASE_NOTES.md` | 本发行说明。 |
 
-[发行页与附件](https://github.com/Zerozero05/Skill_Manager/releases/tag/v0.2.10) · [公开仓库](https://github.com/Zerozero05/Skill_Manager)
+[发行页与附件](https://github.com/Zerozero05/Agent_Resource_Manager/releases/tag/v0.2.10) · [公开仓库](https://github.com/Zerozero05/Agent_Resource_Manager)
 
 便携包与安装器使用同一份已验 EXE，程序 SHA256 为 `b8449fd56195ff0005e271f52fbf4bed096d40d4788228a5b0f3f0728b2771ad`。程序需要现有 Microsoft Edge WebView2 Runtime；附件不包含个人数据库、令牌、私人 Skill 或本机维护资料。
 
@@ -32,7 +32,7 @@ Skill Manager 是面向 Windows 的本地与 GitHub Agent Skills 管理器：每
 
 ## 验证与局限
 
-- [Windows 检查 run40306926235](https://github.com/Zerozero05/Skill_Manager/actions/runs/40306926235)通过：174 项前端、382 项 Rust、TypeScript／Vite、fmt、Clippy、Windows 优化构建与候选打包。测试提交 `ace98b0d6460504072499df32e46ccd53ed6d4a6` 与候选构建 `caa94532aa9e8e57f284adc7a3de4a49dd92e3d7` 的源码树相同。
+- [Windows 检查 run40306926235](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/40306926235)通过：174 项前端、382 项 Rust、TypeScript／Vite、fmt、Clippy、Windows 优化构建与候选打包。测试提交 `ace98b0d6460504072499df32e46ccd53ed6d4a6` 与候选构建 `caa94532aa9e8e57f284adc7a3de4a49dd92e3d7` 的源码树相同。
 - 三主题、14／22px、80%／160%缩放、1000／600／320px容器共36组实际布局检查通过，无横向溢出或列表行重叠，显示切换未产生业务请求；18px／100%另行视觉核对。
 - 原生 Windows 实测覆盖逐行列表、全选和批量恢复、菜单、取消改名回焦点、暂停目录手动检查、正常关闭及完整列表滚动。候选切换时17个 Skill、139个文件摘要、16个连接及原设置独立读回一致。
 - 云端仅重新打包已验 EXE，禁止打包时修改程序字节；NSIS 完整性测试、解包及内部 EXE 摘要核对通过，便携 ZIP、源码 ZIP 与成员摘要分别核验。发行源码提交以 `SOURCE_MANIFEST.json` 为准；后续差异仅限文档和发行打包层。
@@ -41,4 +41,4 @@ Skill Manager 是面向 Windows 的本地与 GitHub Agent Skills 管理器：每
 
 ## 许可与来源
 
-项目自身尚未指定开源许可证，公开源码不等于授予 MIT 等额外使用许可。第三方许可随程序保留，见 [THIRD_PARTY_NOTICES](https://github.com/Zerozero05/Skill_Manager/blob/v0.2.10/docs/THIRD_PARTY_NOTICES.txt) 与[来源记录](https://github.com/Zerozero05/Skill_Manager/blob/v0.2.10/docs/SOURCES.md)。本次列表优化和发行准备复用已有组件与官方打包工具，没有复制新的第三方管理器代码。
+项目自身尚未指定开源许可证，公开源码不等于授予 MIT 等额外使用许可。第三方许可随程序保留，见 [THIRD_PARTY_NOTICES](https://github.com/Zerozero05/Agent_Resource_Manager/blob/v0.2.10/docs/THIRD_PARTY_NOTICES.txt) 与[来源记录](https://github.com/Zerozero05/Agent_Resource_Manager/blob/v0.2.10/docs/SOURCES.md)。本次列表优化和发行准备复用已有组件与官方打包工具，没有复制新的第三方管理器代码。

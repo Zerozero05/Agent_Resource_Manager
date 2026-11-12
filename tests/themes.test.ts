@@ -64,9 +64,31 @@ test('theme identity and palette authority remain separate from fonts, scale and
     const css = source(name);
     assert(!/--(?:page|surface|text|accent|control-line|on-accent)\s*:/.test(css), `${name} redefines the central palette`);
   }
-  assert.equal(resolve(themes.dark, '--page'), '#181818');
-  assert.equal(resolve(themes.dark, '--sidebar'), '#1c1a1e');
-  assert.equal(resolve(themes.dark, '--surface'), '#242424');
-  assert.equal(resolve(themes.dark, '--input'), '#363636');
+  assert.equal(resolve(themes.dark, '--page'), '#1c1d20');
+  assert.equal(resolve(themes.dark, '--sidebar'), '#17181b');
+  assert.equal(resolve(themes.dark, '--surface'), '#24262a');
+  assert.equal(resolve(themes.dark, '--input'), '#2b2e34');
   assert(!/font(?:-size|-family|-weight)?\s*:|--ui-(?:zoom|font-size)\s*:/.test(themeCss), 'Theme colors do not override saved typography or scale');
+});
+
+test('every theme and accent pair preserves readable selection, focus and primary controls', () => {
+  const accentBlocks = [...themeCss.matchAll(/:root(?:\[data-theme=(\w+)\])?\[data-accent=(\w+)\]\s*\{([^}]+)\}/g)];
+  for (const [theme, themePalette] of Object.entries(themes)) {
+    for (const accent of ['violet', 'blue', 'teal', 'rose']) {
+      const generic = accentBlocks.find(block => !block[1] && block[2] === accent);
+      const specific = accentBlocks.find(block => block[1] === theme && block[2] === accent);
+      assert(generic, `Missing ${accent} accent`);
+      if (theme !== 'light') assert(specific, `Missing ${theme} ${accent} palette`);
+      const palette = { ...themePalette, ...declarations(generic[3]), ...declarations(specific?.[3] || '') };
+      for (const surface of ['--page', '--sidebar', '--surface', '--surface-soft', '--surface-raised', '--input', '--hover', '--selected', '--accent-light']) {
+        const background = resolve(palette, surface);
+        atLeast(resolve(palette, '--text'), background, 7, `${theme} ${accent} body on ${surface}`);
+        atLeast(resolve(palette, '--text-secondary'), background, 4.5, `${theme} ${accent} metadata on ${surface}`);
+        atLeast(resolve(palette, '--accent'), background, 3, `${theme} ${accent} focus on ${surface}`);
+        atLeast(resolve(palette, '--control-line'), background, 3, `${theme} ${accent} control on ${surface}`);
+      }
+      for (const fill of ['--accent', '--accent-dark']) atLeast(resolve(palette, '--on-accent'), resolve(palette, fill), 7, `${theme} ${accent} button`);
+      for (const tone of ['good', 'warn', 'bad', 'info']) assert.equal(palette[`--${tone}`], themePalette[`--${tone}`], 'accent must not recolor semantic states');
+    }
+  }
 });

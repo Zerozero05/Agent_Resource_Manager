@@ -1,16 +1,24 @@
-# Skill Manager
+# Agent Resource Manager
 
-Windows-first desktop manager for local and GitHub Agent Skills. Keep one runtime folder per skill, read full documentation from its source, and connect existing AI clients to the same files.
+Windows-first desktop manager for local and GitHub Agent Skills and independent agent tools. Keep one runtime folder per skill, preserve tools in their original locations, and share registered actions through the desktop and local MCP backend.
+
+**开发预览：v0.3.0-dev.1，尚未公开发行。** 在现有 Skill 管理基础上增加工具登记、受管动作、安装包文件预览、分级卸载、配置导入导出、维护窗口、场景和统一快捷入口。资源保持原位，GUI 与本地 MCP 共用后台；现有功能与数据继续保留。[开发预览说明](docs/RELEASE_v0.3.0-dev.1.md)
+
+当前6c候选已完成相关功能检查、Windows构建和离线包内容核对，并在本机恢复使用。文档100次原生交互P95为148.2598ms，原200ms目标通过；最大1061.8325ms的慢样本仍保留。真实中文输入已通过；原30分钟压力检查没有崩溃，但内存收敛未达原定标准。其余原生与后台负载范围分别记录，尚不能宣告完整验收结束。[当前验证范围](CHANGELOG.md#document-preview-native-20261112)
+
+正在准备的新候选减少任务进度的重复读取：优先使用进度通知，无通知时仍补查，完成后读取完整结果。相关组件与任务检查已通过，尚未以此宣称原生内存收敛；当前可用6c和既有数据保持。[本轮修改](CHANGELOG.md#task-events-native-controls-20261112)
+
+程序、管理数据、缓存和导出的位置可在设置中查看和调整；未改路径的新便携包将管理数据保存在程序目录。既有Skill与工具不自动迁移。下述本机路径均为部署示例，不是其他用户的固定安装要求。
 
 最新正式发行版本为 **v0.2.11**，修复说明更新长期停留待办、旧自动文件范围和脚本参数误判，并精简变化页的批量选择。界面使用中文。应用版本以 `package.json` 为界面与打包版本来源。
 
-[公开仓库](https://github.com/Zerozero05/Skill_Manager) · [v0.2.11 下载与校验](https://github.com/Zerozero05/Skill_Manager/releases/tag/v0.2.11) · [使用指南](docs/USER_GUIDE.md) · [发行说明](docs/RELEASE_v0.2.11.md)
+[公开仓库](https://github.com/Zerozero05/Agent_Resource_Manager) · [v0.2.11 下载与校验](https://github.com/Zerozero05/Agent_Resource_Manager/releases/tag/v0.2.11) · [使用指南](docs/USER_GUIDE.md) · [发行说明](docs/RELEASE_v0.2.11.md)
 
 本版通过183项前端、389项Rust检查及Windows构建；原生变化页、选择快捷键、宽窄分栏和重启保持已验证。便携包、安装器与源码分别提供，附件摘要和验证边界见[发行说明](docs/RELEASE_v0.2.11.md)。
 
 Windows x64 用户可选择便携 ZIP 或安装包；源码 ZIP 用于开发与维护，具体文件和校验摘要以发行页为准。程序需要 Microsoft Edge WebView2 Runtime。
 
-当前便携包的 `data-directory.txt` 为 `.`，新使用时把管理数据保存在程序同目录。升级既有安装时保留原数据目录与自定义路径侧文件，不用通用包的默认路径覆盖原设置。安装器与便携包包含同一份已验 EXE；安装器内容已解包核验，安装向导尚未实际运行。
+v0.2.11 便携包的 `data-directory.txt` 为 `.`，新使用时把管理数据保存在程序同目录。升级既有安装时保留原数据目录与自定义路径侧文件，不用通用包的默认路径覆盖原设置。安装器与便携包包含同一份已验 EXE；安装器内容已解包核验，安装向导尚未实际运行。
 
 **许可状态：** 项目自身尚未指定开源许可证，公开源码不等于授予 MIT 等额外使用许可；第三方依赖继续遵循各自许可证，详见 [THIRD_PARTY_NOTICES](docs/THIRD_PARTY_NOTICES.txt) 和 [来源记录](docs/SOURCES.md)。
 
@@ -55,11 +63,13 @@ Windows x64 用户可选择便携 ZIP 或安装包；源码 ZIP 用于开发与�
 - 外部依赖分开显示用途、引用类型、本地与已关联 GitHub 固定提交的可用性和实际采用来源；精确路径自动核对，重名候选明确选择，不按文件名猜测。支持搜索、批量改用途／绑定／重新映射／复核；自身链接和包内文件去重，命令不误报缺失文件。
 - ZIP 默认包含必要包内文件及明确必要的普通外部资源；可选包内与可选外部文件默认不选，远端独有文件及选定外部资源直接进入最终 ZIP，不新增本地副本、侧文件或临时目录。默认Skill名.zip。
 - Ctrl＋Z或侧栏撤销按钮连续撤销本次运行最近20步分类／收藏操作；输入框保留文字撤销，文件操作和显示设置不进入该历史。
-- 浅灰白日间、炭黑夜间和较低亮度的暖灰米色护眼外观；Ctrl＋滚轮调整80%–160%整体缩放，Ctrl＋0恢复100%，字号独立；主题、字号与缩放在各窗口共用。
+- 冷灰日间、分层石墨灰夜间和较低亮度的暖灰绿护眼外观；Ctrl＋滚轮调整80%–160%整体缩放，Ctrl＋0恢复100%，字号独立；主题、字号与缩放在各窗口共用。
 
 ## 使用
 
-启动 `skill-manager.exe`。默认数据目录为程序旁的 `Skill_Manager_Data`；可通过 `--data-dir <绝对路径>` 或 `SKILL_MANAGER_DATA_DIR` 指定其他目录。数据目录只保存设置、来源、SQLite 状态及必要恢复材料，不作为第二套 Skill 来源。
+v0.3 开发预览可从运行包中的 `app\agent-resource-manager.exe` 或启动脚本打开。本机示例安装位置为 `D:\03_github_projects\Agent_Resource_Manager`，管理数据在其 `data` 子目录；已有入口继续使用同一份数据。旧正式版 v0.2.11 的程序名为 `skill-manager.exe`。
+
+可通过 `--data-dir <绝对路径>` 或 `SKILL_MANAGER_DATA_DIR` 指定数据目录。未配置路径的新预览默认使用程序所在目录，检测到已有旧版数据时沿用旧库。数据目录保存设置、来源、SQLite 状态及必要恢复材料。
 
 也可在程序旁放置 `data-directory.txt`，写入一行数据目录路径。优先级：命令参数、环境变量、该文件、默认目录。相对路径以程序所在目录为起点；无效侧文件会明确失败，不静默创建另一套数据。
 
@@ -72,7 +82,7 @@ Windows x64 用户可选择便携 ZIP 或安装包；源码 ZIP 用于开发与�
 7. 在侧栏分类区创建分类，将行首拖动柄拖到分类中，或勾选后使用“归入分类”。拖动已勾选项携带本页勾选项，拖动其他项只归类该项；可撤销最近一次归类。
 8. 在 **客户端** 切换目标工具，用顶部“连接 Skill”搜索并多选。详情区分客户端入口与真实 Skill 目录；C 盘用户入口可以只是指向 D 盘原件的轻量链接，不代表复制了文件。
 9. 长操作可在后台继续，侧栏固定的“操作记录”入口先显示简短摘要，明确查看全部或详情才打开复用标签页，不挤占分类。记录可搜索、筛选、查看结果或回到相关 Skill／客户端；目标已在其他窗口时定位该页。取消只在允许的阶段停止；远端提交等已进入写入的阶段等待完成，不自动重放。
-10. 用标签栏“移至独立窗口”或把业务标签拖出窗口；在独立窗口用“移回主窗口”返回。Ctrl＋Tab／Ctrl＋Shift＋Tab切换标签，Ctrl＋W关闭当前业务标签；工作台始终保留。关闭一个窗口仅关闭该窗口；关闭最后一个窗口或“退出全部窗口”才处理全局任务、保存并退出。
+10. 用标签栏“移至独立窗口”或把业务标签拖出窗口；在独立窗口用“移回主窗口”返回。Ctrl＋Tab／Ctrl＋Shift＋Tab切换标签，Ctrl＋W关闭当前业务标签；工作台始终保留。关闭一个窗口仅关闭该窗口。v0.2.11 关闭最后一个窗口或“退出全部窗口”会保存并退出；开发版关闭界面保留后台任务，使用“完全退出管理器”协调保存并停止后台。
 
 “选择本页全部 Skill”和“检查所选”仅作用于当前页的勾选项；筛选或翻页会清空选择，不会批量应用更新。
 
@@ -81,6 +91,14 @@ Windows x64 用户可选择便携 ZIP 或安装包；源码 ZIP 用于开发与�
 “创建令牌”打开GitHub的细粒度访问令牌页面，预填名称、30天有效期、资源所有者及读取／写入权限；在GitHub仅选择目标仓库，再生成并粘贴回管理器。访问令牌不是SSH公钥，不填写到SSH／Deploy keys表单。创建页面打不开时，可用旁边的“复制创建链接”；反馈在凭据区就地显示。
 
 详细操作、故障与恢复：[用户指南](docs/USER_GUIDE.md)。
+
+### 在 Codex 中调用
+
+在 Codex 的本地工具配置中，将命令指向实际安装位置的 `app\agent-resource-manager.exe`，参数为 `--mcp`。本机已完成工具发现和登记动作调用；其他电脑按自己的安装位置配置。
+
+管理器需要先运行。后台未运行时，查询只返回不可用，不会自行启动。收到任务编号后，用 `task_get` 读取结果，避免重复提交。执行入口更新后，先在本地界面预览变化并重新核对；目录登记与具体动作验证分别显示。
+
+浏览器操控服务使用官方名称 **Playwright MCP**，服务名为 `playwright`。本机工具容器为 `D:\03_github_projects\Browser_Tools`，现行配置和管理器路径已同步。旧目录及入口迁移、共享运行文件重新核对和CLI版本实测记录见[迁移记录](CHANGELOG.md#browser-underscore-final-20261112)；CLI调用成功不代表网页、登录或所有浏览器功能都已验证。
 
 ## 数据和兼容边界
 
@@ -100,7 +118,7 @@ Windows x64 用户可选择便携 ZIP 或安装包；源码 ZIP 用于开发与�
 
 GitHub 未登录访问受公开请求额度限制；达到限制时保留原文件与状态并显示检查失败，可稍后重试或配置仓库令牌。默认只监视添加URL对应的目录，重新添加URL可以扩大范围。
 
-首版支持 Windows；不含内置编辑器、依赖／模型自动安装、MCP服务和跨设备同步。程序升级与 Skill 更新分开处理。
+正式v0.2.11支持Windows，不含内置编辑器、依赖／模型自动安装、MCP服务和跨设备同步。当前v0.3开发版已增加本地MCP及受管工具安装／更新；未登记的Skill依赖或模型不会自动安装。程序升级与Skill更新分开处理。
 
 ## 开发
 
@@ -143,7 +161,7 @@ v0.2.3通过313项Rust测试、62项Node测试、TypeScript／Vite、格式与Cl
 - 修复中文连续句子的模板路径误识别、已绑定仍显示缺失及旧审计缓存；不改变 Skill 原文或伪造调用成功。
 - 缓存内容先显示，检查在后台排队；仅对变化范围重新核对。必要／可选／外部／GitHub 独有 ZIP 行为保持。
 
-该候选当时的[Windows 云端检查](https://github.com/Zerozero05/Skill_Manager/actions/runs/40234426260)已通过：171项前端测试、382项Rust测试（含单次检查空选择字段的入口回归）及构建／静态检查，候选14个文件摘要核对通过。对应源码为 `182c92afe43cc1663a7cb815ad76dd98c7a50283`。最终本机复验确认手动检查不再报错且保持手动，不完整Skill不会导入、补完整后约914 ms自动导入，引用页无原误报；EXE已原位部署，真实17个Skill／139个文件／16个链接及既有资料核对保持。缓存说明129 ms、文件128 ms是单次同机观测，不能代表网络首次读取；真实私库写入与三个客户端实际调用尚未验证。此候选未单独发行，现已并入 v0.2.10。
+该候选当时的[Windows 云端检查](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/40234426260)已通过：171项前端测试、382项Rust测试（含单次检查空选择字段的入口回归）及构建／静态检查，候选14个文件摘要核对通过。对应源码为 `182c92afe43cc1663a7cb815ad76dd98c7a50283`。最终本机复验确认手动检查不再报错且保持手动，不完整Skill不会导入、补完整后约914 ms自动导入，引用页无原误报；EXE已原位部署，真实17个Skill／139个文件／16个链接及既有资料核对保持。缓存说明129 ms、文件128 ms是单次同机观测，不能代表网络首次读取；真实私库写入与三个客户端实际调用尚未验证。此候选未单独发行，现已并入 v0.2.10。
 
 ## 前一候选 v0.2.8
 
@@ -168,12 +186,71 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 保留原44项验收门槛并明确新增6项，共50项；三主题、大字号／缩放、640窄窗、320分栏、真实滚轮末项、目录目标与高亮、稳定折叠、摘要复用及默认／自定义选择均在同一最终程序核对。快捷键零业务请求、边缘翻转与键盘滚动，实心分类文字、色面、悬停／选中／拖动以及原生标题栏分别留证。132个构建／测试输入绑定成功日志及debug、优化版和NSIS字节；原生证据明确区分真实业务、受控呈现和系统对话框边界。原16个Skill、129个文件、5分类及成员、收藏、16个客户端入口和全部已保存设置独立读回。
 
-未验证安装向导、系统保存对话框视觉、真实私库写入、模型实际调用、真实GitHub／VPN速度及其他电脑。云端 CI 结果以 [Windows checks 的实际运行](https://github.com/Zerozero05/Skill_Manager/actions/workflows/check.yml) 为准，不与上述本机验证混用。
+未验证安装向导、系统保存对话框视觉、真实私库写入、模型实际调用、真实GitHub／VPN速度及其他电脑。云端 CI 结果以 [Windows checks 的实际运行](https://github.com/Zerozero05/Agent_Resource_Manager/actions/workflows/check.yml) 为准，不与上述本机验证混用。
 
 ## 更新记录
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 任务进度与原生控件（内部验证） | 2026-11-12 | 1、进度通知直接推进任务，仅无通知700ms时补查，保留完整终态结果；45项相关任务及组件检查通过。[详情](CHANGELOG.md#task-events-native-controls-20261112)<br>2、验收助手使用单次原生激活、数值控件优先严格RangeValue接口；75项边界检查及离线编译通过，原生效果待验。[详情](CHANGELOG.md#task-events-native-controls-20261112) |
+| 说明读取与中文输入（内部审阅） | 2026-11-12 | 1、读取说明时不复制无关更新预览，其他动作保持完整校验；2项专项和8项直接回归通过。[详情](CHANGELOG.md#document-preview-copy-20261112)<br>2、6c候选文档100次实测P95为148.2598ms，达到原200ms目标；一次1061.8325ms慢样本及附加最大延迟失败保留。[详情](CHANGELOG.md#document-preview-native-20261112)<br>3、真实拼音输入转换及正常退出恢复通过；安装／便携包完成离线内容核对，持续运行与其余原生范围分别记录。[详情](CHANGELOG.md#document-preview-native-20261112) |
+| 大清单原生更新与离线包（内部审阅） | 2026-11-12 | 1、4098项实际预览和候选准备完成，原运行文件保持。[详情](CHANGELOG.md#native-update-6a-20261112)<br>2、保留首次说明436.6527ms原目标失败及6样本范围，游戏输入服务已恢复。[详情](CHANGELOG.md#native-update-6a-20261112)<br>3、6a两包离线解包及当前正式数据核对完成，未公开发行。[详情](CHANGELOG.md#native-update-6a-20261112) |
+| 浏览器目录与入口收尾（文档同步，未发布） | 2026-11-12 | 1、精确移除旧BrowserTools兼容联接，保留Browser_Tools实体。[本次完整记录](CHANGELOG.md#browser-underscore-final-20261112)<br>2、共享Node更新后通过真实界面重新核对同路径摘要，4个动作及新根路径保持。[本次完整记录](CHANGELOG.md#browser-underscore-final-20261112)<br>3、同ID revision8登记CLI版本实际通过并保存能力证据，页面和登录按任务另验。[本次完整记录](CHANGELOG.md#browser-underscore-final-20261112)<br>4、同步当前说明并保留各历史阶段，不升版本或公开发行。[本次完整记录](CHANGELOG.md#browser-underscore-final-20261112) |
+| 更新大清单分页与验收收尾 | 2026-11-12 | 1、更新包选择、预览和差异每页50项，保留全部文件、选择、用途和确认绑定。[详情](CHANGELOG.md#update-inventory-20261112)<br>2、修复验收管道结束后重复写入，保留原超时原因和所有保护。[详情](CHANGELOG.md#update-inventory-20261112)<br>3、82项相关组件、73项传输及4项参数检查通过，6a候选构建和协议核对完成，原生续验待进行。[详情](CHANGELOG.md#update-inventory-20261112)<br>4、保留65版400次本地实测通过及未完成负载证据，真实数据核对一致并恢复程序。[详情](CHANGELOG.md#update-inventory-20261112) |
+| Browser_Tools命名与路径适配 | 2026-11-12 | 1、实体采用确认的Browser_Tools名称，配置及现行路径引用同步。[详情](CHANGELOG.md#browser-underscore-20261112)<br>2、52项启动文件适配及独立读回完成，4项CLI检查通过。[详情](CHANGELOG.md#browser-underscore-20261112)<br>3、只修正迁移引入的四个参数拼写，原授权及17张其他表保持。[详情](CHANGELOG.md#browser-underscore-20261112)<br>4、正式后台恢复，管理器登记版本调用成功，旧入口按实际租约暂留。[详情](CHANGELOG.md#browser-underscore-20261112) |
+| IME与外观验收脚本适配 | 2026-11-12 | 1、IME支持显式Shift／Ctrl准备选择，保留身份、输入和恢复守卫；37项脚本回归、编译与独立审阅通过。[详情](CHANGELOG.md#native-ime-appearance-followup-20261112)<br>2、外观保存及重开分别使用候选与通信文件摘要，2项直接CLI检查通过。[详情](CHANGELOG.md#native-ime-appearance-followup-20261112)<br>3、Ctrl实际尝试在启动前停止，无实例或按键；桌面`USER_CONTROL`后不继续前台，真实IME仍未验证。[详情](CHANGELOG.md#native-ime-appearance-followup-20261112)<br>4、正式65恢复后台就绪；保留五类缺口，源码材料仅供内部审阅，未提交最终源码或公开发行。[详情](CHANGELOG.md#native-ime-appearance-followup-20261112) |
+| 原生重启与明确续传专项 | 2026-11-12 | 1、测试runner分别核对65测量候选与f9通信文件摘要，保留原启动和输入守卫。[详情](CHANGELOG.md#native-download-resume-20261112)<br>2、实际下载部分内容后正常退出、重开并明确续传，原ID、已有前缀、最终上游摘要及ZIP清单核对通过。[详情](CHANGELOG.md#native-download-resume-20261112)<br>3、只聚焦31次采样无输入计时变化；因原已在前台，不能类推Q6异常已修复。[详情](CHANGELOG.md#native-download-resume-20261112)<br>4、关闭续传界面链路这一验收缺口，剩五类事项；未发布或宣称完整性能通过。[详情](CHANGELOG.md#native-download-resume-20261112) |
+| 历史写入、维护时钟与动效 | 2026-11-11 | 1、历史快照只实际写入变化行，保留原事务、活跃进度和失败恢复。[详情](CHANGELOG.md#history-clock-followup-20261111)<br>2、维护提示检测独立系统时间／时区变化，隐藏窗口停止探测。[详情](CHANGELOG.md#history-clock-followup-20261111)<br>3、修正显式轻动效被旧规则覆盖，默认系统减少动效保持。[详情](CHANGELOG.md#history-clock-followup-20261111)<br>4、40项历史、49项界面逻辑、61项输入守卫、静态及构建检查通过；根程序更新为65候选、原数据保持，原生与长期验收仍未完成。[详情](CHANGELOG.md#history-clock-followup-20261111) |
+| 短流程与内存诊断 | 2026-11-11 | 1、精准区分已核验的Codex通信进程，保留未知进程、窗口与输入保护。[详情](CHANGELOG.md#native-short-followup-20261111)<br>2、补齐单次下载退出、重开及明确续传的专项入口；聚焦后输入变化导致停止，不宣称流程通过。[详情](CHANGELOG.md#native-short-followup-20261111)<br>3、增加无内容、无路径的任务留存字节统计，原缓存字段及只读协议保持。[详情](CHANGELOG.md#native-short-followup-20261111)<br>4、27项守卫、29项功能输入检查、10项相关脚本和4项后端检查分别通过；d4构建、41工具协议及130次受控诊断完成，长期性能仍待验证。[详情](CHANGELOG.md#native-short-followup-20261111) |
+| 浏览器工具正式名称 | 2026-11-11 | 1、恢复Playwright MCP／playwright，支持按任务自动调用。[详情](CHANGELOG.md#browser-tool-naming-20261111)<br>2、同步产品名称并通过75项定向检查及构建、协议和离线包核对。[详情](CHANGELOG.md#browser-tool-naming-20261111)<br>3、保留原ID、动作和授权，目录迁移事务保持17张其他表。[详情](CHANGELOG.md#browser-tool-naming-20261111)<br>4、正式后台正常重开为f9dfe387，界面入口核对已保存，真实登记动作调用成功。[详情](CHANGELOG.md#browser-tool-naming-20261111)<br>5、实际改名BrowserTools，同步52项Python启动文件、配置和当前引用，移除已无占用的旧兼容入口。[详情](CHANGELOG.md#browser-tool-naming-20261111) |
+| Codex 本机调用接入 | 2026-11-11 | 1、登记正式程序的本机MCP入口并保留其他配置。[详情](CHANGELOG.md#codex-local-integration-20261111)<br>2、真实宿主目录读取及Agent Reach版本查询成功。[详情](CHANGELOG.md#codex-local-integration-20261111)<br>3、增加同一Node入口的预览与显式重核，19项后端及72项相关界面检查通过。[详情](CHANGELOG.md#codex-local-integration-20261111)<br>4、启用179b9d3f并核对新data目录，离线发行包已准备，界面重核待完成。[详情](CHANGELOG.md#codex-local-integration-20261111)<br>5、将浏览器服务恢复为Playwright MCP／playwright，保留原文件位置。[详情](CHANGELOG.md#codex-local-integration-20261111) |
+| 正式数据切换与工具接管 | 2026-11-11 | 1、按绑定清单完成10项目录与数据库族迁移，20表数据逻辑核对一致。[详情](CHANGELOG.md#formal-data-cutover-20261111)<br>2、完成新入口真实重开、实际管理数据及界面缓存路径核对。[详情](CHANGELOG.md#formal-data-cutover-20261111)<br>3、保留20个Skill和18条客户端连接，三个既有工具原位登记完成。[详情](CHANGELOG.md#formal-data-cutover-20261111) |
+| 仓库改名与目录切换准备 | 2026-11-11 | 1、仓库改名并核对相同身份及既有发行，更新origin和当前链接。[详情](CHANGELOG.md#repository-cutover-preparation-20261111)<br>2、补齐受约束的正式切换入口及测试差异证明，8项执行与12项准备检查通过，实际迁移待正常退出。[详情](CHANGELOG.md#repository-cutover-preparation-20261111)<br>3、通过真实界面正式登记三个既有工具，版本和4／4／0个动作入口已核对。[详情](CHANGELOG.md#repository-cutover-preparation-20261111) |
+| 本地可用预览交付 | 2026-11-11 | 1、部署正常候选并指向现有实际管理数据，启动及管理信息核对通过。[详情](CHANGELOG.md#local-usable-preview-20261111)<br>2、原启动脚本转发新版，保留运行窗口供使用，深度优化与正式迁移发行单列。[详情](CHANGELOG.md#local-usable-preview-20261111) |
+| 原生验收方法与续接（开发中） | 2026-11-11 | 1、发行文件弹层及中文输入助手补齐原生输入保护，60项相关纯检查及独立审查通过。[详情](CHANGELOG.md#native-methods-20261111)<br>2、两个实际弹层选值通过；检查、下载和更新候选准备期间共18次操作完成，原200ms目标仍有一项超时。[详情](CHANGELOG.md#native-methods-20261111)<br>3、Dragon实际播放、画面、真实窗口交接及退出码0通过，原目录与Codex窗口保持。[详情](CHANGELOG.md#native-methods-20261111)<br>4、独立画面核验保持原循环及判据，16项纯回归通过，真实参考和长期测量待验。[详情](CHANGELOG.md#native-methods-20261111) |
+| 自动更新与运行恢复验收（开发中） | 2026-11-10 | 1、实际调度、下载、解包、Node探测和切换闭环通过。[详情](CHANGELOG.md#runtime-acceptance-20261110)<br>2、两种切换后失败均恢复可运行旧入口并保留数据。[详情](CHANGELOG.md#runtime-acceptance-20261110)<br>3、31项相关测试、格式、发布编译及静态检查通过，候选字节保持。[详情](CHANGELOG.md#runtime-acceptance-20261110)<br>4、三阶段实际无参数启动及诊断复制通过，物理中文提交继续待验。[详情](CHANGELOG.md#runtime-acceptance-20261110)<br>5、记录编译临时目录遗漏及后续D盘修正检查。[详情](CHANGELOG.md#runtime-acceptance-20261110)<br>6、d0完成30分钟61点并正常退出，内存收敛失败，继续定位。[详情](CHANGELOG.md#runtime-acceptance-20261110) |
+| 迁移演练与内容绑定（开发中） | 2026-11-10 | 1、补齐数据库路径、恢复记录和部署预检保护。[详情](CHANGELOG.md#cutover-rehearsal-20261110)<br>2、受控暂存及原子发布支持中断续跑，34项合成检查和独立复核通过。[详情](CHANGELOG.md#cutover-rehearsal-20261110)<br>3、生成正式内容绑定清单，实际切换仍待入口及前置验收完成。[详情](CHANGELOG.md#cutover-rehearsal-20261110)<br>4、隔离入口准备及11项后台检查通过，真实启动待验。[详情](CHANGELOG.md#cutover-rehearsal-20261110)<br>5、管理器未运行时，Edge公开读取成功，当前安装关键文件与登记配方对应一致。[详情](CHANGELOG.md#cutover-rehearsal-20261110)<br>6、Agent Reach原生命令独立公共读取通过。[详情](CHANGELOG.md#cutover-rehearsal-20261110) |
+| 原生选择与证据校正（开发中） | 2026-11-09 | 1、改进原生发行文件选择助手，保留精确选值和输入保护；29项后台检查及助手编译通过。[详情](CHANGELOG.md#native-acceptance-followup-20261109)<br>2、实际外观保存／重开通过，下载和持续运行未完成项按原始记录保留。[详情](CHANGELOG.md#native-acceptance-followup-20261109)<br>3、同步当前d0候选、离线包及迁移边界，未移动正式数据或发布。[详情](CHANGELOG.md#native-acceptance-followup-20261109) |
+| 操作记录弹层定位修正（验收继续） | 2026-11-08 | 1、修复侧栏独立后操作摘要打开即关闭的问题，保持原有摘要、全部记录及焦点恢复操作。[详情](CHANGELOG.md#operation-summary-host-20261108)<br>2、16项相关界面回归、类型、生产前端、Windows候选构建及协议检查通过，问题归并、诊断和共享空间真实流程通过。[详情](CHANGELOG.md#operation-summary-host-20261108)<br>3、关联配置往返、取消和冲突预览，以及服务的维护窗口、保活、调用保护和闲置释放通过。[详情](CHANGELOG.md#operation-summary-host-20261108)<br>4、新包独立解包、观察器断开对照及单后台启动保护完成，原生选择与性能缺口继续保留。[详情](CHANGELOG.md#operation-summary-host-20261108)<br>5、合成迁移、中断恢复及旧版保存后的新版重开完成代表数据核对，中间旧版导航差异保持未通过。[详情](CHANGELOG.md#operation-summary-host-20261108)<br>6、独立标准账户中的实际静默首装、升级与卸载通过，临时账户及全部专用资料已按清单清理；当前候选跨窗口草稿往返及统一接口公共网页读取通过，安装向导仍待验。[详情](CHANGELOG.md#operation-summary-host-20261108) |
+| 原生阅读与持续检查（验收继续） | 2026-11-08 | 1、修正验收脚本过早读取标签选中状态，实际说明定位及检查／标签往返的位置保持通过。[详情](CHANGELOG.md#native-reading-stability-20261108)<br>2、当前候选完成30分钟61次原生采样并正常退出，保留数值检查通过及内存仍增长的不同结论。[详情](CHANGELOG.md#native-reading-stability-20261108)<br>3、自有窗口内的原生撤销、重做、Ctrl＋K、Space与Esc完整检查通过，管理数据及文件保持；IME和下载／更新联合验收仍待完成。[详情](CHANGELOG.md#native-reading-stability-20261108)<br>4、增加静态观察、动态导航及测量进程回收的内存对照，保留原始趋势；独立调试构建仅作诊断。[详情](CHANGELOG.md#native-reading-stability-20261108) |
+| 导入与恢复校验（后台验收通过） | 2026-11-08 | 1、配置预览提前识别重复依赖关系，保留本机身份并在提交时复核。[详情](CHANGELOG.md#configuration-recovery-validation-20261108)<br>2、资源恢复记录按GitHub、npm、PyPI来源核对公开地址边界。[详情](CHANGELOG.md#configuration-recovery-validation-20261108)<br>3、48项后端、64项界面逻辑、全库格式、严格Clippy、Windows构建和协议／离线包核对通过，前台及长期性能待验。[详情](CHANGELOG.md#configuration-recovery-validation-20261108) |
+| 状态读取与预览回收（后台验收通过） | 2026-11-08 | 1、状态通知共用一个在途读取，合并后续通知并追读最新状态。[详情](CHANGELOG.md#snapshot-preview-retention-20261108)<br>2、Skill卸载及工具来源预览纳入既有32项回收范围，专属子预览同步回收，保留确认时效与当前状态校验。[详情](CHANGELOG.md#snapshot-preview-retention-20261108)<br>3、49项后端及52项界面逻辑、类型、严格Clippy、生产／Windows构建、协议及离线包核对通过，前台和长期性能继续待验。[详情](CHANGELOG.md#snapshot-preview-retention-20261108) |
+| 中断处理与配置保护（开发中） | 2026-11-08 | 1、更新失败恢复原入口后，重新执行限定只读自检并复核文件与记录，按实际结果区分恢复成功、运行待核实和恢复受阻。[详情](CHANGELOG.md#maintenance-recovery-20261108)<br>2、新的定期检查不会自动继续已中断的下载，既有回执保留，由本人重新预览确认。[详情](CHANGELOG.md#maintenance-recovery-20261108)<br>3、配置导入和导出遵守当前动作的敏感参数及模板保存声明，拒绝时保持关联数据与撤销重做历史。[详情](CHANGELOG.md#maintenance-recovery-20261108)<br>4、Skill和工具显示折叠的已保存卸载记录，区分已处理和结果待核对项，再次操作仍从当前内容重新预览。[详情](CHANGELOG.md#maintenance-recovery-20261108) |
+| 任务摘要分配与新候选（开发中） | 2026-11-09 | 1、摘要直接生成，减少大路径清单的临时复制；85项任务及26项MCP回归、格式和严格静态检查通过。[详情](CHANGELOG.md#task-summary-allocation-20261109)<br>2、新正常候选d0b6551f完成离线构建、41工具协议和便携／安装包独立内容核对。[详情](CHANGELOG.md#task-summary-allocation-20261109)<br>3、持续运行保留原采样与判据，校准前固定静置两分钟；完整原生及交付验收继续进行。[详情](CHANGELOG.md#task-summary-allocation-20261109) |
+| 正常候选前台延迟复核（开发中） | 2026-11-08 | 1、a6候选在1000个Skills和100个工具下完成400项精确前台采样，四类P95为111–153毫秒，通过原200毫秒门槛。[详情](CHANGELOG.md#operation-summary-host-20261108)<br>2、缓存上限经同字节生产实现的10项压力检查核验；下载联合负载、长期内存收敛、中文输入法和完整交付继续待验。[详情](CHANGELOG.md#operation-summary-host-20261108)<br>3、当前a6完成30分钟61点，数值通过但尾段内存仍增长；两个真实窗口最后导航与大小经退出重开保持。[详情](CHANGELOG.md#operation-summary-host-20261108)<br>4、任务摘要减少瞬时大复制，85项任务与26项MCP回归、格式及严格静态检查通过；用户已暂停，新增优化尚未构建候选。[详情](CHANGELOG.md#operation-summary-host-20261108) |
+| 工具统一入口与跨窗草稿（开发中） | 2026-11-08 | 1、当前候选通过三项现有工具登记及七项限定动作，实际Edge标签页／当前页面调用成功，自有会话断开后既有Edge和Codex保持。[详情](CHANGELOG.md#task-scheduling-summary-20261108)<br>2、本地添加草稿经独立窗口往返保持，原说明仍可定位，文件保持；鼠标拖动、阅读位置等单独验收。[详情](CHANGELOG.md#task-scheduling-summary-20261108)<br>3、工具登记、版本及状态检查与各平台真实读取分别核对，完整八平台能力继续待验。[详情](CHANGELOG.md#task-scheduling-summary-20261108) |
+| 任务列表元数据与后续验收（开发中） | 2026-11-08 | 1、前端列表及后端任务列表／事件省略内部调度键，单任务完整读取、持久历史及调度行为保持。[详情](CHANGELOG.md#task-scheduling-summary-20261108)<br>2、23项相关界面检查、83项任务回归、26项MCP相关回归、类型／前端构建及严格静态检查通过，6bf9bf34候选完成Windows发行构建及stdio检查。[详情](CHANGELOG.md#task-scheduling-summary-20261108)<br>3、前阶段候选完成真实官方npm安装更新、来源重绑及关系影响的限定原生流程。[详情](CHANGELOG.md#task-scheduling-summary-20261108)<br>4、前阶段候选通过任务结果查看、文件失效与恢复、系统打开请求及准确目录窗口核对，默认查看器内容仍未验证。[详情](CHANGELOG.md#task-scheduling-summary-20261108)<br>5、新候选完成130次原生检查，100项列表摘要及完整单任务读取保持，活动内存峰值下降40.90%，约9分钟诊断仍不足以证明内存收敛，旧列表大小失败保留。[详情](CHANGELOG.md#task-scheduling-summary-20261108)<br>6、管理器未运行时，已安装CLI的版本及帮助可直接调用，共享Node依赖和验证边界已记录，完整计划继续验收，尚未发布。[详情](CHANGELOG.md#task-scheduling-summary-20261108)<br>7、6bf9bf34便携包及安装候选已离线生成，程序、许可和包内容核对通过，实际安装与发布仍待完成。[详情](CHANGELOG.md#task-scheduling-summary-20261108) |
+| 验收续接与本地打包（开发中） | 2026-11-07 | 1、发布草稿绑定当前10a4d2c3候选，保留c08e4641历史证据。[详情](CHANGELOG.md#acceptance-resume-20261107)<br>2、保留200ms目标，增加用户允许的有限延迟评估与边界检查。[详情](CHANGELOG.md#acceptance-resume-20261107)<br>3、原生下拉保持精确选项和最终值校验，并发观察独立标为诊断，限流及选择失败记录保留。[详情](CHANGELOG.md#acceptance-resume-20261107)<br>4、当前候选完成Windows构建、零警告打包、便携四文件及独立解包核对，真实安装升级仍待验。[详情](CHANGELOG.md#acceptance-resume-20261107)<br>5、修正任务列表累计全库检查快照，72项直接回归及类型检查通过。当前候选的三项原生管理流程、场景操作和手动恢复型维护暂停／恢复通过。冷／热启动对照、四类各100次普通交互及30分钟固定持续运行判据通过，内存收敛目标仍未完成，校准首点扩大容忍范围，原生缓存压力及联合负载等继续验收。[详情](CHANGELOG.md#acceptance-resume-20261107)<br>6、三主题、两档密度和夜间窄窗共八组原生布局断言通过，代表截图已复核，设置保存、系统DPI／IME等单独验收。[详情](CHANGELOG.md#acceptance-resume-20261107)<br>7、原生诊断预览、单Skill按需空间明细及旧结构合成数据库的基本模式只读浏览通过，保留复制、损坏数据库及完整迁移等未覆盖边界。[详情](CHANGELOG.md#acceptance-resume-20261107)<br>8、合成资源安装、缺失文件修复、候选准备及四种分级卸载通过，实际版本切换、其余配置类型及正式迁移等继续验收。[详情](CHANGELOG.md#acceptance-resume-20261107)<br>9、原生参数模板保存、填入、修改及删除通过，一次性参数保留且没有自动执行。偏好、分类及别名备注的真实配置文件往返与取消流程通过，其他导入异常及GitHub负载继续验收。[详情](CHANGELOG.md#acceptance-resume-20261107) |
+| Edge当前会话只读核验（开发中） | 2026-11-07 | 1、直接连接器完成公开页面读取及同标签重读，关闭本次创建页面并保留既有连接。[详情](CHANGELOG.md#acceptance-resume-20261107)<br>2、现有Edge工具版本及目录变化已核对，管理器统一入口的实际接管与调用仍待重验。[详情](CHANGELOG.md#acceptance-resume-20261107) |
+| 任务刷新与缓存核验（开发中） | 2026-11-03 | 1、相同任务通知不再重复刷新列表，保留真实进度与结果过期反馈。[详情](CHANGELOG.md#task-update-pressure-20261103)<br>2、38项直接相关前端检查、类型检查及前端构建通过。[详情](CHANGELOG.md#task-update-pressure-20261103)<br>3、64MiB实际Rust缓存压力及网络检查10项通过。[详情](CHANGELOG.md#task-update-pressure-20261103)<br>4、复用现有环境，正式数据保持原样。[详情](CHANGELOG.md#task-update-pressure-20261103)<br>5、原生400次交互达标；后台负载超限及下载／更新验收缺口保留，补充输入、结果等待及逐控件查询诊断，修正原生下拉选择助手，实际负载仍受前台窗口条件阻碍；后台并发检查时说明读取P95为4.885ms，不替代原生验收。[详情](CHANGELOG.md#task-update-pressure-20261103) |
+| 说明读取开销修正（开发中） | 2026-11-03 | 1、普通说明／文件结果不再无条件生成全库状态，保留状态合并与错误语义。[详情](CHANGELOG.md#document-task-cost-20261103)<br>2、1000条合成Skill后台对照P95由8.816降至5.445ms，仅为debug后端测量，原生性能待验收。[详情](CHANGELOG.md#document-task-cost-20261103)<br>3、82项任务、9项文档、31项缓存与状态检查及严格静态检查通过；离线候选记录见开发进度，完整计划仍未完成。[详情](CHANGELOG.md#document-task-cost-20261103)<br>4、复用现有环境，无新下载、正式数据变更或发布。[详情](CHANGELOG.md#document-task-cost-20261103) |
+| 任务结果内存优化（开发中） | 2026-11-03 | 1、任务列表不再序列化完整结果；任务与等待者共享结果，大结果使用现有压缩依赖无损保存，保留完整读取和历史行为。[详情](CHANGELOG.md#task-result-memory-20261103)<br>2、78项任务回归、26项MCP相关回归、严格静态检查和离线构建通过；新候选持续运行在8个样本后受额外输入干扰而停止并正常退出，未完成30分钟验收，旧性能失败保留。[详情](CHANGELOG.md#task-result-memory-20261103)<br>3、补充120次大结果任务轮转与释放检查、14项结果及记录交互检查通过；10轮后台启动诊断完成，均不替代原生整机验收。[详情](CHANGELOG.md#task-result-memory-20261103) |
+| 后台负载验收修正（开发中） | 2026-11-03 | 1、修正测试任务登记等待、失效控件观察、GitHub地址格式及下拉框展开方式；11项非桌面检查及助手编译通过，最新下拉框修正待实际流程复测。[详情](CHANGELOG.md#native-load-20261103)<br>2、保留说明打开超限和桌面中断证据；完整负载与稳定性验收尚未完成，程序候选不变。[详情](CHANGELOG.md#native-load-20261103)<br>3、发布草稿补齐实际验收边界，记录失效旧安装登记的影响，未执行安装或改动正式数据。[详情](CHANGELOG.md#native-load-20261103) |
+| 原生交互验收（开发中） | 2026-11-02 | 1、同一候选在1000个Skills和100个工具下完成四类各100次原生控件输入采样，P95均低于200毫秒。[详情](CHANGELOG.md#native-input-20261102)<br>2、持续运行未完成，按用户要求先做非桌面检查，下载、更新负载及实际安装升级仍待验收。[详情](CHANGELOG.md#native-input-20261102)<br>3、快捷入口测试同步当前导航与设置数量，闲置边界测试改用真实活动时刻验证599／600秒界限。[详情](CHANGELOG.md#native-input-20261102)<br>4、同步当前候选发行草稿、附件摘要及完整计划验收缺口。[详情](CHANGELOG.md#native-input-20261102)<br>5、后台负载支持独立验收，保留真实任务重叠和响应时间检查；策略与参数拒绝检查通过，实际负载待测。[详情](CHANGELOG.md#native-input-20261102) |
+| 当前候选打包（开发中） | 2026-11-02 | 1、最新候选离线生成Windows安装包，独立解包与便携包内容摘要核对通过。[详情](CHANGELOG.md#candidate-package-20261102)<br>2、安装升级及完整性能验收继续待完成。[详情](CHANGELOG.md#candidate-package-20261102) |
+| 文件用途布局修正（开发中） | 2026-11-02 | 1、安装文件清单的下拉框留足间距，窄窗口自动换行。[详情](CHANGELOG.md#file-row-layout-20261102)<br>2、81种浏览器布局组合、61项相关交互及原生文件清单截图核对完成，合成安装、修复、候选准备与四种卸载验收通过。完整性能等门槛继续待验收。[详情](CHANGELOG.md#file-row-layout-20261102) |
+| 维护设置布局精简（开发中） | 2026-11-02 | 1、暂停时长、操作按钮与每日维护时段分别对齐，保留现有行为。[详情](CHANGELOG.md#maintenance-layout-20261102)<br>2、14项维护交互检查及类型检查通过；尚未替换用户审阅中的测试版。[详情](CHANGELOG.md#maintenance-layout-20261102) |
+| 发行源码对应检查（开发中） | 2026-11-02 | 1、核对候选与发行提交关系、实际文件树及工作流身份。[详情](CHANGELOG.md#release-source-20261102)<br>2、修正发行清单遗漏变化路径，12项检查通过；真实发行及完整验收仍待完成。[详情](CHANGELOG.md#release-source-20261102) |
+| 独立候选构建（开发中） | 2026-11-02 | 1、复用缓存生成独立Windows候选，保留审阅中的预览。[详情](CHANGELOG.md#detached-candidate-20261102)<br>2、构建和命令接口检查通过，新候选原生界面与性能仍待验收。[详情](CHANGELOG.md#detached-candidate-20261102) |
+| 发行包内容核验（开发中） | 2026-11-01 | 1、核验安装器与ZIP实际程序、许可及指南内容和默认数据路径。[详情](CHANGELOG.md#release-payload-20261101)<br>2、11项合成检查及脚本解析通过，真实最终包和向导仍待验收。[详情](CHANGELOG.md#release-payload-20261101) |
+| 总览与设置精简（开发中） | 2026-11-01 | 1、移除统计卡和来源重复提示，将近期操作范围并入标题，保留异常反馈。[详情](CHANGELOG.md#ui-simplicity-20261101)<br>2、检查方式按名称、说明和当前值对齐；29项相关检查及前端构建通过，未替换正在查看的测试版。[详情](CHANGELOG.md#ui-simplicity-20261101)<br>3、增加手动后端启动诊断，并行准备界面代码与启动模式；7项启动检查及前端构建通过，原生冷启动仍待完成。[详情](CHANGELOG.md#ui-simplicity-20261101)<br>4、补齐35个前端依赖版本许可，当前Windows及本机前端499项版本覆盖核对通过，最终包仍待验收。[详情](CHANGELOG.md#ui-simplicity-20261101) |
+| 统一资源与设置加载（开发中） | 2026-11-01 | 1、增加全部／技能／工具统一查找、分页和详情入口，保留原身份与阅读顺序。[详情](CHANGELOG.md#unified-library-20261101)<br>2、设置首次访问才加载，切组保留草稿，隐藏组暂停相关状态读取。[详情](CHANGELOG.md#unified-library-20261101) |
+| 安装包编译与升级保护（开发中） | 2026-11-01 | 1、使用已核对的NSIS组件，在隔离工作目录编译安装包，运行中预览的EXE摘要一致。[详情](CHANGELOG.md#installer-compile-20261101)<br>2、旧版退出检查提前到卸载器调用前，并使用原安装目录；真实升级仍待验收。[详情](CHANGELOG.md#installer-compile-20261101) |
+| 资源总览（开发中，未发布） | 2026-11-01 | 1、增加可点击统计、待处理Skill、收藏、任务进度、来源状态、分类分布及近期操作，沿用已有数据和入口。[详情](CHANGELOG.md#dashboard-implementation-20261101)<br>2、接入侧栏、Ctrl＋K及跨窗口导航恢复，复用主题和缓存；相关检查通过，原生布局与性能待验收。[详情](CHANGELOG.md#dashboard-implementation-20261101) |
+| UI 组件候选调研（文档） | 2026-11-01 | 1、按新增请求核对9个组件与仪表盘仓库，记录固定版本、实际读取及维护情况。[详情](CHANGELOG.md#dashboard-components-20261101)<br>2、提出真实任务总览与组件接入顺序，保留原完整验收，当前仅研究与方案。[详情](CHANGELOG.md#dashboard-components-20261101) |
+| 侧栏稳定与交付准备（开发中，未发布） | 2026-11-01 | 1、统一侧栏两态几何，减少宽屏设置内容跳动。[详情](CHANGELOG.md#sidebar-delivery-review-20261101)<br>2、补修便携路径识别，保留旧库与自定义位置；待运行验证。[详情](CHANGELOG.md#sidebar-delivery-review-20261101)<br>3、补充开发预览说明，明确附件及安装器兼容待办，未发布。[详情](CHANGELOG.md#sidebar-delivery-review-20261101) |
+| 生命周期与配置续接（开发中，未发布） | 2026-11-01 | 1、配置往返保留来源与引用，跨表一次提交。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>2、每次预览Skill卸载，保护定制与共享内容。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>3、候选在最终目录准备，独立核验与切换。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>4、系统入口按精确可信归属处理，保留部分失败。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>5、24小时来源观察与自动应用许可分开。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>6、自动更新逐阶段复核，失败不自动重放。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>7、新名称与独立目录兼容旧数据路径。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>8、三个现有工具只读接管，不移动原件或登录资料。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>9、调用证据绑定实际版本、入口及结果。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>10、精简空视图，补齐使用及迁移说明。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>11、隔离测试与真实桌面、迁移、性能分别验收。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>12、固定Edge MCP调用及取消竞态修复，持续集成验证。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>13、真实工具调用、官方npm双版本原生安装更新及退出后的CLI独立运行通过；原生三主题／窄窗验收通过，完整性能与交付继续验收。[详情](CHANGELOG.md#continuation-lifecycle-20261030)<br>14、按固定提交在线参考两份设计资料，优化三主题与四强调色层次、工具与筛选布局、设置行和限速单位、网络失败原地恢复；保留全部功能、字号与缩放。[详情](CHANGELOG.md#online-design-ui-20261101)<br>15、按审阅意见重整九组设置、卡片、标题与外框；保留草稿与全部视图，补齐分类收起和分组独立保存，先提供设计预览。[详情](CHANGELOG.md#workspace-ui-redesign-20261101) |
+| 计划执行细节优化（文档，未发布） | 2026-10-30 | 1、原六项及第1–16项保留，第17项排除；本轮只优化计划，不新增建议。[本次完整记录](CHANGELOG.md#plan-execution-details-20261030)<br>2、补清配置关联往返、部分卸载记录及再次确认、实际入口与验收对应。[本次完整记录](CHANGELOG.md#plan-execution-details-20261030)<br>3、全部视觉、性能和保护标准保持，仅核对文档，不改程序或版本。[本次完整记录](CHANGELOG.md#plan-execution-details-20261030) |
+| 计划一致性核对（文档，未发布） | 2026-10-30 | 1、原六项及第1–16项全部保留，第17项排除；本轮仅优化计划，不新增建议。[本次完整记录](CHANGELOG.md#plan-consistency-20261030)<br>2、补清配置导入、共享依赖复核、问题证据和空间统计的既有行为，并同步验收。[本次完整记录](CHANGELOG.md#plan-consistency-20261030)<br>3、视觉、速度、稳定性及授权规范保持，仅修改文档，不改程序或版本。[本次完整记录](CHANGELOG.md#plan-consistency-20261030) |
+| 结果、诊断与空间明细（开发中，未发布） | 2026-10-30 | 1、结果文件位置随任务记录保存，重启后可核对和打开，不重放任务。[本次完整记录](CHANGELOG.md#maintenance-experience-development-20261030)<br>2、归并同源问题并保留单项状态，按需生成和复制脱敏诊断，不上传。[本次完整记录](CHANGELOG.md#maintenance-experience-development-20261030)<br>3、工具与Skill按需统计空间，未知用途与未读部分明确显示，相关检查、构建与35项程序接口发现通过。[本次完整记录](CHANGELOG.md#maintenance-experience-development-20261030) |
+| 场景与闲置释放（开发中，未发布） | 2026-10-30 | 1、场景限制后续调用，手动停用优先，保留已有任务与入口。[本次完整记录](CHANGELOG.md#scenes-idle-development-20261030)<br>2、可安全停止的自有服务按实际活动闲置释放，调用／登录／依赖与明确保活受保护。[本次完整记录](CHANGELOG.md#scenes-idle-development-20261030)<br>3、失败可见且不自动重试，完整Rust577项、前端465项及构建和实际协议检查通过。[本次完整记录](CHANGELOG.md#scenes-idle-development-20261030) |
+| 来源健康与重绑（开发中，未发布） | 2026-10-30 | 1、区分来源可访问与能力可用，展示旧新仓库及具体目录／发行文件，预览确认后关联。[本次完整记录](CHANGELOG.md#source-binding-development-20261030)<br>2、保留原安装证据、本地文件及历史说明；重复同源确认不清基线，旧审计保留历史并失效。[本次完整记录](CHANGELOG.md#source-binding-development-20261030)<br>3、实时保存复核并发变化，Agent只开放来源读取和预览；基本模式只读已有信息，完整Rust560项、前端441项及构建检查通过。[本次完整记录](CHANGELOG.md#source-binding-development-20261030) |
+| 计划收束（文档，未发布） | 2026-10-30 | 1、统一本轮仅优化计划的范围，原六项及第1–16项保留，第17项排除，不新增功能。[本次完整记录](CHANGELOG.md#plan-final-review-20261030)<br>2、明确手动更新同样保护本地信息，新安装位置满足资源独立使用；同步验证条目。[本次完整记录](CHANGELOG.md#plan-final-review-20261030)<br>3、提前固定内存判据，明确零已知程序错误／警告验收；原视觉与性能标准保持，不改程序或版本。[本次完整记录](CHANGELOG.md#plan-final-review-20261030) |
+| 依赖关系与卸载影响（开发中，未发布） | 2026-10-30 | 1、Skill与工具共用双向依赖记录，独立保存，按需读取，显示共享使用及失效引用；关系不授予文件归属。[本次完整记录](CHANGELOG.md#resource-relations-development-20261030)<br>2、卸载前核对使用者及关系版本；失效引用可从目标详情显式解除，保留文件，不连带卸载其他资源。[本次完整记录](CHANGELOG.md#resource-relations-development-20261030)<br>3、GUI共用实时写入方，Agent只读；Rust534项、前端整合及相关修复检查通过，仍未完成正式交付。[本次完整记录](CHANGELOG.md#resource-relations-development-20261030) |
+| 计划复核（文档，未发布） | 2026-10-30 | 1、只优化计划；原六项及第1–16项全部保留，第17项排除，既有开发内容保留。[本次完整记录](CHANGELOG.md#plan-scope-review-20261030)<br>2、补清更新切换后失败的安全收尾、切页／移窗保留编辑与确认边界、包含排队和渲染的响应计时，并同步对应验收。[本次完整记录](CHANGELOG.md#plan-scope-review-20261030)<br>3、视觉、性能与数据保护标准不降低，不新增功能、不改程序或版本、不发布。[本次完整记录](CHANGELOG.md#plan-scope-review-20261030) |
+| 维护与个人管理（开发中，未发布） | 2026-10-30 | 1、维护暂停／窗口统一约束自动任务，20步撤销重做核对当前历史及并发变化。[完整记录](CHANGELOG.md#management-data-development-20261030)<br>2、Ctrl＋K打开已登记动作参数，提交前复核资源版本，修复详情定位抢占参数焦点。[完整记录](CHANGELOG.md#management-data-development-20261030)<br>3、Skill别名／备注和常用筛选独立保存；保留原名，参与搜索，应用筛选不执行工具或保存显示设置。[完整记录](CHANGELOG.md#management-data-development-20261030)<br>4、后台刷新保留技能库顺序、勾选、焦点与滚动锚点；实际删除转到相邻项，明确重新整理才重新筛选排序。[完整记录](CHANGELOG.md#management-data-development-20261030)<br>5、增加仅保存明确选择非敏感参数的调用模板，套用后仍需核对执行；工具切页与移窗恢复筛选和编辑草稿，隐藏时不刷新。[完整记录](CHANGELOG.md#management-data-development-20261030)<br>6、保留完整计划与正式版；本次检查使用模拟数据，未迁移真实资源、未发布。[完整记录](CHANGELOG.md#management-data-development-20261030) |
+| 计划优化（文档，未发布） | 2026-10-28 | 1、按原编号保留六项维护能力及第1–16项，第17项排除；本轮只优化计划及对应记录，不恢复实施。[本次完整记录](CHANGELOG.md#plan-refinement-20261028)<br>2、对应实施阶段与验收，前置共用维护判定，明确暂停时间及提交边界；细化最小安装、固定版本修复、无损更新、重绑证据、配置导入冲突和重做历史。[本次完整记录](CHANGELOG.md#plan-refinement-20261028)<br>3、保持逐次卸载与独立使用要求，联合验收视觉和后台负载；明确配色覆盖、图标原生显示和错误／警告证据，不降低性能指标、不升级程序版本。[本次完整记录](CHANGELOG.md#plan-refinement-20261028) |
+| Agent Resource Manager（开发中，未发布） | 2026-10-28 | 1、增加独立资源目录、明确动作与受管进程状态，界面与任务服务共用持久写入方。[完整记录](CHANGELOG.md#resource-manager-development)<br>2、接入最小 ZIP 安装、许可与文件用途归属、每次选择程度的卸载预览和本地确认，未知内容保留。[完整记录](CHANGELOG.md#resource-manager-development)<br>3、增加 Ctrl＋K、三主题强调色、密度与动效选项，保留既有技能入口。[完整记录](CHANGELOG.md#resource-manager-development)<br>4、加入具体备份许可、早期只读基本模式，保护原有资料与设置。[完整记录](CHANGELOG.md#resource-manager-development)<br>5、接入同用户唯一后台与有限 MCP 操作，区分关闭界面与完全退出；保留人工维护确认。[完整记录](CHANGELOG.md#resource-manager-development)<br>6、阶段验证与完整交付分开记录；真实客户端、自动更新、系统集成清理、正式迁移及性能验收尚未完成。[完整记录](CHANGELOG.md#resource-manager-development) |
 | v0.2.11（正式发行） | 2026-10-27 | 1、仅说明或管理信息的更新检查完成后归“内容一致”，退出待办；最近检查只记录本轮新变化，真实问题保留对应原因与操作。[完整记录](CHANGELOG.md#v0211-candidate)<br>2、仅在目录清单与新鲜两端一致证据同时成立时，修正 Hatch Pet 的旧自动范围28→23项，保护人工范围和原文件。[完整记录](CHANGELOG.md#v0211-candidate)<br>3、脚本入口与调用参数分开核对，避免把整段命令误报缺失。[完整记录](CHANGELOG.md#v0211-candidate)<br>4、变化页仅在需要时展开批量选择；单项直接重新检查，选择、数量和执行操作分组对齐，窄窗口自动换行。183项前端、389项Rust及原生界面／重启验收通过。[完整记录](CHANGELOG.md#v0211-candidate) |
 | v0.2.10（正式发行） | 2026-10-27 | 1、整合 v0.2.8／v0.2.9 的导出与原生关闭修复、自动导入、统一检查及可靠关联。[完整记录](CHANGELOG.md#v0210-release)<br>2、修复中文文件引用与有效绑定误报，保留未知安装历史及本地内容。[完整记录](CHANGELOG.md#v0210-release)<br>3、忽略项逐行显示，目录紧凑对齐并采用检查＋更多菜单，保留批量与键盘操作。[完整记录](CHANGELOG.md#v0210-release)<br>4、沿用三主题、字号与缩放，36组布局检查和174前端／382Rust通过。[完整记录](CHANGELOG.md#v0210-release)<br>5、发布同EXE的便携包与NSIS安装器、源码及校验材料；无数据库迁移，安装向导未测。[完整记录](CHANGELOG.md#v0210-release) |
 | v0.2.9（候选，未发布） | 2026-10-26 | 1、增加自动导入目录及忽略项管理，按真实路径去重。[完整记录](CHANGELOG.md#v029-candidate)<br>2、统一全局自动／手动检查及变化页批量操作，同快照发现并关联来源。[完整记录](CHANGELOG.md#v029-candidate)<br>3、修复中文模板路径与有效绑定误报，审计缓存按分析器版本失效。[完整记录](CHANGELOG.md#v029-candidate)<br>4、本地事件防抖、远端提交探测及空轮次去重，保留缓存优先阅读和现有功能。[完整记录](CHANGELOG.md#v029-candidate) |

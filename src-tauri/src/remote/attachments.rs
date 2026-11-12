@@ -227,7 +227,12 @@ fn read_remote(
 
 fn read_file(m: &Manager, req: &Value) -> Result<Value, String> {
     let skill = m.skill(text(req, "skillId")?)?;
-    let snap = pinned(m, &skill, req)?;
+    let snap = if req["version"] == "installed" {
+        requested_documentation_snapshot(m, &skill, req)?
+    } else {
+        pinned(m, &skill, req)?
+    };
+    let skill = rebinding::reading_skill(&skill, req)?;
     let entries = safe_entries(&snap.skill_files(remote_path(&skill)?)?);
     let path = text(req, "path")?;
     let bytes = read_remote(&entries, path, |entry| snap.read_entry(entry))?;
@@ -554,10 +559,28 @@ pub(super) fn preview_with_reader(
         return Err("Local files changed while preparing attachments; preview again".into());
     }
     let id = m.id();
+    let backup_writes: BTreeMap<String, Vec<u8>> = writes
+        .iter()
+        .map(|(path, bytes)| {
+            Ok((
+                path.clone(),
+                STANDARD
+                    .decode(bytes)
+                    .map_err(|_| "Invalid attachment preview")?,
+            ))
+        })
+        .collect::<Result<_, String>>()?;
+    let backup_plan = transaction::plan_backup(
+        &m.storage.path("recovery")?,
+        &root,
+        &expected,
+        &backup_writes,
+        &[],
+    )?;
     let public = json!({"id":id,"kind":"attachments","skillId":skill["id"],"summary":format!("新增 {} 个附件；保留现有文件和运行范围",rows.len()),
-        "files":rows,"warnings":[],"canApply":true,"targetPath":root.to_string_lossy(),"commit":commit});
+        "files":rows,"warnings":[],"canApply":true,"targetPath":root.to_string_lossy(),"commit":commit,"backupPlan":backup_plan});
     m.previews.clear();
-    m.previews.insert(id,json!({"public":public,"skillStamp":skill_stamp(skill),"targetPath":root.to_string_lossy(),"expected":expected,"writes":writes}));
+    m.previews.insert(id,json!({"public":public,"backupPlan":backup_plan,"skillStamp":skill_stamp(skill),"targetPath":root.to_string_lossy(),"expected":expected,"writes":writes}));
     Ok(public)
 }
 
@@ -601,7 +624,18 @@ pub(super) fn apply_kind(m: &mut Manager, req: &Value, kind: &str) -> Result<Val
             .map_err(|_| "Invalid internal attachment preview")?;
         writes.insert(path, decoded);
     }
-    transaction::apply_in(&m.storage.path("recovery")?, &root, &expected, &writes, &[])?;
+    let backup_plan: transaction::BackupPlan =
+        serde_json::from_value(preview["backupPlan"].clone())
+            .map_err(|_| "备份计划缺失或无效，请重新预览")?;
+    transaction::apply_in(
+        &m.storage.path("recovery")?,
+        &root,
+        &expected,
+        &writes,
+        &[],
+        &backup_plan,
+        None,
+    )?;
     // Adding optional documents is not a runtime update. The next explicit
     // content check may discover extras, but no baseline or status is fabricated.
     Ok(m.snapshot())
@@ -717,6 +751,7 @@ mod tests {
 
     #[test]
     fn merged_local_only_and_failed_remote_reads_preserve_files_and_manager_state() {
+        let _configuration = crate::network::test_configuration_guard();
         let (_temp, mut manager, id, _) = fixture();
         let before = manager.snapshot();
         let request = json!({"action":"get_files","skillId":id,"includeRemote":true});
@@ -755,6 +790,7 @@ mod tests {
 
     #[test]
     fn export_prefers_local_customizations_streams_large_assets_and_pins_remote_license_source() {
+        let _configuration = crate::network::test_configuration_guard();
         let (temp, manager, id, root) = fixture();
         fs::write(root.join("README.md"), b"user customized notes").unwrap();
         // Larger than BOTH remote limits. Local assets retain existing capacity.
@@ -871,6 +907,7 @@ mod tests {
 
     #[test]
     fn downloaded_attachments_apply_preloaded_immutable_bytes_without_runtime_or_status_changes() {
+        let _configuration = crate::network::test_configuration_guard();
         let (temp, mut manager, id, root) = fixture();
         let skill = manager.skill(&id).unwrap();
         let before = manager.snapshot();
@@ -897,6 +934,8 @@ mod tests {
         assert!(!root.join("README.md").exists());
         assert_eq!(preview["kind"], "attachments");
         assert_eq!(preview["commit"], COMMIT);
+        assert_eq!(preview["backupPlan"]["required"], false);
+        assert_eq!(preview["backupPlan"]["files"], json!([]));
         // No network is consulted at apply time, even if the branch moves.
         let request = json!({"action":"apply_attachments","previewId":preview["id"]});
         assert_eq!(handle(&mut manager, &request).unwrap().unwrap(), before);
@@ -914,12 +953,18 @@ mod tests {
             .unwrap()
             .collect();
         assert_eq!(journals.len(), 1);
+        let backup_destination = Path::new(preview["backupPlan"]["destination"].as_str().unwrap());
+        assert!(
+            !backup_destination.exists(),
+            "adding attachments must never copy the existing Skill"
+        );
         let reopened = Manager::new(temp.path().join("data")).unwrap();
         assert_eq!(reopened.snapshot(), before);
     }
 
     #[test]
     fn attachment_preview_rejects_existing_files_protected_skills_and_late_name_races() {
+        let _configuration = crate::network::test_configuration_guard();
         let (_temp, mut manager, id, root) = fixture();
         let entries = entries(&[("README.md", "synthetic/README.md", b"notes")]);
         let mut skill = manager.skill(&id).unwrap();
@@ -1011,6 +1056,7 @@ mod tests {
 
     #[test]
     fn default_export_ignores_old_optional_scope_and_does_not_need_installation_history() {
+        let _configuration = crate::network::test_configuration_guard();
         let (temp, mut manager, id, root) = fixture();
         fs::write(root.join("README.md"), b"optional notes").unwrap();
         manager.state.skills[0]["runtimeFiles"] = json!(["SKILL.md", "README.md"]);

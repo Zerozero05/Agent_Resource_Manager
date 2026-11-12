@@ -20,6 +20,149 @@ struct Journal {
     state: String,
     created_at: String,
     entries: Vec<Entry>,
+    #[serde(default)]
+    backup_plan: Option<BackupPlan>,
+    #[serde(default)]
+    backup_approved_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BackupFile {
+    pub relative_path: String,
+    pub source_path: PathBuf,
+    pub destination_path: PathBuf,
+    pub sha256: String,
+    pub bytes: u64,
+    pub modified: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BackupPlan {
+    pub id: String,
+    pub required: bool,
+    pub source_root: PathBuf,
+    pub recovery_root: PathBuf,
+    pub destination: PathBuf,
+    pub method: String,
+    pub files: Vec<BackupFile>,
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub summary: String,
+    operation_digest: String,
+}
+
+// This value cannot be deserialized from a request or persisted as reusable approval.
+pub(crate) struct BackupGrant {
+    plan_id: String,
+    plan_digest: String,
+    approved_at: String,
+}
+
+pub(crate) fn authorize_local_preview(plan: &BackupPlan) -> Result<BackupGrant, String> {
+    Ok(BackupGrant {
+        plan_id: plan.id.clone(),
+        plan_digest: hash(&serde_json::to_vec(plan).map_err(|e| e.to_string())?),
+        approved_at: now(),
+    })
+}
+
+pub(crate) fn plan_backup(
+    history: &Path,
+    root: &Path,
+    expected: &BTreeMap<String, String>,
+    writes: &BTreeMap<String, Vec<u8>>,
+    deletes: &[String],
+) -> Result<BackupPlan, String> {
+    plan_backup_with_id(
+        history,
+        root,
+        expected,
+        writes,
+        deletes,
+        uuid::Uuid::new_v4().to_string(),
+    )
+}
+
+fn plan_backup_with_id(
+    history: &Path,
+    root: &Path,
+    expected: &BTreeMap<String, String>,
+    writes: &BTreeMap<String, Vec<u8>>,
+    deletes: &[String],
+    id: String,
+) -> Result<BackupPlan, String> {
+    verify_root(root)?;
+    verify_root(history)?;
+    if uuid::Uuid::parse_str(&id).is_err() {
+        return Err("备份计划标识无效".into());
+    }
+    let actual = if root.exists() {
+        crate::local::files(root)?
+    } else {
+        BTreeMap::new()
+    };
+    if actual != *expected {
+        return Err("Local files changed after preview. Check changes again.".into());
+    }
+    let destination = history.join(&id).join("before");
+    let mut files = Vec::new();
+    let mut changes = BTreeMap::new();
+    for (path, bytes) in writes {
+        checked(root, path)?;
+        let after = hash(bytes);
+        if expected.get(path) != Some(&after) {
+            changes.insert(path.clone(), Some(after));
+        }
+    }
+    for path in deletes {
+        checked(root, path)?;
+        if writes.contains_key(path) {
+            return Err("Ambiguous update: file both written and deleted".into());
+        }
+        changes.insert(path.clone(), None);
+    }
+    for path in changes.keys() {
+        if let Some(expected_hash) = expected.get(path) {
+            let source = checked(root, path)?;
+            let fingerprint = crate::resource_files::fingerprint(&source)?;
+            if fingerprint.sha256 != *expected_hash {
+                return Err("文件在准备备份计划时变化，请重新预览".into());
+            }
+            files.push(BackupFile {
+                relative_path: path.clone(),
+                source_path: source,
+                destination_path: checked(&destination, path)?,
+                sha256: fingerprint.sha256,
+                bytes: fingerprint.bytes,
+                modified: fingerprint.modified,
+            });
+        }
+    }
+    let total_bytes = files.iter().try_fold(0u64, |sum, file| {
+        sum.checked_add(file.bytes).ok_or("备份大小超出范围")
+    })?;
+    Ok(BackupPlan {
+        id,
+        required: !files.is_empty(),
+        source_root: root.to_owned(),
+        recovery_root: history.to_owned(),
+        destination,
+        method: "copy-existing-files".into(),
+        file_count: files.len(),
+        total_bytes,
+        summary: if files.is_empty() {
+            "仅新增文件或更新记录，不复制已有文件备份".into()
+        } else {
+            format!(
+                "将复制 {} 个需替换或删除的原文件，保留失败回滚能力",
+                files.len()
+            )
+        },
+        files,
+        operation_digest: hash(&serde_json::to_vec(&changes).map_err(|e| e.to_string())?),
+    })
 }
 
 fn hash(bytes: &[u8]) -> String {
@@ -249,7 +392,15 @@ pub fn apply(
     writes: &BTreeMap<String, Vec<u8>>,
     deletes: &[String],
 ) -> Result<String, String> {
-    apply_in(&data_dir.join("recovery"), root, expected, writes, deletes)
+    // Synthetic rollback tests opt in explicitly. Production callers must obtain
+    // the non-serializable grant through the local window's preview route.
+    let history = data_dir.join("recovery");
+    let plan = plan_backup(&history, root, expected, writes, deletes)?;
+    let grant = plan
+        .required
+        .then(|| authorize_local_preview(&plan))
+        .transpose()?;
+    apply_in(&history, root, expected, writes, deletes, &plan, grant)
 }
 pub(crate) fn apply_in(
     history: &Path,
@@ -257,9 +408,33 @@ pub(crate) fn apply_in(
     expected: &BTreeMap<String, String>,
     writes: &BTreeMap<String, Vec<u8>>,
     deletes: &[String],
+    plan: &BackupPlan,
+    grant: Option<BackupGrant>,
 ) -> Result<String, String> {
     verify_root(root)?;
     verify_root(history)?;
+    let fresh = plan_backup_with_id(history, root, expected, writes, deletes, plan.id.clone())?;
+    if fresh != *plan {
+        return Err("备份对象、路径或文件时间戳已变化，请重新预览并允许本次备份".into());
+    }
+    if plan.required
+        && !grant.as_ref().is_some_and(|grant| {
+            grant.plan_id == plan.id
+                && serde_json::to_vec(plan).is_ok_and(|bytes| grant.plan_digest == hash(&bytes))
+        })
+    {
+        return Err("本次更新需要备份；请在本地预览中核对对象、位置和方式后明确允许".into());
+    }
+    let writes: BTreeMap<_, _> = writes
+        .iter()
+        .filter(|(path, bytes)| expected.get(*path) != Some(&hash(bytes)))
+        .map(|(path, bytes)| (path.clone(), bytes.clone()))
+        .collect();
+    let writes = &writes;
+    let dir = history.join(&plan.id);
+    if fs::symlink_metadata(&dir).is_ok() {
+        return Err("备份事务目录已存在，不能复用或覆盖；请重新预览".into());
+    }
     fs::create_dir_all(history).map_err(|e| e.to_string())?;
     for item in fs::read_dir(history).map_err(|e| e.to_string())? {
         let path = item.map_err(|e| e.to_string())?.path().join("journal.json");
@@ -285,17 +460,35 @@ pub(crate) fn apply_in(
     if writes.keys().any(|p| deletes.contains(p)) {
         return Err("Ambiguous update: file both written and deleted".into());
     }
-    let id = uuid::Uuid::new_v4().to_string();
-    let dir = history.join(&id);
-    fs::create_dir_all(dir.join("before")).map_err(|e| e.to_string())?;
+    let id = plan.id.clone();
+    fs::create_dir(&dir).map_err(|e| e.to_string())?;
+    if plan.required {
+        fs::create_dir(dir.join("before")).map_err(|e| e.to_string())?;
+    }
     let mut entries = Vec::new();
     for path in writes.keys().chain(deletes.iter()) {
         let destination = checked(root, path)?;
         let before = current(&destination)?;
         if before.is_some() {
+            let approved = plan
+                .files
+                .iter()
+                .find(|file| file.relative_path == *path)
+                .ok_or("待备份文件不在本次允许清单中")?;
+            let original = crate::resource_files::fingerprint(&destination)?;
+            if original.sha256 != approved.sha256
+                || original.bytes != approved.bytes
+                || original.modified != approved.modified
+            {
+                return Err("复制前原文件已变化，未开始替换，请重新预览".into());
+            }
             let backup = checked(&dir.join("before"), path)?;
             fs::create_dir_all(backup.parent().ok_or("No parent")?).map_err(|e| e.to_string())?;
-            fs::copy(&destination, backup).map_err(|e| e.to_string())?;
+            fs::copy(&destination, &backup).map_err(|e| e.to_string())?;
+            let copied = crate::resource_files::fingerprint(&backup)?;
+            if copied.sha256 != approved.sha256 || copied.bytes != approved.bytes {
+                return Err("备份副本核验失败，原运行文件尚未替换".into());
+            }
         }
         entries.push(Entry {
             path: path.clone(),
@@ -308,6 +501,8 @@ pub(crate) fn apply_in(
         state: "applying".into(),
         created_at: now(),
         entries,
+        backup_plan: Some(plan.clone()),
+        backup_approved_at: grant.map(|grant| grant.approved_at),
     };
     save(&dir, &journal)?;
     let result = (|| {
@@ -395,6 +590,214 @@ mod tests {
             .join("work/test-fixtures");
         fs::create_dir_all(&p).unwrap();
         tempfile::tempdir_in(p).unwrap()
+    }
+
+    #[test]
+    fn backup_plan_lists_only_changed_originals_and_requires_the_exact_grant() {
+        let d = temp();
+        let root = d.path().join("skill");
+        let history = d.path().join("data/recovery");
+        fs::create_dir(&root).unwrap();
+        for (path, bytes) in [
+            ("SKILL.md", "old instructions"),
+            ("retired.txt", "old script"),
+            ("LICENSE", "same license"),
+            ("private.txt", "unique user data"),
+        ] {
+            fs::write(root.join(path), bytes).unwrap();
+        }
+        let expected = crate::local::files(&root).unwrap();
+        let writes = BTreeMap::from([
+            ("SKILL.md".into(), b"new instructions".to_vec()),
+            ("LICENSE".into(), b"same license".to_vec()),
+            ("new.txt".into(), b"new script".to_vec()),
+        ]);
+        let deletes = vec!["retired.txt".into()];
+        let plan = plan_backup(&history, &root, &expected, &writes, &deletes).unwrap();
+        assert!(plan.required);
+        assert_eq!(plan.file_count, 2);
+        assert_eq!(plan.total_bytes, 26);
+        assert_eq!(plan.method, "copy-existing-files");
+        assert_eq!(plan.source_root, root);
+        assert_eq!(plan.recovery_root, history);
+        assert_eq!(plan.destination, history.join(&plan.id).join("before"));
+        assert_eq!(
+            plan.files
+                .iter()
+                .map(|f| f.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            ["SKILL.md", "retired.txt"]
+        );
+        for file in &plan.files {
+            assert_eq!(file.source_path, root.join(&file.relative_path));
+            assert_eq!(
+                file.destination_path,
+                plan.destination.join(&file.relative_path)
+            );
+            assert_eq!(file.sha256, expected[&file.relative_path]);
+        }
+        assert!(!history.exists(), "preview must not create backup folders");
+        let denied =
+            apply_in(&history, &root, &expected, &writes, &deletes, &plan, None).unwrap_err();
+        assert!(denied.contains("明确允许"));
+        assert!(!history.exists());
+        let other_plan = plan_backup(&history, &root, &expected, &writes, &deletes).unwrap();
+        assert!(apply_in(
+            &history,
+            &root,
+            &expected,
+            &writes,
+            &deletes,
+            &plan,
+            Some(authorize_local_preview(&other_plan).unwrap())
+        )
+        .is_err());
+        assert!(!history.exists());
+        assert_eq!(crate::local::files(&root).unwrap(), expected);
+        let id = apply_in(
+            &history,
+            &root,
+            &expected,
+            &writes,
+            &deletes,
+            &plan,
+            Some(authorize_local_preview(&plan).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(id, plan.id);
+        assert_eq!(
+            fs::read(plan.destination.join("SKILL.md")).unwrap(),
+            b"old instructions"
+        );
+        assert_eq!(
+            fs::read(plan.destination.join("retired.txt")).unwrap(),
+            b"old script"
+        );
+        assert!(!plan.destination.join("LICENSE").exists());
+        assert!(!plan.destination.join("new.txt").exists());
+        assert!(!plan.destination.join("private.txt").exists());
+        assert_eq!(
+            fs::read(root.join("private.txt")).unwrap(),
+            b"unique user data"
+        );
+        assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"new script");
+        assert!(!root.join("retired.txt").exists());
+        let journal: Journal =
+            serde_json::from_slice(&fs::read(history.join(id).join("journal.json")).unwrap())
+                .unwrap();
+        assert_eq!(journal.backup_plan.as_ref(), Some(&plan));
+        assert!(journal.backup_approved_at.is_some());
+        assert!(apply_in(
+            &history,
+            &root,
+            &expected,
+            &writes,
+            &deletes,
+            &plan,
+            Some(authorize_local_preview(&plan).unwrap())
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn backup_consent_cannot_follow_changed_content_location_operation_or_timestamp() {
+        let d = temp();
+        let root = d.path().join("skill");
+        let history = d.path().join("recovery");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("SKILL.md"), b"original").unwrap();
+        let expected = crate::local::files(&root).unwrap();
+        let writes = BTreeMap::from([("SKILL.md".into(), b"approved update".to_vec())]);
+        let plan = plan_backup(&history, &root, &expected, &writes, &[]).unwrap();
+        let changed_writes = BTreeMap::from([("SKILL.md".into(), b"different update".to_vec())]);
+        let grant = || Some(authorize_local_preview(&plan).unwrap());
+        assert!(apply_in(
+            &history,
+            &root,
+            &expected,
+            &changed_writes,
+            &[],
+            &plan,
+            grant()
+        )
+        .is_err());
+        let other_history = d.path().join("elsewhere");
+        assert!(apply_in(
+            &other_history,
+            &root,
+            &expected,
+            &writes,
+            &[],
+            &plan,
+            grant()
+        )
+        .is_err());
+        assert!(!other_history.exists());
+        // Same bytes at a different path still require a new displayed plan.
+        let other_root = d.path().join("other-skill");
+        fs::create_dir(&other_root).unwrap();
+        fs::write(other_root.join("SKILL.md"), b"original").unwrap();
+        assert!(apply_in(
+            &history,
+            &other_root,
+            &expected,
+            &writes,
+            &[],
+            &plan,
+            grant()
+        )
+        .is_err());
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("SKILL.md"))
+            .unwrap();
+        let changed_time =
+            file.metadata().unwrap().modified().unwrap() + std::time::Duration::from_secs(5);
+        file.set_times(fs::FileTimes::new().set_modified(changed_time))
+            .unwrap();
+        drop(file);
+        assert_eq!(
+            crate::local::files(&root).unwrap(),
+            expected,
+            "timestamp-only drift retains the original bytes"
+        );
+        let error = apply_in(&history, &root, &expected, &writes, &[], &plan, grant()).unwrap_err();
+        assert!(error.contains("时间戳"));
+        fs::write(root.join("SKILL.md"), b"later user edit").unwrap();
+        assert!(apply_in(&history, &root, &expected, &writes, &[], &plan, grant()).is_err());
+        assert_eq!(fs::read(root.join("SKILL.md")).unwrap(), b"later user edit");
+        assert!(
+            !history.exists(),
+            "all rejected grants must precede creation or copying"
+        );
+    }
+
+    #[test]
+    fn new_files_and_unchanged_files_never_create_backup_copies() {
+        let d = temp();
+        let root = d.path().join("skill");
+        let history = d.path().join("recovery");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("SKILL.md"), b"instructions").unwrap();
+        let expected = crate::local::files(&root).unwrap();
+        let writes = BTreeMap::from([
+            ("SKILL.md".into(), b"instructions".to_vec()),
+            ("new.txt".into(), b"new file".to_vec()),
+        ]);
+        let plan = plan_backup(&history, &root, &expected, &writes, &[]).unwrap();
+        assert!(!plan.required);
+        assert!(plan.files.is_empty());
+        assert_eq!(plan.total_bytes, 0);
+        apply_in(&history, &root, &expected, &writes, &[], &plan, None).unwrap();
+        assert!(!plan.destination.exists());
+        assert_eq!(fs::read(root.join("SKILL.md")).unwrap(), b"instructions");
+        let journal: Journal =
+            serde_json::from_slice(&fs::read(history.join(&plan.id).join("journal.json")).unwrap())
+                .unwrap();
+        assert!(journal.backup_approved_at.is_none());
+        assert_eq!(journal.entries.len(), 1);
+        assert_eq!(journal.entries[0].path, "new.txt");
+        assert!(journal.entries[0].before.is_none());
     }
     #[test]
     fn update_preserves_unmanaged_and_can_restore_interruption() {

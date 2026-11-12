@@ -127,6 +127,8 @@ pub(crate) fn start(service: &Arc<TaskSystem>) {
         let mut last_event = None;
         let mut remote_checked = Instant::now();
         let mut fallback_checked = Instant::now();
+        let mut idle_checked = Instant::now();
+        let mut resource_checked: Option<Instant> = None;
         let mut stamps = BTreeMap::new();
         let mut fallback = false;
         #[cfg(windows)]
@@ -136,11 +138,27 @@ pub(crate) fn start(service: &Arc<TaskSystem>) {
             let Some(service) = weak.upgrade() else {
                 break;
             };
+            if idle_checked.elapsed() >= Duration::from_secs(1) {
+                let _ = service.release_idle_resources();
+                idle_checked = Instant::now();
+            }
             let Ok(config) = service.check_configuration() else {
                 continue;
             };
-            if config["mode"] != "auto" {
-                service.cancel_automatic();
+            if config["maintenance"]["automaticAllowed"] != false
+                && resource_checked.is_none_or(|last| last.elapsed() >= Duration::from_secs(60))
+            {
+                // Tool version observations have their own persistent 24h due
+                // times. Skill manual mode must not disable this independent tick.
+                let _ = service.automatic_resource_version_check();
+                resource_checked = Some(Instant::now());
+            }
+            if config["mode"] != "auto" || config["maintenance"]["automaticAllowed"] == false {
+                if config["maintenance"]["automaticAllowed"] == false {
+                    service.cancel_automatic();
+                } else {
+                    service.cancel_automatic_skill_checks();
+                }
                 #[cfg(windows)]
                 {
                     drop(watcher.take());

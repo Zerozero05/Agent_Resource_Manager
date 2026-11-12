@@ -19,7 +19,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(super) struct TestTransportGuard {
+pub(crate) struct TestTransportGuard {
     previous: Option<(String, String)>,
     _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
@@ -32,7 +32,7 @@ impl Drop for TestTransportGuard {
 }
 
 #[cfg(test)]
-pub(super) fn test_transport(repo: &str, endpoint: &str) -> TestTransportGuard {
+pub(crate) fn test_transport(repo: &str, endpoint: &str) -> TestTransportGuard {
     let url = Url::parse(endpoint).expect("test loopback URL");
     assert_eq!(url.scheme(), "http");
     assert_eq!(url.host_str(), Some("127.0.0.1"));
@@ -377,6 +377,8 @@ impl Api {
     ) -> Result<Option<Value>, String> {
         #[cfg(test)]
         let override_url = test_endpoint(&self.repo);
+        #[cfg(test)]
+        let _test_gate = override_url.as_deref().map(network::test_gate_scope);
         #[cfg(test)]
         let base_url = override_url.as_deref().unwrap_or("https://api.github.com/");
         #[cfg(not(test))]
@@ -1122,6 +1124,49 @@ mod tests {
             requests
         });
         (endpoint, worker)
+    }
+
+    #[test]
+    fn synthetic_http_rate_limit_stays_on_its_endpoint_across_task_threads() {
+        let (limited_endpoint, limited_server) =
+            scripted_http(vec![(429, json!({"message":"synthetic rate limit"}), None)]);
+        let (other_endpoint, other_server) =
+            scripted_http(vec![(200, json!({"available":true}), None)]);
+        let repo = format!(
+            "synthetic-protocol/rate-scope-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        {
+            let _limited = test_transport(&repo, &limited_endpoint);
+            let error = Api::new(&repo).unwrap().get_fresh(&[]).unwrap_err();
+            assert!(error.contains("服务器限流"), "{error}");
+        }
+        assert_eq!(limited_server.join().unwrap().len(), 1);
+        let task_repo = repo.clone();
+        let task_endpoint = limited_endpoint.clone();
+        let error = std::thread::spawn(move || {
+            let _same = test_transport(&task_repo, &task_endpoint);
+            Api::new(&task_repo).unwrap().get_fresh(&[]).unwrap_err()
+        })
+        .join()
+        .unwrap();
+        // The first server has closed; only the retained limit can produce this
+        // error instead of attempting a connection or silently resetting it.
+        assert!(error.contains("服务器限流"), "{error}");
+        {
+            let _other = test_transport(&repo, &other_endpoint);
+            assert_eq!(
+                Api::new(&repo).unwrap().get_fresh(&[]).unwrap()["available"],
+                true
+            );
+        }
+        assert_eq!(other_server.join().unwrap().len(), 1);
+        let _limited_again = test_transport(&repo, &limited_endpoint);
+        assert!(Api::new(&repo)
+            .unwrap()
+            .get_fresh(&[])
+            .unwrap_err()
+            .contains("服务器限流"));
     }
 
     #[test]

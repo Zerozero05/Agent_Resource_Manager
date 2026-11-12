@@ -473,7 +473,7 @@ fn verify_link(path: &Path, expected: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn remove_link(path: &Path, expected: &Path) -> Result<(), String> {
+pub(crate) fn remove_link(path: &Path, expected: &Path) -> Result<(), String> {
     verify_link(path, expected)?;
     #[cfg(windows)]
     {
@@ -659,6 +659,7 @@ fn repair_connections(manager: &mut Manager, request: &Value) -> Result<Value, S
             .filter_map(|record| record["id"].as_str().map(str::to_owned))
             .collect()
     };
+    manager.begin_automatic_commit(request)?;
     let mut results = vec![];
     let mut seen = BTreeSet::new();
     for id in ids {
@@ -738,7 +739,7 @@ fn remove_record(manager: &mut Manager, id: &str) -> Result<Value, String> {
 
 // Bind a destructive preview to the link object as well as its destination. Replacing
 // a link with another link to the same source must invalidate the original preview.
-fn file_identity(path: &Path) -> Result<String, String> {
+pub(crate) fn file_identity(path: &Path) -> Result<String, String> {
     #[cfg(windows)]
     {
         use std::{

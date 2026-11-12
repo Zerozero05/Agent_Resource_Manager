@@ -1,6 +1,9 @@
 /* Shared spacing and hierarchy; colors remain owned by the three existing themes. */
-.desktop-workspace{--space-xs:8px;--space-sm:12px;--space-md:16px;--space-lg:24px}
+.desktop-workspace{--space-xs:8px;--space-sm:12px;--space-md:16px;--space-lg:24px;font-family:"Microsoft YaHei UI","Microsoft YaHei","Segoe UI",system-ui,sans-serif}
 .button{gap:7px;line-height:1.5;min-height:34px}
+.desktop-workspace :is(.button,.icon-button){border-radius:8px}
+.desktop-workspace .button{font-weight:600;box-shadow:none}
+.desktop-workspace :is(.button,.icon-button,.text-button){vertical-align:middle}
 .button svg,.icon-button svg,.text-button svg{flex-shrink:0}
 button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .button:disabled,.icon-button:disabled{cursor:not-allowed}
@@ -88,3 +91,18 @@ button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outli
   .desktop-workspace .detail-category select{max-width:100%}
   .desktop-workspace .diff-columns{grid-template-columns:minmax(0,1fr)}
 }
+.sidebar .brand-icon.brand-artwork { flex-shrink: 0; background: url('../src-tauri/icons/icon.png') center / contain no-repeat; box-shadow: none; }
+.sidebar .brand .brand-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.3; }
+.desktop-workspace .sidebar-top .brand .brand-title > span { display: inline; color: inherit; font-size: inherit; line-height: inherit; letter-spacing: inherit; margin: 0; white-space: nowrap; }
+.desktop-workspace .sidebar .nav-item{font-weight:500;border-radius:8px;color:var(--text-secondary)}
+.desktop-workspace .sidebar .nav-item.active{font-weight:650;color:var(--accent)}
+.desktop-workspace .sidebar .nav-count{border-color:transparent;background:transparent;font-variant-numeric:tabular-nums;font-weight:500;color:var(--text-secondary)}
+.desktop-workspace .sidebar .nav-item.active .nav-count{color:inherit}
+.desktop-workspace .sidebar .category-heading{color:var(--text-secondary)}
+.desktop-workspace .sidebar .category-select{font-weight:500}
+.desktop-workspace .sidebar .category-item.is-active>.category-select{font-weight:650}
+.desktop-workspace .sidebar .history-sidebar-entry{border-color:transparent;background:transparent}
+.desktop-workspace .sidebar .history-sidebar-entry:hover{background:var(--hover)}
+.desktop-workspace :is(.dropdown,.floating-menu){border-color:var(--control-line);border-radius:10px}
+.desktop-workspace :is(.dropdown button,.floating-menu-item){border-radius:6px;line-height:1.5}
+.desktop-workspace .dropdown button{font-size:.875rem;white-space:normal;overflow-wrap:anywhere}

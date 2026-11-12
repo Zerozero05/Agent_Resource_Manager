@@ -1,5 +1,6 @@
 ; Tauri CLI 2.12.4 builtin installer.nsi, MIT OR Apache-2.0.
-; Original SHA256 a0eea9f8e16a33df772f74499beb886fece8e006b7c16943f4fa84ebbc6ef450. Adaptation: D default and missing-drive handling.
+; Original SHA256 a0eea9f8e16a33df772f74499beb886fece8e006b7c16943f4fa84ebbc6ef450.
+; Adaptations: D default, missing-drive handling, stable install identity and legacy shortcuts.
 Unicode true
 ManifestDPIAware true
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)
@@ -66,9 +67,11 @@ ${StrLoc}
 !define WEBVIEW2BOOTSTRAPPERPATH "{{webview2_bootstrapper_path}}"
 !define WEBVIEW2INSTALLERPATH "{{webview2_installer_path}}"
 !define MINIMUMWEBVIEW2VERSION "{{minimum_webview2_version}}"
-!define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"
+; Keep the historical installation identity when the displayed product is renamed.
+!define INSTALLIDENTITY "Skill Manager"
+!define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${INSTALLIDENTITY}"
 !define MANUKEY "Software\${MANUFACTURER}"
-!define MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"
+!define MANUPRODUCTKEY "${MANUKEY}\${INSTALLIDENTITY}"
 !define UNINSTALLERSIGNCOMMAND "{{uninstaller_sign_cmd}}"
 !define ESTIMATEDSIZE "{{estimated_size}}"
 !define STARTMENUFOLDER "{{start_menu_folder}}"
@@ -78,6 +81,27 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+Var LegacyInstallDirectory
+
+; Existing shortcuts keep their names and other properties. Only an exact old
+; executable target is retargeted, so unrelated or user-rebound links are kept.
+!macro UpdateLegacyShortcut SHORTCUT
+  !insertmacro IsShortcutTarget "${SHORTCUT}" "$INSTDIR\$OldMainBinaryName"
+  Pop $0
+  ${If} $0 = 1
+    !insertmacro SetShortcutTarget "${SHORTCUT}" "$INSTDIR\${MAINBINARYNAME}.exe"
+    StrCpy $R0 1
+  ${EndIf}
+!macroend
+
+!macro RemoveLegacyShortcut SHORTCUT
+  !insertmacro IsShortcutTarget "${SHORTCUT}" "$INSTDIR\${MAINBINARYNAME}.exe"
+  Pop $0
+  ${If} $0 = 1
+    !insertmacro UnpinShortcut "${SHORTCUT}"
+    Delete "${SHORTCUT}"
+  ${EndIf}
+!macroend
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -245,11 +269,7 @@ Function PageReinstall
   nsis_tauri_utils::SemverCompare "${VERSION}" $R0
   Pop $R0
 
-  ; Read the install choice header through $R5 so a custom language file that only
-  ; defines the misspelled `choowHowToInstall` still shows its own text
-  ; TODO: remove the `choowHowToInstall` fallback in a future major version
   StrCpy $R5 "$(chooseHowToInstall)"
-  ${IfThen} $R5 == "" ${|} StrCpy $R5 "$(choowHowToInstall)" ${|}
 
   ; Reinstalling the same version
   ${If} $R0 = 0
@@ -494,15 +514,8 @@ FunctionEnd
 !insertmacro MUI_UNPAGE_INSTFILES
 
 ;Languages
-; PageReinstall reads the misspelled `choowHowToInstall` as a fallback, and makensis warns
-; about a language string that is read but never set, so default it to an empty string for
-; every language. This runs before the language files are included, so a custom language
-; file that only defines the old spelling overrides the default and the fallback shows its
-; text. `0` as the language id means the language inserted right above.
-; TODO: remove the `choowHowToInstall` fallback in a future major version
 {{#each languages}}
 !insertmacro MUI_LANGUAGE "{{this}}"
-LangString choowHowToInstall 0 ""
 {{/each}}
 !insertmacro MUI_RESERVEFILE_LANGDLL
 {{#each language_files}}
@@ -546,14 +559,14 @@ Function .onInit
         StrCpy $INSTDIR "$PROGRAMFILES\${PRODUCTNAME}"
       ${EndIf}
     !else if "${INSTALLMODE}" == "currentUser"
-      StrCpy $INSTDIR "D:\03_github_projects\skill_manager\app"
+      StrCpy $INSTDIR "D:\03_github_projects\Agent_Resource_Manager\app"
     !endif
 
     Call RestorePreviousInstallLocation
     ; Keep explicit /D and an existing installation choice. Resolve the fresh
     ; install before SetOutPath can create any application directory.
     !if "${INSTALLMODE}" == "currentUser"
-      ${If} $INSTDIR == "D:\03_github_projects\skill_manager\app"
+      ${If} $INSTDIR == "D:\03_github_projects\Agent_Resource_Manager\app"
         IfFileExists "D:\*.*" skill_manager_default_ready
         IfSilent skill_manager_missing_drive_silent
         StrCpy $INSTDIR ""
@@ -571,6 +584,13 @@ Function .onInit
   !if "${INSTALLMODE}" == "both"
     !insertmacro MULTIUSER_INIT
   !endif
+
+  ; Check before the reinstall page can invoke the previous uninstaller.
+  ReadRegStr $OldMainBinaryName SHCTX "${UNINSTKEY}" "MainBinaryName"
+  ${If} $OldMainBinaryName == "skill-manager.exe"
+    ReadRegStr $LegacyInstallDirectory SHCTX "${MANUPRODUCTKEY}" ""
+    Call EnsureLegacyAppClosed
+  ${EndIf}
 
   ; Abort downgrades if they are disabled, in the modes that skip the reinstall page choice:
   ; silent, passive and update
@@ -634,6 +654,7 @@ Section WebView2
         ${EndIf}
         StrCpy $6 "$TEMP\MicrosoftEdgeWebview2Setup.exe"
         Goto install_webview2
+        !define HAS_WEBVIEW2_INSTALLER
       !endif
 
       !if "${INSTALLWEBVIEW2MODE}" == "embedBootstrapper"
@@ -642,6 +663,7 @@ Section WebView2
         DetailPrint "$(installingWebview2)"
         StrCpy $6 "$TEMP\MicrosoftEdgeWebview2Setup.exe"
         Goto install_webview2
+        !define HAS_WEBVIEW2_INSTALLER
       !endif
 
       !if "${INSTALLWEBVIEW2MODE}" == "offlineInstaller"
@@ -650,10 +672,12 @@ Section WebView2
         DetailPrint "$(installingWebview2)"
         StrCpy $6 "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
         Goto install_webview2
+        !define HAS_WEBVIEW2_INSTALLER
       !endif
 
       Goto webview2_done
 
+      !ifdef HAS_WEBVIEW2_INSTALLER
       install_webview2:
         DetailPrint "$(installingWebview2)"
         ; $6 holds the path to the webview2 installer
@@ -664,6 +688,8 @@ Section WebView2
           DetailPrint "$(webview2InstallError)"
           Abort "$(webview2AbortError)"
         ${EndIf}
+      !undef HAS_WEBVIEW2_INSTALLER
+      !endif
       webview2_done:
     ${EndIf}
   ${Else}
@@ -705,6 +731,10 @@ Section Install
   !endif
 
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  ReadRegStr $OldMainBinaryName SHCTX "${UNINSTKEY}" "MainBinaryName"
+  ${If} $OldMainBinaryName == "skill-manager.exe"
+    Call EnsureLegacyAppClosed
+  ${EndIf}
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
@@ -908,6 +938,11 @@ Section Uninstall
       !insertmacro UnpinShortcut "$DESKTOP\${PRODUCTNAME}.lnk"
       Delete "$DESKTOP\${PRODUCTNAME}.lnk"
     ${EndIf}
+    !if "${PRODUCTNAME}" != "${INSTALLIDENTITY}"
+      !insertmacro RemoveLegacyShortcut "$SMPROGRAMS\$AppStartMenuFolder\${INSTALLIDENTITY}.lnk"
+      !insertmacro RemoveLegacyShortcut "$SMPROGRAMS\${INSTALLIDENTITY}.lnk"
+      !insertmacro RemoveLegacyShortcut "$DESKTOP\${INSTALLIDENTITY}.lnk"
+    !endif
   ${EndIf}
 
   ; Remove registry information for add/remove programs
@@ -962,6 +997,30 @@ Function RestorePreviousInstallLocation
     StrCpy $INSTDIR $4
 FunctionEnd
 
+Function EnsureLegacyAppClosed
+  ${If} $LegacyInstallDirectory == ""
+    SetErrorLevel 2
+    Abort "Previous installation directory is missing from its registration."
+  ${EndIf}
+  StrCpy $R4 1
+  !insertmacro RestartManager_StartSession $R0
+  ${If} $R0 != ""
+    !insertmacro RestartManager_RegisterFile $R0 "$LegacyInstallDirectory\skill-manager.exe"
+    ${If} $0 = 0
+      System::Call 'RSTRTMGR::RmGetList(p R0, *i .r1, *i .r2, p 0, *i .r3) i .r0'
+      StrCpy $R4 $0
+    ${EndIf}
+    !insertmacro RestartManager_EndSession $R0
+  ${EndIf}
+  ${If} $R4 <> 0
+    SetErrorLevel 2
+    IfSilent legacy_app_closed_message_done
+    MessageBox MB_OK|MB_ICONINFORMATION "请先正常退出旧版 Skill Manager，再重试安装。 / Close the previous Skill Manager and retry installation."
+    legacy_app_closed_message_done:
+    Abort "Could not confirm the previous Skill Manager is closed."
+  ${EndIf}
+FunctionEnd
+
 Function Skip
   Abort
 FunctionEnd
@@ -977,6 +1036,10 @@ Function CreateOrUpdateStartMenuShortcut
   ; We used to use product name as MAINBINARYNAME
   ; migrate old shortcuts to target the new MAINBINARYNAME
   StrCpy $R0 0
+  !if "${PRODUCTNAME}" != "${INSTALLIDENTITY}"
+    !insertmacro UpdateLegacyShortcut "$SMPROGRAMS\$AppStartMenuFolder\${INSTALLIDENTITY}.lnk"
+    !insertmacro UpdateLegacyShortcut "$SMPROGRAMS\${INSTALLIDENTITY}.lnk"
+  !endif
 
   !insertmacro IsShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
   Pop $0
@@ -1018,6 +1081,13 @@ FunctionEnd
 Function CreateOrUpdateDesktopShortcut
   ; We used to use product name as MAINBINARYNAME
   ; migrate old shortcuts to target the new MAINBINARYNAME
+  StrCpy $R0 0
+  !if "${PRODUCTNAME}" != "${INSTALLIDENTITY}"
+    !insertmacro UpdateLegacyShortcut "$DESKTOP\${INSTALLIDENTITY}.lnk"
+    ${If} $R0 = 1
+      Return
+    ${EndIf}
+  !endif
   !insertmacro IsShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
   Pop $0
   ${If} $0 = 1

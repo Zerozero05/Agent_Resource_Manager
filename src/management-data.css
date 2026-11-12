@@ -1,0 +1,15 @@
+.skill-metadata,.saved-views{min-width:0;display:flex;flex-direction:column;gap:8px}
+.library-filter-row>.saved-views,.resource-toolbar>.saved-views{flex:0 1 auto;max-width:100%;align-self:center}
+.library-filter-row>.saved-views[data-expanded=true],.resource-toolbar>.saved-views[data-expanded=true]{flex:1 0 100%;width:100%}
+.library-filter-row>.saved-views .management-data-editor,.resource-toolbar>.saved-views .management-data-editor{width:100%;box-sizing:border-box}
+.skill-metadata{margin-top:12px}.management-data-toolbar,.management-data-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.management-data-toolbar select{min-width:140px;max-width:min(100%,260px)}.management-data-toolbar .button,.management-data-actions .button{min-height:32px}
+.management-data-summary{color:var(--muted);font-size:.88em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.management-data-editor{display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);min-width:0}
+.management-data-editor label{display:flex;flex-direction:column;gap:6px;min-width:0}.management-data-editor input,.management-data-editor textarea{width:100%;min-width:0;box-sizing:border-box}.management-data-editor textarea{resize:vertical}.management-data-editor>.button{align-self:flex-start}
+.management-data-help{margin:0;color:var(--text-secondary);font-size:.86em;line-height:1.6;overflow-wrap:anywhere}.management-data-error{margin:0;color:var(--bad,var(--text));font-size:.88em;overflow-wrap:anywhere}
+.management-data-preview{display:grid;grid-template-columns:45px minmax(0,1fr);gap:8px;margin:0}.management-data-preview dt{color:var(--muted)}.management-data-preview dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+
+.library-reading-status{display:flex;flex-wrap:wrap;align-items:center;gap:8px;color:var(--muted);font-size:.88em;line-height:1.5}
+
+.library-selection-bar>.saved-views{margin-inline-start:auto;max-width:100%;flex:0 1 auto}.library-selection-bar>.saved-views[data-expanded=true]{flex:1 0 100%;width:100%}

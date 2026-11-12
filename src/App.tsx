@@ -1,20 +1,29 @@
-import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import packageInfo from '../package.json';
 import { comparisonScope, displayStatus, githubFolderUrl, libraryCounts, libraryStatusOptions, statusFilterLabel, needsAttention, paginateLibrary, queryLibrary, rangeSelection, selectionForDrag, statusExplanation, type LibraryStatusFilter } from './library';
-import { usePreferenceQueue } from './usePreferenceQueue';
+import { usePreferenceQueue, type LayoutPreferences } from './usePreferenceQueue';
 import { libraryMode as normalizeLibraryMode, type LibraryMode } from './library';
 import { LibraryCards } from './LibraryCards';
+import { Dashboard } from './Dashboard';
+import { ResourceLibrary } from './ResourceLibrary';
+import type { ResourceLibraryDraft } from './resource-library';
+import type { RemovalHistoryRecord } from './RemovalHistory';
+import { nearestSurvivingId, reconcileLibraryReading } from './library-reading';
+import { LibraryReadingBoundary } from './LibraryReadingBoundary';
 import { ShortcutHelp } from './ShortcutHelp';
+import { ManagementHistoryControls, useManagementHistory, type ManagementHistoryEntry } from './management-history';
+import type { MaintenanceState } from './MaintenanceSettings';
+import type { SceneDraft } from './SceneControls';
+import { managementDataCache, type ManagementAction, type ManagementData, type SkillViewFilters, type ToolViewFilters } from './management-data';
+import './management-data.css';
 import { CategoryChip, CategoryColorPicker } from './CategoryColor';
 import { categoryColors, nextCategoryColor, isCategoryColor, type Category, type CategoryColor } from './categories';
 import { FloatingMenu, type OpenMenu } from './FloatingMenu';
-import { SkillInformation } from './SkillInformation';
 import { RuntimeChecks } from './RuntimeChecks';
 import { requiredExportPaths, runtimeAttentionCount, type RuntimeIssue } from './runtime';
 import { terminalTask, taskStatus, type ManagerTask } from './tasks';
@@ -32,6 +41,7 @@ import { ExportSelection } from './ExportSelection';
 import { FileResourceRow } from './FileResourceRow';
 import { OperationHistory, type OperationHistoryDraft } from './OperationHistory';
 import { operationHistoryDraft } from './operation-history';
+import { appendProblemNotice, type FeedbackNotice } from './operation-problems';
 import { OperationSummary } from './OperationSummary';
 import { DestinationChoice } from './DestinationChoice';
 import { destinationAfterPicker, destinationDraft, destinationReady, type DestinationDraft } from './destination';
@@ -44,6 +54,14 @@ import { useExportPlan } from './useExportPlan';
 import { useDocumentCache } from './useDocumentCache';
 import { BoundedReadCache, documentCacheKey, inventoryReadKey } from './read-cache';
 import { isStaleReadSnapshot } from './snapshot-clock';
+import { AppearanceControls } from './AppearanceControls';
+import { BackupPlanConsent, useBackupConsent, type SkillBackupPlan } from './BackupPlanConsent';
+import { CommandPalette } from './CommandPalette';
+import { buildCommands, resourceCommandCatalogue, type Command } from './commands';
+import type { Resource } from './resources';
+import type { ResourcePanelDraft } from './resource-panel-state';
+import { SourceMapping, SkillSourceHealth, type SkillSourceMapping } from './SkillSource';
+import { ACCENTS, DEFAULT_APPEARANCE, applyAppearance, normalizeAppearance, observeMotion, type Appearance } from './appearance';
 import './updates.css';
 import './tasks.css';
 import {
@@ -51,8 +69,22 @@ import {
   ChevronLeft, ChevronRight, CircleAlert, CircleHelp, Code2, Copy, Download, Ellipsis,
   ExternalLink, File, FileCode2, Folder, FolderOpen, GitBranch, Github, Layers3,
   LayoutGrid, LayoutPanelLeft, Link2, List, LoaderCircle, LockKeyhole, Monitor, Plus, RefreshCw, Search, Settings2,
-  ShieldCheck, SlidersHorizontal, Unlink, Upload, X, GripVertical, PanelLeftClose, PanelLeftOpen, Undo2, ArrowUp, ArrowDown, Star,
+  ShieldCheck, SlidersHorizontal, Unlink, Upload, X, GripVertical, Undo2, ArrowUp, ArrowDown, Star,
 } from 'lucide-react';
+
+const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'));
+const SkillInformation = lazy(() => import('./SkillInformation').then(module => ({ default: module.SkillInformation })));
+const ResourcePanel = lazy(() => import('./ResourcePanel').then(module => ({ default: module.ResourcePanel })));
+const MaintenanceSettings = lazy(() => import('./MaintenanceSettings').then(module => ({ default: module.MaintenanceSettings })));
+const SceneControls = lazy(() => import('./SceneControls').then(module => ({ default: module.SceneControls })));
+const SkillMetadata = lazy(() => import('./SkillMetadata').then(module => ({ default: module.SkillMetadata })));
+const ResourceRelations = lazy(() => import('./ResourceRelations').then(module => ({ default: module.ResourceRelations })));
+const SavedViews = lazy(() => import('./SavedViews').then(module => ({ default: module.SavedViews })));
+const TaskResults = lazy(() => import('./TaskResults').then(module => ({ default: module.TaskResults })));
+const DiagnosticSummary = lazy(() => import('./DiagnosticSummary').then(module => ({ default: module.DiagnosticSummary })));
+const ConfigurationTransfer = lazy(() => import('./ConfigurationTransfer').then(module => ({ default: module.ConfigurationTransfer })));
+const SkillRemoval = lazy(() => import('./SkillRemoval').then(module => ({ default: module.SkillRemoval })));
+const ResourceSpace = lazy(() => import('./ResourceSpace').then(module => ({ default: module.ResourceSpace })));
 
 // Stable component types preserve heading IDs and keyboard focus during saved-scroll rerenders.
 const markdownHeadings = {
@@ -61,7 +93,7 @@ const markdownHeadings = {
   h3: ({ children }: { children?: ReactNode }) => <h3 id={String(children).toLowerCase().replace(/\s+/g, '-')}>{children}</h3>,
 };
 
-type View = 'skills' | 'changes' | 'clients' | 'settings';
+type View = 'dashboard' | 'resources' | 'skills' | 'tools' | 'changes' | 'clients' | 'settings';
 type Filter = 'all' | 'local' | 'github' | 'linked';
 type UiTheme = 'light' | 'dark' | 'eye';
 
@@ -69,29 +101,30 @@ type LibrarySort = 'name' | 'status' | 'checked';
 type LibraryPageSize = 20 | 50 | 100;
 
 type Skill = {
-  id: string; name: string; displayName?: string; description?: string; version?: string | null; categoryId?: string | null; favorite?: boolean;
+  lastRemoval?: RemovalHistoryRecord;
+  id: string; name: string; displayName?: string; alias?: string; notes?: string; description?: string; version?: string | null; categoryId?: string | null; favorite?: boolean;
   localPath?: string | null; path?: string; readOnly?: boolean; sourceId?: string | null;
   remotePath?: string | null; repo?: string | null; branch?: string | null; commit?: string | null;
   localHashes?: Record<string, string>; externalBindings?: unknown; baselineCommit?: string | null; baselineHashes?: Record<string, string>; baselineKind?: string; baselineVerifiedAt?: string; installedCommit?: string | null; runtimeFiles?: string[];
   runtimeConfirmed?: boolean; status?: string; lastChecked?: string | null; lastLocalCheckedAt?: string | null; lastRemoteCheckedAt?: string | null; comparisonScope?: string[]; error?: string | null;
-  private?: boolean; dependencies?: unknown; verification?: unknown;
+  private?: boolean; dependencies?: unknown; verification?: unknown; installedProvenance?: SkillSourceMapping | null; sceneEligible?: boolean; sceneReason?: string; effectiveEnabled?: boolean;
   runtimeWarnings?: string[]; runtimeIssues?: RuntimeIssue[]; runtimeConfirmationKind?: string; runtimeAudit?: { status: string; checkedAt?: string; canAutoConfirm?: boolean }; untrackedFiles?: string[]; localNotice?: string | null; remoteCheckRequired?: boolean; remoteMissing?: boolean;
   changeDetails?: { path: string; change: string; side: 'local' | 'remote' | 'both' }[]; associationNote?: string | null; associationPending?: boolean; comparisonNote?: string | null;
 };
 type Source = { id: string; repo: string; branch?: string; commit?: string; private?: boolean; lastChecked?: string; error?: string; roots?: string[]; rootsInferred?: boolean };
 type Connection = ClientConnection & { discovered?: boolean };
-type Snapshot = { localRoots?: LocalRoot[]; ignoredLocalPaths?: string[]; checkMode?: 'auto' | 'manual'; checkSummary?: CheckSummary; stateRevision?: number; readGeneration?: number | null; skills: Skill[]; sources: Source[]; connections: Connection[]; settings: { checkIntervalMinutes?: number; editorPath?: string; recoveryMessages?: string[]; uiTheme?: UiTheme; uiZoom?: number; uiFontSize?: number; libraryMode?: LibraryMode; libraryPageSize?: LibraryPageSize; librarySort?: LibrarySort; categories?: Category[]; sidebarWidth?: number; sidebarCollapsed?: boolean }; dataDir?: string; managementUndo?: { available: boolean; label?: string } };
+type Snapshot = { startup?: { basicMode?: boolean }; localRoots?: LocalRoot[]; ignoredLocalPaths?: string[]; checkMode?: 'auto' | 'manual'; checkSummary?: CheckSummary; stateRevision?: number; managementRevision?: number; readGeneration?: number | null; skills: Skill[]; sources: Source[]; connections: Connection[]; settings: Partial<Appearance> & { checkIntervalMinutes?: number; editorPath?: string; recoveryMessages?: string[]; uiTheme?: UiTheme; uiZoom?: number; uiFontSize?: number; libraryMode?: LibraryMode; libraryPageSize?: LibraryPageSize; librarySort?: LibrarySort; categories?: Category[]; sidebarWidth?: number; sidebarCollapsed?: boolean }; dataDir?: string; managementUndo?: ManagementHistoryEntry; managementRedo?: ManagementHistoryEntry; maintenance?: MaintenanceState };
 type FileEntry = { path: string; size?: number; hash?: string; runtime?: boolean; missing?: boolean; localAvailable?: boolean; remoteAvailable?: boolean; localHash?: string; remoteHash?: string; contentDifferent?: boolean };
 type FileResult = { runtimeFiles?: string[]; runtimeConfirmationKind?: string; runtimeAudit?: { status: string; checkedAt?: string; canAutoConfirm?: boolean }; externalDependencies?: ExternalDependency[]; files: FileEntry[]; runtimeConfirmed: boolean; requiredFiles?: string[]; exportRequiredFiles?: string[]; exportError?: string | null; optionalFiles?: string[]; requiredReasons?: Record<string, string>; suggestedFiles?: string[]; warnings?: string[]; issues?: RuntimeIssue[]; remoteStatus?: 'ok' | 'error' | 'not_linked'; remoteError?: string; remoteCommit?: string; remoteCheckedAt?: string };
 type DocumentResult = { commit?: string | null; readGeneration?: number | null; localFingerprint?: string; markdown: string; documentPath?: string; basePath?: string; baseUrl?: string; source?: string; checkedAt?: string; private?: boolean };
 type DiffFile = { path: string; change: string; local?: string; remote?: string };
 type ClientPreviewEntry = { connectionId: string; skillId?: string; client?: string; label: string; path?: string; target?: string; mode: ClientManagementMode; canApply: boolean; error?: string };
-type Preview = { mode?: ClientManagementMode; entries?: ClientPreviewEntry[]; id?: string; kind: string; skillId: string; summary: string; files: DiffFile[]; warnings?: string[]; canApply: boolean; needsRuntimeSelection?: boolean; availableFiles?: (FileEntry | string)[]; requiredFiles?: string[]; optionalFiles?: string[]; requiredReasons?: Record<string, string>; suggestedFiles?: string[]; targetPath?: string; targetRepo?: string; targetBranch?: string; path?: string; target?: string; commit?: string; cleanupFiles?: { path: string; absolutePath: string; reason: string }[] };
+type Preview = { previousSource?: SkillSourceMapping; targetSource?: SkillSourceMapping; installedProvenance?: SkillSourceMapping | null; backupPlan?: SkillBackupPlan; mode?: ClientManagementMode; entries?: ClientPreviewEntry[]; id?: string; kind: string; skillId: string; summary: string; files: DiffFile[]; warnings?: string[]; canApply: boolean; needsRuntimeSelection?: boolean; availableFiles?: (FileEntry | string)[]; requiredFiles?: string[]; optionalFiles?: string[]; requiredReasons?: Record<string, string>; suggestedFiles?: string[]; targetPath?: string; targetRepo?: string; targetBranch?: string; path?: string; target?: string; commit?: string; cleanupFiles?: { path: string; absolutePath: string; reason: string }[] };
 type AuditSummary = { checked: number; passed: number; needsReview: number; failed: number; items: { skillId: string; status: string; reason?: string }[] };
 type TransferResult = { skillId?: string; commit?: string; submitted?: boolean; unchanged?: boolean; verificationError?: string; cleanup?: { receiptId?: string; recordError?: string; removed: { path: string; absolutePath: string }[]; retained: { path: string; reason: string }[] } };
 type CleanupReceipt = { id: string; commit: string; createdAt?: string; files?: { path: string }[] };
 type UiContinuation = { kind: 'files' | 'runtime' | 'preview' | 'audit' | 'receipts' | 'export' | 'scan'; skillId?: string; operation?: 'install' | 'push' | 'upload' };
-type Notice = { id: number; tone: 'success' | 'error' | 'info'; message: string; skillId?: string };
+type Notice = FeedbackNotice;
 type Modal = { kind: 'client-result'; mode: ClientManagementMode; results: ConnectionResult[] } | { kind: 'client-connect'; client: string } | { kind: 'local' } | { kind: 'github' } | { kind: 'associate'; skill: Skill } |
   { kind: 'files'; skill: Skill; operation: 'install' | 'push' | 'update' | 'upload'; result: FileResult } |
   { kind: 'receipts'; skill: Skill; receipts: CleanupReceipt[] } |
@@ -104,9 +137,9 @@ type Modal = { kind: 'client-result'; mode: ClientManagementMode; results: Conne
 const EMPTY: Snapshot = { skills: [], sources: [], connections: [], settings: { checkIntervalMinutes: 30 } };
 const CHANGES: Record<string, string> = { add: '新增', added: '新增', modified: '修改', deleted: '移除', unchanged: '一致', conflict: '冲突', different: '待核对' };
 const CLIENTS = [{ id: 'codex', name: 'Codex', folder: '.agents/skills' }, { id: 'claude', name: 'Claude Code', folder: '.claude/skills' }, { id: 'cursor', name: 'Cursor', folder: '.cursor/skills' }];
-const THEMES: { id: UiTheme; label: string; description: string }[] = [{ id: 'light', label: '明亮', description: '浅灰与白色' }, { id: 'dark', label: '夜间', description: '炭黑与石墨灰' }, { id: 'eye', label: '护眼', description: '低亮度暖灰米色' }];
+const THEMES: { id: UiTheme; label: string; description: string }[] = [{ id: 'light', label: '明亮', description: '浅灰与白色' }, { id: 'dark', label: '夜间', description: '炭黑与石墨灰' }, { id: 'eye', label: '护眼', description: '低亮度暖灰绿' }];
 function displayNumber(value: unknown, fallback: number, min: number, max: number) { const number = Number(value); return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback; }
-function skillName(skill: Skill) { return skill.displayName || skill.name || '未命名 Skill'; }
+function skillName(skill: Skill) { return skill.alias || skill.displayName || skill.name || '未命名 Skill'; }
 function errText(error: unknown) { return error instanceof Error ? error.message : String(error); }
 function dateText(value?: string | null) { if (!value) return '尚未检查'; const date = new Date(value); return Number.isNaN(date.valueOf()) ? value : date.toLocaleString('zh-CN', { hour12: false }); }
 function pathJoin(base: string, child: string) { return `${base.replace(/[\\/]+$/, '')}${base.includes('\\') ? '\\' : '/'}${child}`; }
@@ -122,8 +155,8 @@ function changedFiles(skill: Skill) { return (skill.changeDetails || []).filter(
 function remoteDirectoryUrl(skill: Skill) { return githubFolderUrl(skill) || ''; }
 function tokenCreationUrl(repo: string, access: 'read' | 'write') {
   const url = new URL('https://github.com/settings/personal-access-tokens/new');
-  url.searchParams.set('name', 'Skill Manager');
-  url.searchParams.set('description', 'Skill Manager: selected repository contents');
+  url.searchParams.set('name', 'Agent Resource Manager');
+  url.searchParams.set('description', 'Agent Resource Manager: selected repository contents');
   url.searchParams.set('expires_in', '30');
   url.searchParams.set('contents', access);
   const match = /^(?:https:\/\/github\.com\/)?([a-z0-9-]+)\/[a-z0-9_.-]+\/?$/i.exec(repo.trim());
@@ -139,7 +172,7 @@ function resolveDocPath(current: string, target: string) {
   return parts.join('/');
 }
 async function request<T>(action: string, args: Record<string, unknown> = {}) {
-  if (!isTauri()) throw new Error('此页面需要在 Skill Manager 桌面程序中打开，浏览器预览无法访问本地目录或凭据。');
+  if (!isTauri()) throw new Error('此页面需要在 Agent Resource Manager 桌面程序中打开，浏览器预览无法访问本地目录或凭据。');
   return invoke<T>('manager_request', { request: { action, ...args } });
 }
 function Badge({ skill }: { skill: Skill }) {
@@ -268,13 +301,47 @@ export default function SessionApp() {
   useEffect(() => { if (session.visible) setVisited(true); }, [session.visible]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [state, setState] = useState<Snapshot>(EMPTY);
-  const [view, setLocalView] = useState<View>(seed('view', (pane.state.view || 'skills') as View));
+  const readingRef = useRef<{ key: string; ids: string[] } | null>(seed('libraryReading', null));
+  const [readingRefresh, setReadingRefresh] = useState(seed('readingRefresh', 0));
+  const [libraryNavigation, setLibraryNavigation] = useState(0);
+  const basicMode = state.startup?.basicMode === true || document.documentElement.dataset.basicMode === 'true';
+  const management = useSyncExternalStore(managementDataCache.subscribe, managementDataCache.getSnapshot);
+  const displaySkills = useMemo(() => {
+    const annotations = new Map(management.data?.skillAnnotations.map(item => [item.skillId, item]));
+    return state.skills.map(skill => {
+      const annotation = annotations.get(skill.id);
+      return annotation ? { ...skill, alias: annotation.alias, notes: annotation.notes } : skill;
+    });
+  }, [state.skills, management.data?.skillAnnotations]);
+  const [view, setViewState] = useState<View>(seed('view', (pane.state.view || 'skills') as View));
+  const currentView = useRef(view); currentView.current = view;
+  const viewScrollPositions = useRef<Partial<Record<View, number>>>(seed('viewScrollPositions', {}));
+  function setLocalView(next: View) {
+    if (next !== currentView.current) {
+      const scroller = paneRoot.current?.querySelector<HTMLElement>(':scope > .main');
+      if (scroller) viewScrollPositions.current[currentView.current] = scroller.scrollTop;
+      const restoredTop = viewScrollPositions.current[next];
+      clearTimeout(scrollSaveTimer.current);
+      scrollTop.current = typeof restoredTop === 'number' && Number.isFinite(restoredTop) ? Math.max(0, restoredTop) : 0;
+      homeRestorePending.current = true;
+    }
+    setViewState(next);
+  }
+  const toolPanelDraft = useRef<ResourcePanelDraft | undefined>(seed('toolPanelDraft', undefined));
+  const resourceLibraryDraftRef = useRef<ResourceLibraryDraft | undefined>(seed('resourceLibraryDraft', undefined));
+  const saveResourceLibraryDraft = useCallback((draft: ResourceLibraryDraft) => { resourceLibraryDraftRef.current = draft; }, []);
+  const [toolFilterRequest, setToolFilterRequest] = useState<{ sequence: number; filters: ToolViewFilters }>();
+  const sceneDraft = useRef<SceneDraft | undefined>(seed('sceneDraft', undefined));
+  const [toolsVisited, setToolsVisited] = useState(seed('toolsVisited', view === 'tools'));
+  const saveToolPanelDraft = useCallback((draft: ResourcePanelDraft) => { toolPanelDraft.current = draft; }, []);
+  const saveSceneDraft = useCallback((draft: SceneDraft) => { sceneDraft.current = draft; }, []);
+  useEffect(() => { if (view === 'tools') setToolsVisited(true); }, [view]);
   function setView(next: View) { if (isHome) setLocalView(next); else sessionRef.current.goHome(next); }
   const [filter, setFilter] = useState<Filter>(seed('filter', 'all'));
   const [query, setQuery] = useState(seed('query', ''));
-  const [libraryMode, setLibraryMode] = useState<LibraryMode>('list');
-  const [librarySort, setLibrarySort] = useState<LibrarySort>('name');
-  const [libraryPageSize, setLibraryPageSize] = useState<LibraryPageSize>(20);
+  const [libraryMode, setLibraryMode] = useState<LibraryMode>(seed('libraryMode', 'list'));
+  const [librarySort, setLibrarySort] = useState<LibrarySort>(seed('librarySort', 'name'));
+  const [libraryPageSize, setLibraryPageSize] = useState<LibraryPageSize>(seed('libraryPageSize', 20));
   const [libraryPage, setLibraryPage] = useState(seed('libraryPage', 1));
   const [statusFilter, setStatusFilter] = useState<LibraryStatusFilter>(seed('statusFilter', 'all'));
   const [categoryFilter, setCategoryFilter] = useState(seed('categoryFilter', 'all'));
@@ -291,7 +358,6 @@ export default function SessionApp() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarFlyout, setSidebarFlyout] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(window.innerWidth);
-  const [paneWidth, setPaneWidth] = useState<number>();
   const [resizingSidebar, setResizingSidebar] = useState(false);
   const [zoomFeedback, setZoomFeedback] = useState('');
   const [layoutError, setLayoutError] = useState('');
@@ -332,9 +398,78 @@ export default function SessionApp() {
   const storageDraft = useRef<StorageSettingsDraft | undefined>(seed('storageDraft', undefined));
   const networkDraft = useRef<NetworkSettingsDraft | undefined>(seed('networkDraft', undefined));
   const [settingsOutline, setSettingsOutline] = useState(seed('settingsOutline', false));
+  const [settingsSection, setSettingsSection] = useState(seed('settingsSection', 'general'));
   const clientConnectDraft = useRef<ClientConnectDraft | undefined>(seed('clientConnectDraft', undefined));
   const [operation, setOperation] = useState('');
   const { tasks, run: runTask, inspect: inspectTask, cancel: cancelTask, clear: clearTasks } = session.tasks;
+  const resourceCatalogue = useSyncExternalStore(resourceCommandCatalogue.subscribe, resourceCommandCatalogue.getSnapshot);
+  const sourceBySkill = useMemo(() => Object.fromEntries(state.skills.filter(skill => skill.sourceId).map(skill => [skill.id, skill.sourceId!])), [state.skills]);
+  const sourceBySkillRef = useRef(sourceBySkill); sourceBySkillRef.current = sourceBySkill;
+  const [commandResourceId, setCommandResourceId] = useState('');
+  const [commandResourceRequest, setCommandResourceRequest] = useState(seed('commandResourceRequest', 0));
+  const [commandResourceAction, setCommandResourceAction] = useState<{ id: string; revision: number } | null>(null);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandSetting, setCommandSetting] = useState('');
+  const resourceAction = useCallback(async <T,>(label: string, action: string, args: Record<string, unknown>): Promise<T> => {
+    if (action === 'resource_list') return resourceCommandCatalogue.read(() => runTask<{ resources: Resource[] }>(label, action, args, { view: 'tools', paneId: pane.id })) as Promise<T>;
+    const target = resourceCommandCatalogue.getSnapshot().resources.find(item => item.id === args.id);
+    const result = await runTask<T>(label, action, args, { view: 'tools', paneId: pane.id, ...(target ? { resourceId: target.id, ...(target.repository ? { sourceId: target.repository } : {}) } : {}) });
+    const resource = (result as { resource?: Resource } | null)?.resource;
+    if (resource?.id) resourceCommandCatalogue.accept(resource);
+    return result;
+  }, [runTask, pane.id]);
+  useEffect(() => { if (state.stateRevision !== undefined) resourceCommandCatalogue.invalidate(state.stateRevision); }, [state.stateRevision]);
+  const paletteCommands = useMemo(() => buildCommands(displaySkills, resourceCatalogue.resources, { readOnly: basicMode }), [displaySkills, resourceCatalogue.resources, basicMode]);
+  const managementAction = useCallback<ManagementAction>(async (label, action, args) => {
+    const result = await runTask<ManagementData>(label, action, args, { paneId: pane.id });
+    managementDataCache.accept(result);
+    return result;
+  }, [runTask, pane.id]);
+  const relationAction = useCallback(async <T,>(label: string, action: string, args: Record<string, unknown>): Promise<T> => {
+    return runTask<T>(label, action, args, { paneId: pane.id });
+  }, [runTask, pane.id]);
+  const readManagementData = useCallback(async () => {
+    const load = () => runTask<ManagementData>('读取个人管理信息', 'management_data', {}, { paneId: pane.id });
+    await managementDataCache.read(load);
+    // A newer state event can arrive while the shared read is in flight.
+    // One follow-up resolves that race without polling an unavailable backend.
+    if (managementDataCache.getSnapshot().stale) await managementDataCache.read(load);
+  }, [runTask, pane.id]);
+  const readPaletteResources = useCallback(() => {
+    const catalogue = resourceCommandCatalogue.getSnapshot();
+    if (!catalogue.loaded || catalogue.stale) void resourceAction('读取工具目录', 'resource_list', {}).catch(() => undefined);
+  }, [resourceAction]);
+  useEffect(() => { if (commandPaletteOpen && session.active) readPaletteResources(); }, [commandPaletteOpen, session.active, state.stateRevision, resourceCatalogue.stale, readPaletteResources]);
+  useEffect(() => {
+    if (!isHome) return;
+    const focus = (event: Event) => {
+      const target = (event as CustomEvent).detail;
+      if ((target?.kind === 'tool' || target?.kind === 'resource-action') && typeof target.id === 'string') {
+        if (target.kind === 'resource-action') {
+          const resource = resourceCommandCatalogue.getSnapshot().resources.find(item => item.id === target.id);
+          if (basicModeRef.current || !resource?.enabled || resource.sceneEligible === false || resource.effectiveEnabled === false || resource.revision !== target.expectedRevision || !resource.actions.some(item => item.id === target.actionId)) { notify('info', '此动作的状态已变化，请重新搜索并核对。'); return; }
+          setCommandResourceAction({ id: target.actionId, revision: target.expectedRevision });
+        } else setCommandResourceAction(null);
+        setLocalView('tools'); setCommandResourceId(target.id); setCommandResourceRequest(value => value + 1);
+      }
+      if (target?.kind === 'settings' && ['general', 'display', 'maintenance', 'scenes', 'storage', 'network', 'github', 'configuration', 'diagnostics'].includes(target.section)) { setLocalView('settings'); setSettingsSection(target.section); setCommandSetting(target.section); }
+    };
+    window.addEventListener('arm-command-focus', focus);
+    return () => window.removeEventListener('arm-command-focus', focus);
+  }, [isHome]);
+  useEffect(() => {
+    if (!isHome || !session.visible || view !== 'settings' || !commandSetting) return;
+    let frame = 0, attempts = 0;
+    const locate = () => {
+      const scope = paneRoot.current;
+      const heading = scope?.querySelector<HTMLElement>(`[data-outline-key="settings:${commandSetting}"]`);
+      if (scope && heading?.id && scrollToPaneAnchor(scope, heading.id)) setCommandSetting('');
+      else if (++attempts < 3) frame = requestAnimationFrame(locate);
+      else setCommandSetting('');
+    };
+    frame = requestAnimationFrame(locate);
+    return () => cancelAnimationFrame(frame);
+  }, [isHome, session.visible, view, commandSetting]);
   const [pendingContexts, setPendingContexts] = useState<{ id: number; modal: Modal; metadata: boolean }[]>([]);
   const contextRef = useRef<{ view: View; skillId: string; tab: string; clientId: string; modal: Modal }>({ view: 'skills', skillId: '', tab: 'docs', clientId: 'codex', modal: null });
   const revisionRef = useRef(-1);
@@ -343,9 +478,20 @@ export default function SessionApp() {
   const libraryPreferenceSequence = useRef(0);
   const running = useRef(false);
   const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (isHome && ready && session.visible && (view === 'dashboard' || view === 'resources')) readPaletteResources();
+  }, [isHome, ready, session.visible, view, state.stateRevision, readPaletteResources]);
+  useEffect(() => {
+    if (state.managementRevision !== undefined) managementDataCache.invalidate(state.managementRevision);
+    if (ready && session.visible) {
+      const current = managementDataCache.getSnapshot();
+      if (!current.loaded || current.stale) void readManagementData().catch(() => undefined);
+    }
+  }, [state.managementRevision, ready, session.visible, readManagementData]);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [modal, setLocalModal] = useState<Modal>(seed('modal', null));
   const modalRef = useRef(modal); modalRef.current = modal;
+  const backupConsent = useBackupConsent(modal?.kind === 'preview' ? modal.preview : undefined, session.owned && !session.closing && !session.isTransferring());
   const inFlightExportSelection = useRef<ExportSelectionDraft | undefined>(seed('inFlightExportSelection', modal?.kind === 'export' ? modal.inFlightSelection : undefined));
   function setModal(next: React.SetStateAction<Modal>) {
     if (typeof next === 'function') { setLocalModal(next); return; }
@@ -365,7 +511,7 @@ export default function SessionApp() {
     else if (next.kind === 'runtime') Object.assign(draft, { selectedFiles: next.result.files.filter(file => file.runtime || requiredRuntimeFile(next.result, file.path) || !next.result.runtimeConfirmed && next.result.suggestedFiles?.includes(file.path)).map(file => file.path) });
     else if (next.kind === 'preview') Object.assign(draft, { previewFile: next.preview.files?.find(file => file.change !== 'unchanged')?.path || next.preview.files?.[0]?.path || '', commitMessage: '' });
     else if (next.kind === 'client-connect') Object.assign(draft, { activeClient: next.client, clientConnectDraft: undefined });
-    else if (next.kind === 'associate') Object.assign(draft, { associateSource: stateRef.current.sources[0]?.id || '', associateSkill: '' });
+    else if (next.kind === 'associate') Object.assign(draft, { associateSource: next.skill.sourceId || stateRef.current.sources[0]?.id || '', associateSkill: '' });
     const skillId = 'skill' in next ? next.skill.id : next.kind === 'preview' ? next.preview.skillId : undefined;
     const titles: Record<string, string> = { 'client-result': '连接操作结果', 'client-connect': `连接到 ${CLIENTS.find(item => item.id === (next.kind === 'client-connect' ? next.client : ''))?.name || '客户端'}`, files: '上传／下载范围', runtime: '运行文件', export: '导出 Skill', preview: '差异与操作预览', receipts: '恢复附件', audit: '核对结果', task: '操作记录', local: '添加本地 Skill', github: '添加 GitHub 来源', associate: '关联来源' };
     const name = skillId ? stateRef.current.skills.find(item => item.id === skillId) : undefined;
@@ -413,6 +559,8 @@ export default function SessionApp() {
   const [githubUrl, setGithubUrl] = useState(seed('githubUrl', ''));
   const [associateSource, setAssociateSource] = useState(seed('associateSource', ''));
   const [associateSkill, setAssociateSkill] = useState(seed('associateSkill', ''));
+  const associationPending = useRef(false), associationDraft = useRef({ source: associateSource, skill: associateSkill });
+  associationDraft.current = { source: associateSource, skill: associateSkill };
   const [targetPath, setTargetPath] = useState(seed('targetPath', ''));
   const [destinationChoice, setDestinationChoice] = useState(() => destinationDraft(seed('destinationChoice', undefined)));
   const destinationChoiceRef = useRef(destinationChoice); destinationChoiceRef.current = destinationChoice;
@@ -482,6 +630,7 @@ export default function SessionApp() {
   const [uiZoom, setUiZoom] = useState(100);
   const [zoomInput, setZoomInput] = useState('100');
   const [uiFontSize, setUiFontSize] = useState(16);
+  const [appearance, setAppearance] = useState<Appearance>(DEFAULT_APPEARANCE);
   const [tokenRepo, setTokenRepo] = useState('');
   const [token, setToken] = useState('');
   const [tokenAccess, setTokenAccess] = useState<'read' | 'write'>('read');
@@ -491,7 +640,7 @@ export default function SessionApp() {
   selectedIdRef.current = selectedId;
 
   contextRef.current = { view, skillId: detailOpen || libraryMode === 'details' ? selectedId : '', tab, clientId: activeClient, modal };
-  const notify = useCallback((tone: Notice['tone'], message: string, skillId = contextRef.current.skillId) => { setNotices(previous => [{ id: Date.now() + Math.random(), tone, message, skillId }, ...previous].slice(0, 100)); }, []);
+  const notify = useCallback((tone: Notice['tone'], message: string, skillId = contextRef.current.skillId) => { const source = skillId ? sourceBySkillRef.current[skillId] : undefined; setNotices(previous => appendProblemNotice(previous, { id: Date.now() + Math.random(), tone, message, skillId, scope: source ? `source:${source}` : skillId ? `skill:${skillId}` : undefined })); }, []);
   useEffect(() => {
     if (!notices[0] || notices[0].tone === 'error') return;
     const id = notices[0].id;
@@ -513,6 +662,7 @@ export default function SessionApp() {
       if (editorInitialized.current) {
         if (next.settings.uiTheme !== prior.uiTheme) setUiTheme(next.settings.uiTheme || 'light');
         if (next.settings.uiFontSize !== prior.uiFontSize) setUiFontSize(next.settings.uiFontSize || 16);
+        if (next.settings.uiAccent !== prior.uiAccent || next.settings.uiDensity !== prior.uiDensity || next.settings.uiMotion !== prior.uiMotion) setAppearance(normalizeAppearance(next.settings));
         if (next.settings.uiZoom !== prior.uiZoom) { const zoom = displayNumber(next.settings.uiZoom, 100, 80, 160); setUiZoom(zoom); setZoomInput(String(zoom)); }
       }
       for (const message of next.settings?.recoveryMessages || []) { if (!editorInitialized.current) notify('info', `启动恢复：${message}`); }
@@ -522,17 +672,23 @@ export default function SessionApp() {
         const zoom = displayNumber(next.settings?.uiZoom ?? 100, 100, 80, 160);
         setUiZoom(zoom); setZoomInput(String(zoom));
         setUiFontSize(displayNumber(next.settings?.uiFontSize ?? 16, 16, 14, 22));
-        setLibraryMode(normalizeLibraryMode(next.settings?.libraryMode));
-        setLibraryPageSize([20, 50, 100].includes(next.settings?.libraryPageSize || 0) ? next.settings.libraryPageSize! : 20);
-        setLibrarySort(['name', 'status', 'checked'].includes(next.settings?.librarySort || '') ? next.settings.librarySort! : 'name');
+        setAppearance(normalizeAppearance(next.settings));
+        setLibraryMode(normalizeLibraryMode(seed('libraryMode', next.settings?.libraryMode)));
+        const restoredPageSize = seed('libraryPageSize', next.settings?.libraryPageSize);
+        const restoredSort = seed('librarySort', next.settings?.librarySort);
+        setLibraryPageSize([20, 50, 100].includes(restoredPageSize || 0) ? restoredPageSize! : 20);
+        setLibrarySort(['name', 'status', 'checked'].includes(restoredSort || '') ? restoredSort! : 'name');
         setSidebarWidth(displayNumber(next.settings?.sidebarWidth, 224, 200, 420));
         setSidebarCollapsed(next.settings?.sidebarCollapsed === true);
         editorInitialized.current = true;
       }
-      setSelectedId(previous => pane.kind !== 'home' ? pane.skillId || previous : next.skills.some(skill => skill.id === previous) ? previous : next.skills[0]?.id || '');
+      setSelectedId(previous => pane.kind !== 'home' ? pane.skillId || previous : nearestSurvivingId(readingRef.current?.ids || stateRef.current.skills.map(skill => skill.id), next.skills.map(skill => skill.id), previous));
+      const existingIds = new Set(next.skills.map(skill => skill.id));
+      setCheckedSkills(previous => previous.every(id => existingIds.has(id)) ? previous : previous.filter(id => existingIds.has(id)));
     }
   }, [notify]);
-  const { queue: queueLayout, flush: flushLayout } = usePreferenceQueue<Snapshot>({
+  const basicModeRef = useRef(basicMode); basicModeRef.current = basicMode;
+  const { queue: queueStoredLayout, flush: flushStoredLayout } = usePreferenceQueue<Snapshot>({
     save: patch => request<Snapshot>('set_settings', { settings: patch }),
     isBusy: () => running.current,
     onSaved: (_patch, result) => { snapshot(result); setLayoutError(''); },
@@ -545,19 +701,15 @@ export default function SessionApp() {
       notify('error', message); setLayoutError(message);
     },
   });
+  const queueLayout = useCallback((patch: LayoutPreferences) => { if (!basicModeRef.current) queueStoredLayout(patch); }, [queueStoredLayout]);
+  const flushLayout = useCallback(() => basicModeRef.current ? Promise.resolve(true) : flushStoredLayout(), [flushStoredLayout]);
   currentLayout.current = { zoom: uiZoom, width: sidebarWidth, collapsed: sidebarCollapsed };
-  const effectiveWidth = paneWidth || viewportWidth / (uiZoom / 100);
+  const effectiveWidth = viewportWidth / (uiZoom / 100);
   const compactSidebar = sidebarCollapsed || effectiveWidth < 720;
   const expandedSidebarWidth = Math.min(sidebarWidth, Math.max(200, effectiveWidth - 520));
   useEffect(() => { if (compactSidebar && resizeStart.current) cancelSidebarResize(); }, [compactSidebar]);
-  useEffect(() => sessionRef.current.register(pane.id, { capture: () => captureRef.current(), flush: async () => { await Promise.all([...registrationAcks.current]); try { await exportFlushRef.current?.(); } catch (cause) { setLayoutError(errText(cause)); return false; } return flushLayout(); } }), [pane.id, flushLayout]);
+  useEffect(() => sessionRef.current.register(pane.id, { capture: () => captureRef.current(), flush: async () => { await Promise.all([...registrationAcks.current]); try { await exportFlushRef.current?.(); } catch (cause) { setLayoutError(errText(cause)); return false; } return flushLayout(); }, sidebar: isHome ? { expanded: !compactSidebar || sidebarFlyout, toggle: () => { if (sessionRef.current.closing) return; if (effectiveWidth < 720) setSidebarFlyout(value => !value); else toggleSidebar(); } } : undefined }), [pane.id, flushLayout, isHome, compactSidebar, sidebarFlyout, effectiveWidth, sidebarCollapsed, queueLayout]);
   useEffect(() => { const resize = () => setViewportWidth(window.innerWidth); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize); }, []);
-  useEffect(() => {
-    const node = paneRoot.current; if (!node || !isHome) return;
-    const measure = () => { if (node.clientWidth > 0) setPaneWidth(node.clientWidth); };
-    const observer = new ResizeObserver(measure); observer.observe(node); measure();
-    return () => observer.disconnect();
-  }, [isHome]);
   useEffect(() => {
     if (!zoomFeedback) return;
     const timer = window.setTimeout(() => setZoomFeedback(''), 1500);
@@ -583,7 +735,7 @@ export default function SessionApp() {
   }, [queueLayout]);
   useEffect(() => {
     if (!sidebarFlyout) return;
-    const dismiss = (event: PointerEvent) => { if (!(event.target as Element).closest('.floating-menu') && !sidebarRef.current?.contains(event.target as Node)) setSidebarFlyout(false); };
+    const dismiss = (event: PointerEvent) => { if (!(event.target as Element).closest('.floating-menu,.workspace-sidebar-toggle') && !sidebarRef.current?.contains(event.target as Node)) setSidebarFlyout(false); };
     const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setSidebarFlyout(false); };
     document.addEventListener('pointerdown', dismiss); document.addEventListener('keydown', escape);
     return () => { document.removeEventListener('pointerdown', dismiss); document.removeEventListener('keydown', escape); };
@@ -595,10 +747,15 @@ export default function SessionApp() {
     if (!isHome) return;
     const root = document.documentElement;
     root.dataset.theme = uiTheme;
+    applyAppearance(root, appearance);
     root.style.fontSize = `${uiFontSize}px`;
     root.style.setProperty('--ui-zoom', String(uiZoom / 100));
     root.style.setProperty('zoom', String(uiZoom / 100));
-  }, [uiTheme, uiZoom, uiFontSize]);
+  }, [uiTheme, uiZoom, uiFontSize, appearance]);
+  useEffect(() => {
+    if (!isHome) return;
+    return observeMotion(document, window, appearance.uiMotion);
+  }, [isHome, appearance.uiMotion]);
   const perform = useCallback(async <T,>(label: string, action: string, args: Record<string, unknown> = {}, success?: string, onFailure?: (message: string) => void, foreground = true, continuation?: UiContinuation): Promise<T | undefined> => {
     const origin = { ...contextRef.current };
     const uiContinuation = continuation || (action.startsWith('preview_') ? { kind: 'preview' as const } : action === 'audit_skills' ? { kind: 'audit' as const } : action === 'scan_local' ? { kind: 'scan' as const } : action === 'get_cleanup_receipts' ? { kind: 'receipts' as const } : undefined);
@@ -607,7 +764,7 @@ export default function SessionApp() {
     const registration = new Promise<void>(resolve => { acknowledgeRegistration = resolve; });
     registrationAcks.current.add(registration);
     const id = Date.now() + Math.random();
-    const metadata = ['assign_category', 'restore_category_assignments', 'create_category', 'rename_category', 'delete_category', 'reorder_categories', 'set_category_color', 'set_favorite', 'undo_management'].includes(action);
+    const metadata = ['assign_category', 'restore_category_assignments', 'create_category', 'rename_category', 'delete_category', 'reorder_categories', 'set_category_color', 'set_favorite', 'undo_management', 'redo_management'].includes(action);
     if (metadata) { managementInFlight.current += 1; running.current = true; }
     setPendingContexts(previous => [...previous, { id, modal: origin.modal, metadata }]); setOperation(label); if (foreground && origin.modal) setModalError('');
     const current = () => mounted.current && contextRef.current.modal === origin.modal;
@@ -629,45 +786,53 @@ export default function SessionApp() {
     catch { notify('info', '设置已保存；其他窗口可重新获得焦点以刷新读取状态。'); }
   }, [snapshot, notify]);
   const refresh = useCallback(async (quiet = false) => { const result = await perform<Snapshot>('正在检查本地与远端变化', 'check_now', {}, undefined, undefined, !quiet); if (!result) return; const failed = result.skills.filter(skill => skill.error || skill.remoteCheckRequired || skill.remoteMissing).length; const failedSources = result.sources.filter(source => source.error).length; if (!quiet || failed || failedSources) notify(failed || failedSources ? 'info' : 'success', failed || failedSources ? `检查返回，${failed} 个 Skill、${failedSources} 个来源需要核对异常。` : '检查已完成；请按列表状态决定下一步。'); }, [perform, notify]);
-  const undoManagement = useCallback(async () => {
-    if (!stateRef.current.managementUndo?.available || running.current || modalOpen.current) return;
-    const label = stateRef.current.managementUndo.label || '管理操作';
-    const result = await perform<Snapshot>('正在撤销管理操作', 'undo_management', {}, `已撤销${label}。`);
-    if (result) { setCategoryUndo(null); setCategoryFeedback(null); }
-  }, [perform]);
-  useEffect(() => {
-    const undo = (event: KeyboardEvent) => {
-      if (!sessionRef.current.active || !event.ctrlKey || event.shiftKey || event.altKey || event.metaKey || event.key.toLowerCase() !== 'z' || event.defaultPrevented || running.current || modalOpen.current) return;
-      const target = event.target instanceof Element ? event.target : document.activeElement;
-      if (target?.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]') || !stateRef.current.managementUndo?.available) return;
-      event.preventDefault(); void undoManagement();
-    };
-    window.addEventListener('keydown', undo);
-    return () => window.removeEventListener('keydown', undo);
-  }, [undoManagement]);
+  const managementHistory = useManagementHistory({
+    undo: state.managementUndo, redo: state.managementRedo,
+    active: (isHome || session.active && session.visible) && session.owned && !session.closing,
+    shortcutActive: session.active && session.visible,
+    readOnly: basicMode, busy: pendingContexts.some(item => item.metadata), modal: !!modal || commandPaletteOpen,
+    canApply: () => !running.current && !modalOpen.current && !basicModeRef.current && !sessionRef.current.closing && !sessionRef.current.isTransferring(),
+    onApply: async (direction, entryId, label) => {
+      const verb = direction === 'undo' ? '撤销' : '重做';
+      const result = await perform<Snapshot>(`正在${verb}管理操作`, `${direction}_management`, { expectedEntryId: entryId }, `已${verb}${label}。`);
+      if (result) { setCategoryUndo(null); setCategoryFeedback(null); }
+    },
+  });
   useEffect(() => {
     if (session.managerSnapshot) { snapshot(session.managerSnapshot); setReady(true); }
   }, [session.managerSnapshot, snapshot]);
+  const lastFocusRevision = useRef(pane.state.focusRevision || 0);
   useEffect(() => {
+    // Persistence replies may describe the previous view while the user is already
+    // typing in the next one. Only a new explicit navigation request changes it.
+    const revision = pane.state.focusRevision || 0;
+    if (revision <= lastFocusRevision.current) return;
+    lastFocusRevision.current = revision;
     if (pane.kind === 'home' && pane.state.view) setLocalView(pane.state.view as View);
     if (pane.kind === 'home' && pane.state.clientId) setActiveClient(pane.state.clientId);
     if (pane.kind === 'detail' && ['docs', 'files', 'source'].includes(pane.state.section || '')) setTab(pane.state.section as 'docs' | 'files' | 'source');
-  }, [pane.kind, pane.state.view, pane.state.clientId, pane.state.section]);
-  const selected = state.skills.find(skill => skill.id === selectedId);
+  }, [pane.kind, pane.state.view, pane.state.clientId, pane.state.section, pane.state.focusRevision]);
+  const selected = displaySkills.find(skill => skill.id === selectedId);
   const localSkills = state.skills.filter(skill => skill.localPath);
   const libraryTotals = libraryCounts(state.skills, state.sources);
   const changedSkills = state.skills.filter(needsAttention);
   const remoteErrors = state.sources.filter(source => source.error);
   const categories = state.settings.categories || [];
   const resolvedCategoryColors = useMemo(() => categoryColors(categories), [categories]);
-  const categoryTitle = categoryFilter === 'all' ? '全部 Skills' : categoryFilter === 'favorites' ? '收藏' : categoryFilter === 'uncategorized' ? '未分类' : categories.find(category => category.id === categoryFilter)?.name || '全部 Skills';
+  const categoryTitle = categoryFilter === 'all' ? '全部 Skills' : categoryFilter === 'favorites' ? '收藏' : categoryFilter === 'uncategorized' ? '未分类' : categories.find(category => category.id === categoryFilter)?.name || '分类已不存在';
   const categoryTotal = state.skills.filter(skill => categoryFilter === 'all' || (categoryFilter === 'favorites' ? skill.favorite : categoryFilter === 'uncategorized' ? !skill.categoryId : skill.categoryId === categoryFilter)).length;
-  const matching = useMemo(() => queryLibrary(state.skills, { query, sourceFilter: filter, statusFilter, sort: librarySort, categoryFilter }), [state.skills, query, filter, statusFilter, librarySort, categoryFilter]);
+  const libraryQueryKey = JSON.stringify([query, filter, statusFilter, librarySort, libraryPageSize, categoryFilter, readingRefresh]);
+  const candidates = useMemo(() => queryLibrary(displaySkills, { query, sourceFilter: filter, statusFilter, sort: librarySort, categoryFilter }), [displaySkills, query, filter, statusFilter, librarySort, categoryFilter]);
+  const reading = useMemo(() => reconcileLibraryReading(readingRef.current, displaySkills.map(skill => skill.id), candidates.map(skill => skill.id), libraryQueryKey), [displaySkills, candidates, libraryQueryKey]);
+  useLayoutEffect(() => { if (ready) readingRef.current = reading; }, [ready, reading]);
+  const matching = useMemo(() => {
+    const byId = new Map(displaySkills.map(skill => [skill.id, skill]));
+    return reading.ids.flatMap(id => { const skill = byId.get(id); return skill ? [skill] : []; });
+  }, [displaySkills, reading]);
   const libraryResult = useMemo(() => paginateLibrary(matching, libraryPage, libraryPageSize), [matching, libraryPage, libraryPageSize]);
   const pageSkillIds = useMemo(() => libraryResult.items.map(skill => skill.id), [libraryResult.items]);
   const visibleChecked = checkedSkills.filter(id => pageSkillIds.includes(id));
   const detailVisible = pane.kind === 'detail' ? visited : isHome && view === 'skills' && libraryMode === 'details' && pageSkillIds.includes(selectedId);
-  const libraryQueryKey = JSON.stringify([query, filter, statusFilter, librarySort, libraryPageSize, categoryFilter]);
   const previousLibraryQuery = useRef(libraryQueryKey);
   useEffect(() => {
     const filtersChanged = previousLibraryQuery.current !== libraryQueryKey;
@@ -683,7 +848,8 @@ export default function SessionApp() {
       if (target && target.id !== selectedId) { setSelectedId(target.id); setTab('docs'); }
     }
   }, [libraryQueryKey, libraryPage, libraryPageSize, libraryResult.page, matching, selectedId, libraryMode, view]);
-  useEffect(() => { setCheckedSkills([]); selectionAnchor.current = null; closeFloatingMenu(); }, [libraryPage, libraryQueryKey, closeFloatingMenu]);
+  useEffect(() => { setCheckedSkills([]); selectionAnchor.current = null; closeFloatingMenu(); }, [libraryQueryKey, closeFloatingMenu]);
+  function changeLibraryPage(page: number) { setCheckedSkills([]); selectionAnchor.current = null; closeFloatingMenu(); setLibraryNavigation(value => value + 1); setLibraryPage(page); }
   const exportSkillContext = modal?.kind === 'export' ? state.skills.find(item => item.id === modal.skill.id) || modal.skill : detailVisible ? selected : undefined;
   const exportSelection = useExportSelection({ skillId: exportSkillContext?.id, paneId: pane.id, enabled: !!exportSkillContext?.localPath && session.owned, visible: session.visible });
   exportFlushRef.current = exportSkillContext?.localPath && session.owned ? exportSelection.flush : undefined;
@@ -761,7 +927,7 @@ export default function SessionApp() {
     sessionRef.current.openDetail(skill, section);
   }
   function clearLibraryFilters() { setQuery(''); setFilter('all'); setStatusFilter('all'); }
-  function selectCategory(id: string) { closeFloatingMenu(); setCategoryFilter(id); setLibraryPage(1); setCheckedSkills([]); setView('skills'); setSidebarFlyout(false); }
+  function selectCategory(id: string) { closeFloatingMenu(); setCategoryFilter(id); setLibraryPage(1); setCheckedSkills([]); setView('skills'); setSidebarFlyout(false); if (!sessionRef.current.active) sessionRef.current.goHome('skills'); }
   function editCategory(category?: Category) { setCategoryName(category?.name || ''); setCategoryDraftColor(category ? resolvedCategoryColors.get(category.id) || 'blue' : nextCategoryColor(resolvedCategoryColors.values())); setModal({ kind: 'category', category }); }
   async function saveCategory() {
     if (modal?.kind !== 'category') return;
@@ -882,6 +1048,13 @@ export default function SessionApp() {
     if (original !== undefined) { currentLayout.current.width = original; setSidebarWidth(original); queueLayout({ sidebarWidth: original }); void flushLayout(); }
   }
   function resetLayout() { setSidebarWidth(224); setSidebarCollapsed(false); setSidebarFlyout(false); queueLayout({ sidebarWidth: 224, sidebarCollapsed: false }); }
+  function applySkillView(filters: SkillViewFilters) {
+    libraryPreferenceSequence.current++;
+    setReadingRefresh(value => value + 1);
+    setQuery(filters.query); setFilter(filters.sourceFilter); setStatusFilter(filters.statusFilter); setCategoryFilter(filters.categoryFilter);
+    setLibraryMode(filters.mode); setLibrarySort(filters.sort); setLibraryPageSize(filters.pageSize); setLibraryPage(1); setDetailOpen(false);
+    if (!['all', 'favorites', 'uncategorized'].includes(filters.categoryFilter) && !categories.some(category => category.id === filters.categoryFilter)) notify('info', '此筛选引用的分类已不存在，可重新选择分类并保存。');
+  }
   async function saveLibraryPreference(settings: Partial<{ libraryMode: LibraryMode; librarySort: LibrarySort; libraryPageSize: LibraryPageSize }>) {
     const sequence = ++libraryPreferenceSequence.current;
     const previous = { libraryMode, librarySort, libraryPageSize };
@@ -969,9 +1142,22 @@ export default function SessionApp() {
   async function applyPreview() {
     if (modal?.kind !== 'preview' || !modal.preview.canApply || !modal.preview.id) return;
     const original = modal.preview;
+    if (original.kind === 'associate') {
+      if (basicMode || associationPending.current) return;
+      associationPending.current = true;
+      try {
+        const result = await perform<Snapshot>('正在保存来源关联', 'apply_associate', { previewId: original.id }, '来源关联已保存；本地文件和原安装记录保持。');
+        if (result) { setModal(null); refreshInventory(original.skillId); }
+        else setModal(previous => previous?.kind === 'preview' && previous.preview.id === original.id ? { kind: 'preview', preview: { ...original, canApply: false, warnings: [...(original.warnings || []), '此预览已失效，请重新核对来源后生成预览。'] } } : previous);
+      } finally { associationPending.current = false; }
+      return;
+    }
+    if (!backupConsent.allowed) { setModalError('请先核对本次备份对象、保存位置和复制方式，再选择允许本次备份。'); return; }
+    const backupRequest = backupConsent.request;
+    backupConsent.reset();
     const kind = original.kind.replace(/^preview_/, '');
     const upload = kind === 'push' || kind === 'upload';
-    const result = await perform<Snapshot & { transferResult?: TransferResult; connectionResults?: ConnectionResult[] }>(upload ? '正在上传选定文件' : kind === 'disconnect' ? original.mode === 'stop' ? '正在忽略连接' : '正在解除预览中的目录链接' : kind === 'restore' ? '正在恢复附件' : '正在应用文件变化', `apply_${kind}`, { previewId: original.id, ...(upload ? { message: commitMessage.trim() } : {}) });
+    const result = await perform<Snapshot & { transferResult?: TransferResult; connectionResults?: ConnectionResult[] }>(upload ? '正在上传选定文件' : kind === 'disconnect' ? original.mode === 'stop' ? '正在忽略连接' : '正在解除预览中的目录链接' : kind === 'restore' ? '正在恢复附件' : '正在应用文件变化', `apply_${kind}`, { previewId: original.id, ...backupRequest, ...(upload ? { message: commitMessage.trim() } : {}) });
     if (result) {
       if (kind === 'disconnect' && result.connectionResults) { setModal({ kind: 'client-result', mode: original.mode || 'disconnect', results: result.connectionResults }); return; }
       setModal(null);
@@ -1089,7 +1275,7 @@ export default function SessionApp() {
       const current = await request<{ workspace: WorkspaceNavigation }>('workspace_get');
       const target = current.workspace.windows.flatMap(window => window.panes).find(item => item.id === task.origin.paneId);
       if (target) {
-        sessionRef.current.focusPane(target.id, target.kind === 'home' ? { view: task.origin.clientId ? 'clients' : ['skills', 'changes', 'clients', 'settings'].includes(task.origin.view || '') ? task.origin.view : 'skills', clientId: task.origin.clientId } : { section: ['docs', 'files', 'source'].includes(task.origin.tab || '') ? task.origin.tab : undefined });
+        sessionRef.current.focusPane(target.id, target.kind === 'home' ? { view: task.origin.clientId ? 'clients' : ['dashboard', 'resources', 'skills', 'tools', 'changes', 'clients', 'settings'].includes(task.origin.view || '') ? task.origin.view : 'skills', clientId: task.origin.clientId } : { section: ['docs', 'files', 'source'].includes(task.origin.tab || '') ? task.origin.tab : undefined });
         return;
       }
     }
@@ -1097,7 +1283,7 @@ export default function SessionApp() {
     const skill = stateRef.current.skills.find(item => item.id === task.origin.skillId);
     if (task.origin.skillId && !skill) { notify('info', '该 Skill 已移除，记录仍可查看。'); sessionRef.current.goHome(); return; }
     if (skill) { setQuery(''); setFilter('all'); setStatusFilter('all'); setCategoryFilter('all'); openDetail(skill, ['docs', 'files', 'source'].includes(task.origin.tab || '') ? task.origin.tab as 'docs' | 'files' | 'source' : 'docs'); }
-    else setView(['skills', 'changes', 'clients', 'settings'].includes(task.origin.view || '') ? task.origin.view as View : 'skills');
+    else setView(['dashboard', 'resources', 'skills', 'tools', 'changes', 'clients', 'settings'].includes(task.origin.view || '') ? task.origin.view as View : 'skills');
   }
   async function downloadAttachments(skill: Skill) {
     const paths = extraFiles.filter(path => { const file = files?.files.find(item => item.path === path); return file && !localFile(file, skill) && remoteFile(file, skill); });
@@ -1132,17 +1318,27 @@ export default function SessionApp() {
     const result = await perform<Snapshot>('正在确认运行文件清单', 'set_runtime_files', { skillId: skill.id, files: confirmedFiles }, '运行文件清单已保存；未选文件继续保留在原位置。');
     if (result) { setModal(null); refreshInventory(skill.id); }
   }
-  function openAssociate(skill: Skill) { setAssociateSource(state.sources[0]?.id || ''); setAssociateSkill(''); setModal({ kind: 'associate', skill }); }
-  async function associate() { if (modal?.kind !== 'associate') return; const remote = state.skills.find(skill => skill.id === associateSkill); if (!remote) return; const result = await perform<Snapshot>('正在关联来源', 'associate', { skillId: modal.skill.id, sourceId: associateSource, remotePath: remote.remotePath || '' }, '已建立关联；基准需要通过实际内容核对。'); if (result) setModal(null); }
+  function openAssociate(skill: Skill) { if (basicMode) return; setAssociateSource(skill.sourceId || state.sources[0]?.id || ''); setAssociateSkill(''); setModal({ kind: 'associate', skill }); }
+  async function associate() {
+    if (modal?.kind !== 'associate' || basicMode || associationPending.current) return;
+    const remote = state.skills.find(skill => skill.id === associateSkill && skill.sourceId === associateSource && !skill.localPath);
+    if (!remote) return;
+    associationPending.current = true;
+    const draft = { source: associateSource, skill: associateSkill };
+    try {
+      const result = await perform<Preview>('正在预览来源关联', 'preview_associate', { skillId: modal.skill.id, sourceId: draft.source, remotePath: remote.remotePath || '' });
+      if (result && associationDraft.current.source === draft.source && associationDraft.current.skill === draft.skill) showPreview(result);
+    } finally { associationPending.current = false; }
+  }
   const sourceSkill = modal?.kind === 'associate' ? state.skills.filter(skill => skill.sourceId === associateSource && !skill.localPath) : [];
   useEffect(() => { if (view !== 'settings') setToken(''); }, [view]);
   const selectedConnections = selected ? state.connections.filter(connection => connection.skillId === selected.id) : [];
   const busy = !!modal && (pendingContexts.some(item => item.modal === modal) || resumingIds.length > 0);
-  const managementBusy = pendingContexts.some(item => item.metadata);
-  const displayChanged = uiTheme !== (state.settings.uiTheme || 'light') || uiFontSize !== (state.settings.uiFontSize || 16);
+  const savedAppearance = normalizeAppearance(state.settings);
+  const displayChanged = uiTheme !== (state.settings.uiTheme || 'light') || uiFontSize !== (state.settings.uiFontSize || 16) || appearance.uiAccent !== savedAppearance.uiAccent || appearance.uiDensity !== savedAppearance.uiDensity || appearance.uiMotion !== savedAppearance.uiMotion;
   function changeZoom(value: number) { const zoom = displayNumber(value, 100, 80, 160); currentLayout.current.zoom = zoom; setUiZoom(zoom); setZoomInput(String(zoom)); queueLayout({ uiZoom: zoom }); }
-  function resetDisplay() { setUiTheme('light'); changeZoom(100); setUiFontSize(16); }
-  const title = { skills: '技能库', changes: '变化', clients: '客户端', settings: '设置' }[view];
+  function resetDisplay() { setUiTheme('light'); changeZoom(100); setUiFontSize(16); setAppearance(DEFAULT_APPEARANCE); }
+  const title = { dashboard: '总览', resources: '全部资源', skills: '技能库', tools: '工具', changes: '变化', clients: '客户端', settings: '设置' }[view];
   function menuToggle(event: React.MouseEvent<HTMLButtonElement> | React.KeyboardEvent<HTMLButtonElement>, menu: Omit<OpenMenu, 'anchor'>) {
     if ('key' in event && event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
     event.preventDefault(); event.stopPropagation();
@@ -1189,7 +1385,7 @@ export default function SessionApp() {
   const homeRestorePending = useRef(isHome && scrollTop.current > 0);
   const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   function saveScroll(top: number) {
-    scrollTop.current = top; clearTimeout(scrollSaveTimer.current);
+    scrollTop.current = top; viewScrollPositions.current[currentView.current] = top; clearTimeout(scrollSaveTimer.current);
     scrollSaveTimer.current = setTimeout(() => sessionRef.current.updateNavigation(pane.id, { scrollTop: top }), 500);
   }
   useEffect(() => () => clearTimeout(scrollSaveTimer.current), []);
@@ -1210,7 +1406,7 @@ export default function SessionApp() {
     const resize = new ResizeObserver(schedule); resize.observe(scroller);
     const changes = new MutationObserver(schedule); changes.observe(scroller, { childList: true, subtree: true }); schedule();
     return () => { resize.disconnect(); changes.disconnect(); cancelAnimationFrame(frame); root.removeEventListener('pointerdown', stop, true); root.removeEventListener('keydown', stop, true); scroller.removeEventListener('wheel', wheel); scroller.removeEventListener('touchstart', stop); };
-  }, [isHome]);
+  }, [isHome, view]);
   function captureFolds() { return paneRoot.current ? captureSectionFolds(paneRoot.current) : []; }
   const initialFolds = useRef(seed('expandedSections', pane.state.expandedSections || []));
   const foldsRestored = useRef(new Set<string>());
@@ -1219,7 +1415,7 @@ export default function SessionApp() {
     const restore = () => restoreSectionFolds(root, initialFolds.current, foldsRestored.current);
     restore(); const observer = new MutationObserver(restore); observer.observe(root, { childList: true, subtree: true }); return () => observer.disconnect();
   }, []);
-  captureRef.current = () => ({ view, filter, query, libraryPage, statusFilter, categoryFilter, categoryName, categoryDraftColor, checkedSkills, detailOpen, selectedId, tab, version, documentPath, documentCommit, documentLocal, documentCacheKey: docKey, documentValue: doc, files, runtimeFiles, fileContent, inventoryFailed, uploadSource, uploadBranch, uploadPath, trimOptional, transferResult, localImportDraft: localImportDraft.current, scanPath, scanResult, scanSelected, githubUrl, associateSource, associateSkill, targetPath, destinationChoice, selectedFiles, runtimeConsent, commitMessage, previewFile, activeClient, modal, inFlightExportSelection: inFlightExportSelection.current, originPaneId: session.initialDraft.originPaneId || pane.id, expandedSections: captureFolds(), historyDraft: historyDraft.current, externalManagementDraft: externalManagementDraft.current, clientConnectDraft: clientConnectDraft.current, storageDraft: storageDraft.current, networkDraft: networkDraft.current, settingsOutline, autoMatchFeedback, deferredModal: deferredModal.current, pendingTaskIntents: Object.fromEntries(pendingTaskIntents.current), pendingTaskIds: [...startedTasks.current], scrollTop: scrollTop.current, outlineExpanded });
+  captureRef.current = () => ({ view, toolsVisited, commandResourceRequest, toolPanelDraft: toolPanelDraft.current, resourceLibraryDraft: resourceLibraryDraftRef.current, sceneDraft: sceneDraft.current, viewScrollPositions: { ...viewScrollPositions.current }, filter, query, libraryPage, libraryMode, librarySort, libraryPageSize, readingRefresh, libraryReading: readingRef.current, statusFilter, categoryFilter, categoryName, categoryDraftColor, checkedSkills, detailOpen, selectedId, tab, version, documentPath, documentCommit, documentLocal, documentCacheKey: docKey, documentValue: doc, files, runtimeFiles, fileContent, inventoryFailed, uploadSource, uploadBranch, uploadPath, trimOptional, transferResult, localImportDraft: localImportDraft.current, scanPath, scanResult, scanSelected, githubUrl, associateSource, associateSkill, targetPath, destinationChoice, selectedFiles, runtimeConsent, commitMessage, previewFile, activeClient, modal, inFlightExportSelection: inFlightExportSelection.current, originPaneId: session.initialDraft.originPaneId || pane.id, expandedSections: captureFolds(), historyDraft: historyDraft.current, externalManagementDraft: externalManagementDraft.current, clientConnectDraft: clientConnectDraft.current, storageDraft: storageDraft.current, networkDraft: networkDraft.current, settingsOutline, settingsSection, autoMatchFeedback, deferredModal: deferredModal.current, pendingTaskIntents: Object.fromEntries(pendingTaskIntents.current), pendingTaskIds: [...startedTasks.current], scrollTop: scrollTop.current, outlineExpanded });
   useEffect(() => {
     if (!ready) return;
     const timer = setTimeout(() => sessionRef.current.updateNavigation(pane.id, { view, clientId: activeClient, section: tab, documentPath, documentVersion: version, outlineExpanded }), 250);
@@ -1294,6 +1490,9 @@ export default function SessionApp() {
             <div className="detail-header"><div className="detail-title"><span className="detail-icon"><FileCode2 size={24} /></span><div><h2>{skillName(selected)}</h2><span className="monospace muted">{selected.name}</span></div><Badge skill={selected} /></div><p className="detail-description">{selected.description || '此 Skill 尚未提供用途说明。'}</p><div className="detail-meta"><span><GitBranch size={13} />{selected.version || '版本未知'}</span><span><Link2 size={13} />{selectedConnections.filter(item => item.linked).length} 个客户端连接</span>{selected.readOnly && <span><LockKeyhole size={13} />应用托管 · 只读</span>}</div>
             <div className="detail-organization"><label className="compact-select detail-category" data-category-color={resolvedCategoryColors.get(selected.categoryId || "")}><span>分类</span><span className="category-color-dot" aria-hidden="true" /><select aria-label={`为 ${skillName(selected)} 选择分类`} value={selected.categoryId || ''} disabled={busy} onChange={event => void assignCategory([selected.id], event.target.value || null)}><option value="">未分类</option>{categories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
             <Button className={`favorite-button ${selected.favorite ? 'is-favorite' : ''}`} aria-label={`${selected.favorite ? '取消收藏' : '收藏'} ${skillName(selected)}`} aria-pressed={!!selected.favorite} disabled={busy} onClick={() => void toggleFavorite(selected)}><Star size={15} fill={selected.favorite ? 'currentColor' : 'none'} />{selected.favorite ? '已收藏' : '收藏'}</Button></div>
+            <Suspense fallback={null}><SkillMetadata key={selected.id} skillId={selected.id} originalName={selected.displayName || selected.name} data={management.data} action={managementAction} onChanged={managementDataCache.accept} readOnly={basicMode} /></Suspense>
+            {selected.sceneEligible === false && <p className="helper-note" role="status">{selected.sceneReason || '当前场景未包含此 Skill。'} 场景仅限制管理器入口，不阻断原生客户端使用 Skill。</p>}
+            <Suspense fallback={null}><ResourceRelations key={`relations-${selected.id}`} endpoint={{ kind: 'skill', id: selected.id }} action={relationAction} revision={state.stateRevision || 0} readOnly={basicMode} visible={session.visible && detailVisible} /><ResourceSpace key={`space-${selected.id}`} endpoint={{ kind: 'skill', id: selected.id }} action={relationAction} revision={state.stateRevision || 0} visible={session.visible && detailVisible} /></Suspense>
             {selected.associationNote && <details className="association-note"><summary><Link2 size={14} />已关联 GitHub<span>查看关联依据</span></summary><p>{selected.associationNote}</p></details>}
             {selected.error && <div className="inline-error"><CircleAlert size={16} />{selected.error}</div>}
             {selected.remoteCheckRequired && <div className="inline-warning remote-pending"><CircleHelp size={14} />远端状态尚未核实。请“检查更新”后判断内容是否一致。</div>}
@@ -1306,12 +1505,12 @@ export default function SessionApp() {
               {selected.localPath && selected.sourceId && !selected.installedCommit && <div className="helper-note document-baseline-note"><CircleHelp size={14} /><span>历史安装版本未知。当前比较基准只说明文件匹配，不代表当初的安装版本。</span><button className="text-button" onClick={() => { setVersion('latest'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>阅读最新说明<ArrowUpRight size={12} /></button></div>}
               {documentState.refreshing && <p className="document-read-status" role="status"><LoaderCircle size={14} className="spin" />正在刷新，当前显示已读取版本。</p>}
               {docError && doc && <div className="inline-warning" role="status"><CircleAlert size={14} />{docError} 当前仍显示上次成功读取的版本。</div>}
-              {docBusy ? <Empty icon={<LoaderCircle className="spin" size={25} />} title="正在读取说明" /> : docError && !doc ? <Empty icon={<BookOpen size={26} />} title="暂时无法读取说明"><p className="break-text">{docError}</p>{!selected.sourceId && <p>本地文件仍可在“文件”中查看；关联 GitHub 后可读取远端完整说明。</p>}{selected.sourceId && version === 'installed' && <Button onClick={() => { setVersion('latest'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}><BookOpen size={14} />切换到最新说明</Button>}</Empty> : doc ? <><div className="document-caption"><span>{doc.documentPath || doc.source || 'Skill 文档'}{(doc.commit || documentCommit) && ` · ${(doc.commit || documentCommit)!.slice(0, 12)}`}</span><span>{doc.private && <LockKeyhole size={12} />} {dateText(doc.checkedAt)}</span></div><article className="markdown" data-outline-document={`${doc.documentPath || doc.source || selected.id}:${doc.commit || documentCommit || selected.commit || version}`}><ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={defaultUrlTransform} components={{
-                a: ({ href, children }) => <a href={href || '#'} onClick={event => { event.preventDefault(); if (!href) return; if (/^https?:\/\//i.test(href)) { void external(href); return; } if (href.startsWith('#')) { if (paneRoot.current) scrollToPaneAnchor(paneRoot.current, decodeURIComponent(href.slice(1))); return; } try { const path = resolveDocPath(doc.documentPath || `${selected.remotePath || ''}/README.md`, href); if (/\.(md|markdown)$/i.test(path)) { setDocumentPath(path); setDocumentCommit(doc.commit || documentCommit); } else if (selected.repo) void external(`https://github.com/${selected.repo}/blob/${encodeURIComponent(doc.commit || documentCommit || (version === 'installed' ? selected.installedCommit || selected.commit || 'HEAD' : selected.commit || 'HEAD'))}/${path.split('/').map(encodeURIComponent).join('/')}`); else notify('info', '请在文件页或外部编辑器中打开该文件。'); } catch (error) { notify('error', errText(error)); } }}>{children}<ArrowUpRight size={11} className="inline-link-icon" /></a>,
+              {docBusy ? <Empty icon={<LoaderCircle className="spin" size={25} />} title="正在读取说明" /> : docError && !doc ? <Empty icon={<BookOpen size={26} />} title="暂时无法读取说明"><p className="break-text">{docError}</p>{!selected.sourceId && <p>本地文件仍可在“文件”中查看；关联 GitHub 后可读取远端完整说明。</p>}{selected.sourceId && version === 'installed' && <Button onClick={() => { setVersion('latest'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}><BookOpen size={14} />切换到最新说明</Button>}</Empty> : doc ? <><div className="document-caption"><span>{doc.documentPath || doc.source || 'Skill 文档'}{(doc.commit || documentCommit) && ` · ${(doc.commit || documentCommit)!.slice(0, 12)}`}</span><span>{doc.private && <LockKeyhole size={12} />} {dateText(doc.checkedAt)}</span></div><article className="markdown" data-outline-document={`${doc.documentPath || doc.source || selected.id}:${doc.commit || documentCommit || selected.commit || version}`}><Suspense fallback={<p className="document-read-status" role="status">正在准备说明显示…</p>}><MarkdownRenderer components={{
+                a: ({ href, children }) => <a href={href || '#'} onClick={event => { event.preventDefault(); if (!href) return; if (/^https?:\/\//i.test(href)) { void external(href); return; } if (href.startsWith('#')) { if (paneRoot.current) scrollToPaneAnchor(paneRoot.current, decodeURIComponent(href.slice(1))); return; } try { const path = resolveDocPath(doc.documentPath || `${selected.remotePath || ''}/README.md`, href); if (/\.(md|markdown)$/i.test(path)) { setDocumentPath(path); setDocumentCommit(doc.commit || documentCommit); } else if (doc.source && doc.source !== '本地运行文件') void external(`https://github.com/${doc.source}/blob/${encodeURIComponent(doc.commit || documentCommit || (version === 'installed' ? selected.installedCommit || selected.commit || 'HEAD' : selected.commit || 'HEAD'))}/${path.split('/').map(encodeURIComponent).join('/')}`); else notify('info', '请在文件页或外部编辑器中打开该文件。'); } catch (error) { notify('error', errText(error)); } }}>{children}<ArrowUpRight size={11} className="inline-link-icon" /></a>,
                 img: ({ src, alt }) => <AuthImage src={src} alt={alt} skill={selected} version={version} documentPath={doc.documentPath || `${selected.remotePath || ''}/README.md`} remoteCommit={doc.commit || documentCommit} localOrigin={documentLocal} />,
                 pre: ({ children }) => <CodeBlock onCopy={text => void copy(text)}>{children}</CodeBlock>,
                 ...markdownHeadings,
-              }}>{doc.markdown}</ReactMarkdown></article></> : null}</>}
+              }}>{doc.markdown}</MarkdownRenderer></Suspense></article></> : null}</>}
               {tab === 'files' && <>
                 <div data-outline-key="inventory" data-outline-label="文件清单" data-outline-level="1" className="section-caption file-inventory-toolbar"><span>{files ? `本地 ${files.files.filter(file => localFile(file, selected)).length} 项${files.remoteStatus === 'ok' ? ` · GitHub ${files.files.filter(file => remoteFile(file, selected)).length} 项 · 远端独有 ${files.files.filter(file => !localFile(file, selected) && remoteFile(file, selected)).length} 项` : selected.sourceId ? ' · GitHub 待读取' : ''}` : '正在读取文件范围'}</span><Button variant="ghost" aria-label="刷新文件清单" disabled={busy || fileBusy} onClick={() => refreshInventory(selected.id)}><RefreshCw size={14} />刷新</Button>{selected.localPath && selected.sourceId && <Button variant="ghost" disabled={busy || selected.readOnly} onClick={() => void selectOperation(selected, 'push')}><Upload size={14} />上传本地修改</Button>}</div>
                 {fileError && <div className="inline-error"><CircleAlert size={15} />{fileError}</div>}
@@ -1346,9 +1545,9 @@ export default function SessionApp() {
                   {fileContent && <div className="file-reader" data-outline-key="file-preview" data-outline-label="文件预览"><div><strong>{fileContent.path}</strong><span className="mini-tag">{fileContent.source === 'local' ? '本地内容' : `GitHub · ${fileContent.remoteCommit?.slice(0, 12) || '未知'}`}</span><button className="icon-button" onClick={() => void copy(fileContent.content)} aria-label="复制文件内容"><Copy size={14} /></button></div>{currentFile && <div className="file-source-switch segmented small"><button aria-label="本地版本" disabled={!localFile(currentFile, selected)} className={fileContent.source === 'local' ? 'selected' : ''} onClick={() => void readFile(fileContent.path, 'local')}>本地版本</button><button aria-label="GitHub 版本" disabled={!remoteFile(currentFile, selected) || !files.remoteCommit} className={fileContent.source === 'github' ? 'selected' : ''} onClick={() => void readFile(fileContent.path, 'github')}>GitHub 版本</button></div>}<pre>{fileContent.content}</pre></div>}
                 </>}
               </>}
-              {tab === 'source' && <><ComparisonBasis key={selected.id} skill={selected} /><dl className="info-grid" data-outline-key="source" data-outline-label="来源与比较记录"><dt>本地目录</dt><dd className="monospace">{selected.localPath ? <button className="text-button detail-source-link" title={selected.localPath} disabled={busy} onClick={() => void openFolder(selected)}><FolderOpen size={14} /><span>{selected.localPath}</span><ExternalLink size={12} /></button> : '尚未下载到本地'}</dd><dt>GitHub 仓库</dt><dd>{selected.repo ? <button className="text-button" onClick={() => void external(`https://github.com/${selected.repo}`)}>{selected.repo}<ExternalLink size={12} /></button> : '未关联'}{selected.private && <span className="mini-tag"><LockKeyhole size={11} />私有</span>}</dd><dt>仓库路径</dt><dd className="monospace">{selected.repo ? <button className="text-button detail-source-link" title={remoteDirectoryUrl(selected)} onClick={() => void external(remoteDirectoryUrl(selected))}><Github size={13} />{selected.remotePath || '仓库根目录'}<ExternalLink size={12} /></button> : '未关联'}</dd><dt>分支</dt><dd className="monospace">{selected.branch || '未知'}</dd><dt>比较基准</dt><dd className="monospace">{selected.baselineCommit || '待核对当前内容'}</dd><dt>历史安装提交</dt><dd className="monospace">{selected.installedCommit || '未知 · 没有可核实的安装记录'}</dd><dt>远端提交</dt><dd className="monospace">{selected.commit || '未知'}</dd><dt>最近本地检查</dt><dd>{selected.lastLocalCheckedAt ? dateText(selected.lastLocalCheckedAt) : '未知'}</dd><dt>最近远端检查</dt><dd>{selected.lastRemoteCheckedAt ? dateText(selected.lastRemoteCheckedAt) : '未知'}</dd></dl><SkillInformation readGeneration={state.readGeneration} sourceKey={JSON.stringify([selected.sourceId, selected.repo, selected.remotePath, selected.branch])} skillId={selected.id} localDependencies={selected.dependencies} localVerification={selected.verification} remoteCommit={selected.commit} onReadOriginal={(path, commit, source) => { setDocumentPath(path); setDocumentCommit(commit); setDocumentLocal(source === 'local'); setVersion('latest'); setTab('docs'); }} />
+              {tab === 'source' && <><SkillSourceHealth skillId={selected.id} source={selected} installed={selected.installedProvenance} action={relationAction} readOnly={basicMode} visible={session.visible && detailVisible} /><ComparisonBasis key={selected.id} skill={selected} /><dl className="info-grid" data-outline-key="source" data-outline-label="来源与比较记录"><dt>本地目录</dt><dd className="monospace">{selected.localPath ? <button className="text-button detail-source-link" title={selected.localPath} disabled={busy} onClick={() => void openFolder(selected)}><FolderOpen size={14} /><span>{selected.localPath}</span><ExternalLink size={12} /></button> : '尚未下载到本地'}</dd><dt>GitHub 仓库</dt><dd>{selected.repo ? <button className="text-button" onClick={() => void external(`https://github.com/${selected.repo}`)}>{selected.repo}<ExternalLink size={12} /></button> : '未关联'}{selected.private && <span className="mini-tag"><LockKeyhole size={11} />私有</span>}</dd><dt>仓库路径</dt><dd className="monospace">{selected.repo ? <button className="text-button detail-source-link" title={remoteDirectoryUrl(selected)} onClick={() => void external(remoteDirectoryUrl(selected))}><Github size={13} />{selected.remotePath || '仓库根目录'}<ExternalLink size={12} /></button> : '未关联'}</dd><dt>分支</dt><dd className="monospace">{selected.branch || '未知'}</dd><dt>比较基准</dt><dd className="monospace">{selected.baselineCommit || '待核对当前内容'}</dd><dt>历史安装提交</dt><dd className="monospace">{selected.installedCommit || '未知 · 没有可核实的安装记录'}</dd><dt>远端提交</dt><dd className="monospace">{selected.commit || '未知'}</dd><dt>最近本地检查</dt><dd>{selected.lastLocalCheckedAt ? dateText(selected.lastLocalCheckedAt) : '未知'}</dd><dt>最近远端检查</dt><dd>{selected.lastRemoteCheckedAt ? dateText(selected.lastRemoteCheckedAt) : '未知'}</dd></dl><Suspense fallback={<p className="document-read-status" role="status">正在准备来源信息…</p>}><SkillInformation readGeneration={state.readGeneration} sourceKey={JSON.stringify([selected.sourceId, selected.repo, selected.remotePath, selected.branch])} skillId={selected.id} localDependencies={selected.dependencies} localVerification={selected.verification} remoteCommit={selected.commit} onReadOriginal={(path, commit, source) => { setDocumentPath(path); setDocumentCommit(commit); setDocumentLocal(source === 'local'); setVersion('latest'); setTab('docs'); }} /></Suspense>
               <div className="section-caption"><strong data-outline-key="clients" data-outline-label="客户端连接">本机调用验证与客户端连接</strong><Button variant="ghost" onClick={() => { setView('clients'); }}><Link2 size={14} />管理连接</Button></div>{!selectedConnections.length ? <p className="muted small-text">还没有通过管理器建立连接。</p> : selectedConnections.map(connection => <div className="connection-summary" key={connection.id}><Monitor size={16} /><span><strong>{CLIENTS.find(client => client.id === connection.client)?.name || connection.client}</strong><small>{connection.path}</small></span><span className={`badge ${connection.linked ? 'green' : 'amber'}`}>{connection.health === 'ready' ? '连接正常' : '需处理'}</span></div>)}
-              <div className="source-actions">{selected.localPath && !selected.sourceId && <Button onClick={() => openAssociate(selected)} disabled={busy || selected.readOnly || !state.sources.length}><Link2 size={14} />关联 GitHub</Button>}<Button variant="ghost" disabled={busy || selectedConnections.length > 0} title={selectedConnections.length ? '请先断开此 Skill 的客户端连接' : '仅移除管理记录，保留原文件'} onClick={() => setModal({ kind: 'forget', skill: selected })}><Ellipsis size={15} />移除管理记录</Button></div>{selected.readOnly && <p className="helper-note"><LockKeyhole size={14} />应用托管目录采用只读管理，请通过所属应用更新。</p>}</>}
+              <div className="source-actions">{selected.localPath && <Button onClick={() => openAssociate(selected)} disabled={busy || basicMode || selected.readOnly || !state.sources.length}><Link2 size={14} />{selected.sourceId ? '重新关联 GitHub' : '关联 GitHub'}</Button>}<Button variant="ghost" disabled={busy || selectedConnections.length > 0} title={selectedConnections.length ? '请先断开此 Skill 的客户端连接' : '仅移除管理记录，保留原文件'} onClick={() => setModal({ kind: 'forget', skill: selected })}><Ellipsis size={15} />移除管理记录</Button></div>{selected.localPath && <Suspense fallback={<p role="status">正在准备卸载范围…</p>}><SkillRemoval key={selected.id} skillId={selected.id} name={skillName(selected)} lastRemoval={selected.lastRemoval} revision={state.stateRevision || 0} visible={session.visible && detailVisible && tab === 'source'} readOnly={basicMode || selected.readOnly || !ready || session.closing || !session.owned} action={relationAction} onChanged={() => { void runTask<Snapshot>('刷新 Skill 状态', 'get_state', {}, { paneId: pane.id }).then(snapshot).catch(error => notify('error', errText(error))); }} /></Suspense>}{selected.readOnly && <p className="helper-note"><LockKeyhole size={14} />应用托管目录采用只读管理，请通过所属应用更新。</p>}</>}
             </div>
           </>}</section>;
 
@@ -1362,10 +1561,10 @@ export default function SessionApp() {
 
     {modal?.kind === 'category' && <ModalFrame title={modal.category ? '编辑分类' : '创建分类'} subtitle="分类只整理管理记录，不会移动或修改 Skill 文件。" onClose={closeModal} busy={busy} error={modalError} footer={<><Button onClick={closeModal} disabled={busy}>取消</Button><Button variant="primary" disabled={busy || !categoryName.trim()} onClick={() => void saveCategory()}>{modal.category ? '保存分类' : '创建分类'}</Button></>}><label className="field-label">分类名称<input value={categoryName} maxLength={60} placeholder="例如：科研、程序开发、日常工具" onChange={event => setCategoryName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && categoryName.trim()) void saveCategory(); }} aria-label="分类名称" /></label><CategoryColorPicker value={categoryDraftColor} onChange={setCategoryDraftColor} disabled={busy} /></ModalFrame>}
     {modal?.kind === 'delete-category' && <ModalFrame title="移除分类" subtitle={modal.category.name} onClose={closeModal} busy={busy} error={modalError} footer={<><Button onClick={closeModal} disabled={busy}>取消</Button><Button onClick={() => void removeCategory()} disabled={busy}>移除分类</Button></>}><p>此分类包含 {state.skills.filter(skill => skill.categoryId === modal.category.id).length} 个 Skill。移除后，它们会转为“未分类”。</p><p>Skill 管理记录、原文件和客户端连接继续保留。</p></ModalFrame>}
-    {modal?.kind === 'task' && (() => { const task = tasks.find(item => item.id === modal.task.id) || modal.task; const result = modal.task.result as { path?: string; summary?: string; auditSummary?: AuditSummary; transferResult?: TransferResult; connectionResults?: ConnectionResult[] } | undefined; return <ModalFrame title="任务记录" subtitle={task.label} onClose={closeModal} busy={false} footer={<><Button onClick={() => { void locateTask(task).catch(error => notify('error', errText(error))); }}>返回对应界面</Button>{task.cancellable && !terminalTask(task) && <Button onClick={() => void cancelTask(task.id)}>取消任务</Button>}<Button onClick={closeModal}>关闭</Button></>}><dl className="info-grid compact"><dt>状态</dt><dd>{taskStatus[task.status] || task.status}</dd><dt>阶段</dt><dd>{task.stage}</dd><dt>开始时间</dt><dd>{dateText(task.startedAt || task.createdAt)}</dd><dt>结束时间</dt><dd>{task.finishedAt ? dateText(task.finishedAt) : '尚未结束'}</dd></dl>{task.error && <div className="inline-error">{task.error}</div>}{result?.path && <p>输出：<code>{result.path}</code></p>}{result?.summary && <p>{result.summary}</p>}{result?.auditSummary && <div className="audit-items">{result.auditSummary.items.map(item => <p key={item.skillId}>{state.skills.find(skill => skill.id === item.skillId)?.name || item.skillId}：{item.status} {item.reason}</p>)}</div>}{result?.connectionResults && <div className="client-batch-results">{result.connectionResults.map(item => <p key={item.id}>{item.label}：{item.error || '连接成功'}</p>)}</div>}{result?.transferResult && <TransferNotice result={result.transferResult} onClose={closeModal} />}<p className="muted small-text">点击记录只查看结果或返回界面。更新预览需要重新生成；不会重复执行上传、下载或删除。</p>{task.resultExpired && <p className="helper-note">这是重启前的记录，临时预览已过期。请返回原界面重新检查。</p>}</ModalFrame>; })()}
+    {modal?.kind === 'task' && (() => { const task = tasks.find(item => item.id === modal.task.id) || modal.task; const result = (task.result === undefined && !task.resultExpired && task.resultAvailable !== false ? modal.task.result : task.result) as { path?: string; summary?: string; auditSummary?: AuditSummary; transferResult?: TransferResult; connectionResults?: ConnectionResult[] } | undefined; return <ModalFrame title="任务记录" subtitle={task.label} onClose={closeModal} busy={false} footer={<><Button onClick={() => { void locateTask(task).catch(error => notify('error', errText(error))); }}>返回对应界面</Button>{task.cancellable && !terminalTask(task) && <Button onClick={() => void cancelTask(task.id)}>取消任务</Button>}<Button onClick={closeModal}>关闭</Button></>}><dl className="info-grid compact"><dt>状态</dt><dd>{taskStatus[task.status] || task.status}</dd><dt>阶段</dt><dd>{task.stage}</dd><dt>开始时间</dt><dd>{dateText(task.startedAt || task.createdAt)}</dd><dt>结束时间</dt><dd>{task.finishedAt ? dateText(task.finishedAt) : '尚未结束'}</dd></dl>{task.error && <div className="inline-error">{task.error}</div>}{task.resultFiles?.length ? <Suspense fallback={null}><TaskResults key={task.id} taskId={task.id} request={request} basicMode={basicMode} visible={session.visible} /></Suspense> : result?.path && <p>输出：<code>{result.path}</code></p>}{result?.summary && <p>{result.summary}</p>}{result?.auditSummary && <div className="audit-items">{result.auditSummary.items.map(item => <p key={item.skillId}>{state.skills.find(skill => skill.id === item.skillId)?.name || item.skillId}：{item.status} {item.reason}</p>)}</div>}{result?.connectionResults && <div className="client-batch-results">{result.connectionResults.map(item => <p key={item.id}>{item.label}：{item.error || '连接成功'}</p>)}</div>}{result?.transferResult && <TransferNotice result={result.transferResult} onClose={closeModal} />}<p className="muted small-text">点击记录只查看结果或返回界面。更新预览需要重新生成；不会重复执行上传、下载或删除。</p>{task.resultExpired && <p className="helper-note">这是重启前的记录，临时预览已过期。请返回原界面重新检查。</p>}</ModalFrame>; })()}
     {modal?.kind === 'local' && <ModalFrame title="本地 Skill" subtitle="添加目录，预览新 Skill，管理自动导入。" onClose={closeModal} busy={false} error={modalError}><LocalSources roots={state.localRoots || []} ignoredPaths={state.ignoredLocalPaths || []} skills={state.skills} initialDraft={localImportDraft.current || (scanPath ? { paths: [scanPath], input: '', candidates: scanResult?.skills, warnings: scanResult?.warnings, selected: scanSelected, query: '', automatic: true } : undefined)} onDraft={draft => { localImportDraft.current = draft; }} onClose={closeModal} action={async <T,>(label: string, command: string, args: Record<string, unknown>): Promise<T> => { const result = await runTask<T>(label, command, args, { view: 'skills', paneId: pane.id }); snapshot(result); return result; }} /></ModalFrame>}
     {modal?.kind === 'github' && <ModalFrame title="添加 GitHub 来源" subtitle="读取仓库中的 Skill 和完整说明，不立即下载运行文件。" onClose={closeModal} busy={busy} error={modalError} footer={<><Button onClick={closeModal} disabled={busy}>取消</Button><Button variant="primary" disabled={busy || !githubUrl.trim()} onClick={() => void addGithub()}><Github size={16} />读取来源</Button></>}><label className="field-label">仓库地址<input value={githubUrl} onChange={event => setGithubUrl(event.target.value)} placeholder="https://github.com/owner/repository" autoCapitalize="none" spellCheck={false} onKeyDown={event => { if (event.key === 'Enter' && githubUrl.trim()) void addGithub(); }} /></label><div className="helper-note"><LockKeyhole size={16} />私有仓库请先在“设置”中保存该仓库的访问令牌。</div><p className="muted small-text">支持标准 SKILL.md 目录及带 skill-catalog.json 的仓库。将核对真实内部标识与目录或运行内容，明确对应时自动关联。</p></ModalFrame>}
-    {modal?.kind === 'associate' && <ModalFrame title="关联 GitHub 来源" subtitle={`为 ${skillName(modal.skill)} 指定远端位置。相同名称不代表相同来源。`} onClose={closeModal} busy={busy} error={modalError} footer={<><Button onClick={closeModal} disabled={busy}>取消</Button><Button variant="primary" onClick={() => void associate()} disabled={busy || !associateSkill}><Link2 size={15} />确认关联</Button></>}><label className="field-label">GitHub 来源<select value={associateSource} onChange={event => { setAssociateSource(event.target.value); setAssociateSkill(''); }}><option value="">选择仓库</option>{state.sources.map(source => <option key={source.id} value={source.id}>{source.repo}</option>)}</select></label><label className="field-label">远端 Skill<select value={associateSkill} onChange={event => setAssociateSkill(event.target.value)}><option value="">选择对应的 Skill 目录</option>{sourceSkill.map(skill => <option key={skill.id} value={skill.id}>{skillName(skill)} — {skill.remotePath || '/'}</option>)}</select></label><dl className="info-grid compact"><dt>本地目录</dt><dd className="monospace">{modal.skill.localPath}</dd><dt>远端目录</dt><dd className="monospace">{state.skills.find(skill => skill.id === associateSkill)?.remotePath ?? '待选择'}</dd></dl><div className="helper-note"><CircleHelp size={15} />关联后先核对实际内容；不会自动覆盖文件或把当前内容认定为最新版本。</div></ModalFrame>}
+    {modal?.kind === 'associate' && <ModalFrame title="关联 GitHub 来源" subtitle={`为 ${skillName(modal.skill)} 指定远端位置。相同名称不代表相同来源。`} onClose={closeModal} busy={busy} error={modalError} footer={<><Button onClick={closeModal} disabled={busy}>取消</Button><Button variant="primary" onClick={() => void associate()} disabled={busy || basicMode || !associateSkill}><Link2 size={15} />预览关联</Button></>}><label className="field-label">GitHub 来源<select aria-label="关联 GitHub 来源" disabled={busy || basicMode} value={associateSource} onChange={event => { setAssociateSource(event.target.value); setAssociateSkill(''); }}><option value="">选择仓库</option>{state.sources.map(source => <option key={source.id} value={source.id}>{source.repo}</option>)}</select></label><label className="field-label">远端 Skill<select aria-label="关联远端 Skill" disabled={busy || basicMode} value={associateSkill} onChange={event => setAssociateSkill(event.target.value)}><option value="">选择对应的 Skill 目录</option>{sourceSkill.map(skill => <option key={skill.id} value={skill.id}>{skillName(skill)} — {skill.remotePath || '/'}</option>)}</select></label><dl className="info-grid compact"><dt>本地目录</dt><dd className="monospace">{modal.skill.localPath}</dd><dt>远端目录</dt><dd className="monospace">{state.skills.find(skill => skill.id === associateSkill)?.remotePath ?? '待选择'}</dd></dl><div className="helper-note"><CircleHelp size={15} />关联后先核对实际内容；不会自动覆盖文件或把当前内容认定为最新版本。</div></ModalFrame>}
     {modal?.kind === 'runtime' && <ModalFrame title="调整文件范围" subtitle={skillName(modal.skill)} onClose={closeModal} busy={busy} error={modalError} footer={<><Button onClick={closeModal} disabled={busy}>取消</Button><Button variant="primary" disabled={busy || !selectedFiles.length} onClick={() => void confirmRuntime()}><Check size={15} />确认运行文件</Button></>}>
       <div className="helper-note"><ShieldCheck size={15} />这里调整管理器检查、更新和上传的长期文件范围，不是 Skill 的启用步骤。默认已自动识别；手动保存后保留你的选择。原文件继续留在原位置，ZIP 附件在导出页选择。</div>
       {runtimeGroups(modal.result).map(group => <RuntimeFileGroup key={`manage:${modal.skill.id}:${group.required}`} required={group.required} total={group.files.length} selected={group.files.filter(file => selectedFiles.includes(file.path)).length} description={group.required ? '必要入口、引用资源和许可证必须保留。' : '仅在实际运行需要或长期随包保留时纳入运行清单。'}><div className="file-checklist runtime-checklist">{group.files.map(file => <label className="file-check" key={file.path}><input type="checkbox" aria-label={`将 ${file.path} 纳入运行清单`} checked={selectedFiles.includes(file.path)} disabled={busy || group.required} onChange={event => setSelectedFiles(previous => event.target.checked ? [...new Set([...previous, file.path])] : previous.filter(path => path !== file.path))} /><span className="runtime-file-description"><span>{file.path}</span><small className="runtime-file-reason">{group.required ? requiredReason(modal.result, file.path) : '本地可选文件'}</small></span><em>{bytes(file.size)}</em></label>)}</div>{!group.files.length && <p className="runtime-group-empty">本地没有此类文件。</p>}</RuntimeFileGroup>)}
@@ -1385,15 +1584,17 @@ export default function SessionApp() {
       <div className="file-checklist runtime-checklist">{runtimeGroups(modal.result).map(group => <RuntimeFileGroup key={`modal:${modal.skill.id}:${modal.operation}:${group.required}`} required={group.required} total={group.files.length} selected={group.files.filter(file => selectedFiles.includes(file.path)).length} description={group.required ? ['push', 'upload'].includes(modal.operation) ? '本次提交仍可独立选择文件。' : '必需文件已勾选，包含已识别的运行依赖。' : '按需加入完整说明或其他附加内容。'}>{group.files.map(file => { const required = modal.operation !== 'push' && group.required; return <label key={file.path}><input type="checkbox" checked={selectedFiles.includes(file.path)} disabled={busy || required} onChange={event => setSelectedFiles(previous => event.target.checked ? [...previous, file.path] : previous.filter(item => item !== file.path))} /><FileCode2 size={14} /><span className="runtime-file-description"><span>{file.path}</span><small className="runtime-file-reason">{group.required ? requiredReason(modal.result, file.path) : '可选说明或附加文件'}</small></span>{file.missing && <small className="change-deleted">本地已移除</small>}{required && <small>必要</small>}<em>{bytes(file.size)}</em></label>; })}{!group.files.length && <p className="runtime-group-empty">{group.required ? '未识别到必要文件。' : '没有其他可选文件。'}</p>}</RuntimeFileGroup>)}</div>
       {!['push', 'upload'].includes(modal.operation) && !modal.result.runtimeConfirmed && <label className="consent"><input type="checkbox" checked={runtimeConsent} onChange={event => setRuntimeConsent(event.target.checked)} /><span>我已核对 SKILL.md、必要依赖与许可证；勾选的可选说明也会随包保留。</span></label>}{['push', 'upload'].includes(modal.operation) && <div className="helper-note"><ShieldCheck size={15} />仅提交选定变化。未下载的远端 README 等文件不会因本地缺失而被删除。</div>}
     </ModalFrame>}
-    {modal?.kind === 'preview' && <ModalFrame title={['push', 'upload'].includes(modal.preview.kind) ? '预览上传文件' : modal.preview.kind === 'disconnect' ? modal.preview.mode === 'stop' ? '预览忽略连接' : '预览断开连接' : modal.preview.kind === 'restore' ? '预览恢复附件' : modal.preview.kind.includes('install') ? '预览下载 Skill' : modal.preview.kind === 'attachments' ? '预览下载附件' : '预览更新内容'} subtitle={modal.preview.summary} onClose={closeModal} busy={busy} error={modalError} footer={<><span className="preview-apply-note">{modal.preview.canApply ? modal.preview.kind === 'attachments' ? '仅下载预览中的缺失文件，不覆盖已有文件' : '应用前将再次核对文件和远端是否变化' : '当前预览不可应用，请先处理提示'}</span><Button onClick={closeModal} disabled={busy}>关闭</Button><Button variant="primary" onClick={() => void applyPreview()} disabled={busy || !modal.preview.canApply || !modal.preview.id || ['push', 'upload'].includes(modal.preview.kind) && !commitMessage.trim()}>{['push', 'upload'].includes(modal.preview.kind) ? <Upload size={15} /> : <ArrowDownToLine size={15} />}{['push', 'upload'].includes(modal.preview.kind) ? '确认上传' : modal.preview.kind === 'disconnect' ? modal.preview.mode === 'stop' ? '确认忽略连接' : '确认断开连接' : modal.preview.kind === 'restore' ? '确认恢复附件' : modal.preview.kind.includes('install') ? '确认下载' : modal.preview.kind === 'attachments' ? '确认下载附件' : '应用更新'}</Button></>}>
+    {modal?.kind === 'preview' && <ModalFrame title={modal.preview.kind === 'associate' ? '预览 Skill 来源关联' : ['push', 'upload'].includes(modal.preview.kind) ? '预览上传文件' : modal.preview.kind === 'disconnect' ? modal.preview.mode === 'stop' ? '预览忽略连接' : '预览断开连接' : modal.preview.kind === 'restore' ? '预览恢复附件' : modal.preview.kind.includes('install') ? '预览下载 Skill' : modal.preview.kind === 'attachments' ? '预览下载附件' : '预览更新内容'} subtitle={modal.preview.summary} onClose={closeModal} busy={busy} error={modalError} footer={<><span className="preview-apply-note">{modal.preview.canApply ? modal.preview.kind === 'associate' ? '仅保存来源关联，保留本地文件和原安装记录' : modal.preview.kind === 'attachments' ? '仅下载预览中的缺失文件，不覆盖已有文件' : '应用前将再次核对文件和远端是否变化' : '当前预览不可应用，请先处理提示'}</span><Button onClick={closeModal} disabled={busy}>关闭</Button><Button variant="primary" onClick={() => void applyPreview()} disabled={busy || modal.preview.kind === 'associate' && basicMode || !backupConsent.allowed || !modal.preview.canApply || !modal.preview.id || ['push', 'upload'].includes(modal.preview.kind) && !commitMessage.trim()}>{['push', 'upload'].includes(modal.preview.kind) ? <Upload size={15} /> : <ArrowDownToLine size={15} />}{modal.preview.kind === 'associate' ? '确认保存关联' : backupConsent.required ? '允许备份并应用更新' : ['push', 'upload'].includes(modal.preview.kind) ? '确认上传' : modal.preview.kind === 'disconnect' ? modal.preview.mode === 'stop' ? '确认忽略连接' : '确认断开连接' : modal.preview.kind === 'restore' ? '确认恢复附件' : modal.preview.kind.includes('install') ? '确认下载' : modal.preview.kind === 'attachments' ? '确认下载附件' : '应用更新'}</Button></>}>
       {modal.preview.kind !== 'disconnect' && <dl className="info-grid compact"><dt>当前 Skill</dt><dd>{state.skills.find(skill => skill.id === modal.preview.skillId) ? skillName(state.skills.find(skill => skill.id === modal.preview.skillId)!) : modal.preview.skillId}</dd>{modal.preview.targetPath && <><dt>保存目录</dt><dd className="monospace">{modal.preview.targetPath}</dd></>}{modal.preview.commit && <><dt>远端版本</dt><dd className="monospace">{modal.preview.commit}</dd></>}</dl>}
+      {modal.preview.kind === 'associate' && <><SourceMapping title="原关联" source={modal.preview.previousSource} /><SourceMapping title="新关联" source={modal.preview.targetSource} /><SourceMapping title="原安装来源" source={modal.preview.installedProvenance} /></>}
       {(modal.preview.targetRepo || modal.preview.targetBranch) && <dl className="info-grid compact"><dt>上传目标仓库</dt><dd>{modal.preview.targetRepo}</dd><dt>目标分支</dt><dd>{modal.preview.targetBranch}</dd></dl>}
       {modal.preview.kind === 'disconnect' && <>
         <div className="connection-preview-list">{(modal.preview.entries || [{ connectionId: 'single', label: modal.preview.skillId, path: modal.preview.path, target: modal.preview.target, mode: modal.preview.mode || 'disconnect', canApply: modal.preview.canApply }]).map(entry => <article key={entry.connectionId} className="connection-preview-entry"><strong>{entry.label}</strong><span>{CLIENT_MANAGEMENT_COPY[entry.mode].label}</span><dl className="info-grid compact"><dt>客户端入口</dt><dd><code>{entry.path}</code></dd><dt>Skill 原目录</dt><dd><code>{entry.target}</code></dd></dl>{entry.error && <p className="error-text">{entry.error}</p>}</article>)}</div>
         <div className="helper-note"><ShieldCheck size={15} />{modal.preview.mode === 'stop' ? '保留客户端入口和原文件；自动发现将忽略这一条入口。' : '仅解除列出的目录链接，Skill 原目录和文件继续保留。'}入口身份或目标变化后，预览自动失效。</div>
       </>}
+      <BackupPlanConsent plan={modal.preview.backupPlan} checked={backupConsent.checked} disabled={busy || !session.owned || session.isTransferring()} onChange={backupConsent.change} />
       {!!modal.preview.cleanupFiles?.length && <section className="cleanup-preview"><h3>上传并校验成功后，从本地删除以下可选文件</h3><p>这些文件保留在本次 GitHub 提交，可从“恢复附件”取回。实际删除前会再次检查必要性与本地内容。</p><ul>{modal.preview.cleanupFiles.map(file => <li key={file.path}><code>{file.absolutePath}</code><small>{file.reason}</small></li>)}</ul></section>}
-      {modal.preview.warnings?.map((warning, index) => <div className="inline-warning" key={index}><CircleAlert size={16} />{warning}</div>)}{modal.preview.kind !== 'disconnect' && <div className="preview-layout"><div className="preview-file-list">{modal.preview.files?.map(file => <button className={previewFile === file.path ? 'active' : ''} key={file.path} onClick={() => setPreviewFile(file.path)}><span>{file.path}</span><small className={`change-${file.change}`}>{CHANGES[file.change] || file.change}</small></button>)}</div><div className="diff-view">{(() => { const file = modal.preview.files?.find(item => item.path === previewFile); return !file ? <Empty title="没有文件变化" /> : <><div className="diff-title"><FileCode2 size={14} />{file.path}<span className={`change-${file.change}`}>{CHANGES[file.change] || file.change}</span></div><div className="diff-columns"><div><strong>本地内容</strong><pre>{file.local ?? (file.change === 'added' ? '本地尚无此文件' : '无文本预览，或文件内容未变化')}</pre></div><div><strong>远端内容</strong><pre>{file.remote ?? (file.change === 'deleted' ? '远端已移除此文件' : '无文本预览，或文件内容未变化')}</pre></div></div></>; })()}</div></div>}{['push', 'upload'].includes(modal.preview.kind) && <label className="field-label">提交说明<input value={commitMessage} onChange={event => setCommitMessage(event.target.value)} placeholder="描述这次选定修改" maxLength={500} /></label>}{!modal.preview.canApply && <div className="helper-note"><Code2 size={16} />请按提示核对来源或处理本地修改，然后重新生成预览。关闭窗口会保留所有原文件。</div>}
+      {modal.preview.warnings?.map((warning, index) => <div className="inline-warning" key={index}><CircleAlert size={16} />{warning}</div>)}{modal.preview.kind !== 'disconnect' && !!modal.preview.files?.length && <div className="preview-layout"><div className="preview-file-list">{modal.preview.files?.map(file => <button className={previewFile === file.path ? 'active' : ''} key={file.path} onClick={() => setPreviewFile(file.path)}><span>{file.path}</span><small className={`change-${file.change}`}>{CHANGES[file.change] || file.change}</small></button>)}</div><div className="diff-view">{(() => { const file = modal.preview.files?.find(item => item.path === previewFile); return !file ? <Empty title="没有文件变化" /> : <><div className="diff-title"><FileCode2 size={14} />{file.path}<span className={`change-${file.change}`}>{CHANGES[file.change] || file.change}</span></div><div className="diff-columns"><div><strong>本地内容</strong><pre>{file.local ?? (file.change === 'added' ? '本地尚无此文件' : '无文本预览，或文件内容未变化')}</pre></div><div><strong>远端内容</strong><pre>{file.remote ?? (file.change === 'deleted' ? '远端已移除此文件' : '无文本预览，或文件内容未变化')}</pre></div></div></>; })()}</div></div>}{['push', 'upload'].includes(modal.preview.kind) && <label className="field-label">提交说明<input value={commitMessage} onChange={event => setCommitMessage(event.target.value)} placeholder="描述这次选定修改" maxLength={500} /></label>}{!modal.preview.canApply && <div className="helper-note"><Code2 size={16} />请按提示核对来源或处理本地修改，然后重新生成预览。关闭窗口会保留所有原文件。</div>}
     </ModalFrame>}
     {modal?.kind === 'audit' && <ModalFrame title="运行依赖与比较基准核对" subtitle={`本轮核对 ${modal.summary.checked} 个 Skill`} onClose={closeModal} busy={busy} error={modalError} footer={<Button onClick={closeModal}>关闭</Button>}>
       <div className="audit-counts"><span><strong>{modal.summary.passed}</strong> 结构核对通过</span><span><strong>{modal.summary.needsReview}</strong> 需要处理</span><span><strong>{modal.summary.failed}</strong> 检查失败</span></div>
@@ -1406,52 +1607,95 @@ export default function SessionApp() {
     </ModalFrame>}
     {modal?.kind === 'forget' && <ModalFrame title="移除管理记录" subtitle={skillName(modal.skill)} onClose={closeModal} busy={busy} error={modalError} footer={<><Button disabled={busy} onClick={closeModal}>取消</Button><Button disabled={busy} onClick={async () => { const result = await perform<Snapshot>('正在移除管理记录', 'forget', { skillId: modal.skill.id }, '管理记录已移除，原文件未删除。'); if (result) { setModal(null); setDetailOpen(false); } }}>确认移除记录</Button></>}><p>这会从管理器列表中移除此项，其原文件和 GitHub 内容继续保留。</p><div className="path-note">{modal.skill.localPath || `${modal.skill.repo}/${modal.skill.remotePath || ''}`}</div></ModalFrame>}
   </>;
+  function chooseCommand(command: Command) {
+    const target = command.target;
+    if (target.kind === 'resource-action') {
+      const resource = resourceCommandCatalogue.getSnapshot().resources.find(item => item.id === target.id);
+      if (basicModeRef.current || !resource?.enabled || resource.sceneEligible === false || resource.effectiveEnabled === false || resource.revision !== target.expectedRevision || !resource.actions.some(item => item.id === target.actionId)) { notify('info', '此动作的状态已变化，请重新搜索并核对。'); return; }
+    }
+    if (target.kind === 'skill') {
+      const skill = stateRef.current.skills.find(item => item.id === target.id);
+      if (skill) sessionRef.current.openDetail(skill, target.section);
+      else notify('info', '此 Skill 已不在当前目录，请重新搜索。');
+    } else if (target.kind === 'history') sessionRef.current.openHistory();
+    else if (target.kind === 'view') sessionRef.current.goHome(target.view);
+    else {
+      sessionRef.current.goHome(target.kind === 'tool' || target.kind === 'resource-action' ? 'tools' : 'settings');
+      window.dispatchEvent(new CustomEvent('arm-command-focus', { detail: target }));
+    }
+  }
+  const commandPalette = <CommandPalette commands={paletteCommands} active={session.active && !session.closing} loading={resourceCatalogue.loading} notice={resourceCatalogue.error ? '工具目录读取失败；仍可搜索已读取内容、Skills和设置。' : ''} onOpen={readPaletteResources} onOpenChange={setCommandPaletteOpen} onChoose={chooseCommand} />;
   if (!isHome) return <div className="session-document" ref={paneRoot} data-session-pane={pane.id} data-read-generation={state.readGeneration ?? 'unknown'}>
-    <PaneFrame paneId={pane.id} outline={pane.kind !== 'history'} outlineExpanded={outlineExpanded} onOutlineExpandedChange={setOutlineExpanded} initialScrollTop={Number(session.initialDraft.scrollTop ?? pane.state.scrollTop ?? 0)} onScrollPosition={saveScroll} toolbar={<><strong title={pane.title || 'Skill'}>{pane.title || 'Skill'}</strong><button className="button ghost" onClick={() => sessionRef.current.goHome()}>返回工作台</button></>}>
+    <PaneFrame paneId={pane.id} outline={pane.kind !== 'history'} outlineExpanded={outlineExpanded} onOutlineExpandedChange={setOutlineExpanded} initialScrollTop={Number(session.initialDraft.scrollTop ?? pane.state.scrollTop ?? 0)} onScrollPosition={saveScroll} toolbar={<><strong title={pane.title || 'Skill'}>{pane.title || 'Skill'}</strong><div className="command-palette-toolbar-actions">{commandPalette}<button className="button ghost" onClick={() => sessionRef.current.goHome()}>返回工作台</button></div></>}>
+      {management.error && <div className="management-data-error" role="alert">个人管理信息读取失败，已有显示仍保留。<button className="button" disabled={management.loading} onClick={() => void readManagementData().catch(() => undefined)}>重新读取</button></div>}
       {notices[0] && <WorkspaceFeedback message={notices[0].message} tone={notices[0].tone} onDismiss={() => setNotices(previous => previous.slice(1))} onOpenHistory={() => sessionRef.current.openHistory()} />}
-      {pane.kind === 'operation' && transferResult && <TransferNotice result={transferResult} onClose={() => setTransferResult(null)} />}{pane.kind === 'history' ? <OperationHistory tasks={tasks} initialDraft={historyDraft.current} onDraftChange={draft => { historyDraft.current = draft; }} onInspect={openTask} onLocate={locateTask} onCancel={task => cancelTask(task.id).then(() => undefined)} onClear={() => clearTasks().then(() => undefined)} /> : pane.kind === 'detail' ? <>{detailPanel}{modal && ['category', 'delete-category', 'forget'].includes(modal.kind) && paneDialogs}</> : modal ? paneDialogs : <div className="restored-operation"><h2>重新核对操作</h2><p>操作页已恢复。请重新读取当前文件或生成预览，核对后再执行。</p><Button onClick={() => { const skill = state.skills.find(item => item.id === pane.skillId); if (skill) openDetail(skill, 'files'); else sessionRef.current.goHome(); }}>查看当前文件</Button></div>}
+      {pane.kind === 'operation' && transferResult && <TransferNotice result={transferResult} onClose={() => setTransferResult(null)} />}{pane.kind === 'history' ? <OperationHistory tasks={tasks} sourceBySkill={sourceBySkill} initialDraft={historyDraft.current} onDraftChange={draft => { historyDraft.current = draft; }} onInspect={openTask} onLocate={locateTask} onCancel={task => cancelTask(task.id).then(() => undefined)} onClear={() => clearTasks().then(() => undefined)} /> : pane.kind === 'detail' ? <>{detailPanel}{modal && ['category', 'delete-category', 'forget'].includes(modal.kind) && paneDialogs}</> : modal ? paneDialogs : <div className="restored-operation"><h2>重新核对操作</h2><p>操作页已恢复。请重新读取当前文件或生成预览，核对后再执行。</p><Button onClick={() => { const skill = state.skills.find(item => item.id === pane.skillId); if (skill) openDetail(skill, 'files'); else sessionRef.current.goHome(); }}>查看当前文件</Button></div>}
       {resumedTasks.map(task => <div className="resumed-task-result" key={task.id}><strong>{task.label} · {taskStatus[task.status]}</strong>{!!task.result && typeof task.result === "object" && "path" in task.result && <code>{String(task.result.path)}</code>}<Button onClick={() => setModal({ kind: 'task', task })}>查看结果</Button>{!!task.result && typeof task.result === 'object' && 'canApply' in task.result && <Button onClick={() => showPreview(task.result as Preview)}>查看预览</Button>}</div>)}
     </PaneFrame>
     {floatingMenu && <FloatingMenu menu={floatingMenu} onClose={closeFloatingMenu} />}
   </div>;
 
-  return <div ref={paneRoot} data-session-pane={pane.id} data-read-generation={state.readGeneration ?? 'unknown'} className={`app-shell ${compactSidebar ? 'sidebar-collapsed' : ''} ${sidebarFlyout && compactSidebar ? 'sidebar-flyout' : ''}`} style={{ '--sidebar-width': `${compactSidebar ? 72 : expandedSidebarWidth}px`, '--sidebar-expanded-width': `${expandedSidebarWidth}px` } as React.CSSProperties}>
+  const sidebar = <div className={`app-shell workspace-sidebar-frame ${compactSidebar ? 'sidebar-collapsed' : ''} ${sidebarFlyout && compactSidebar ? 'sidebar-flyout' : ''}`} style={{ '--sidebar-width': `${compactSidebar ? 72 : expandedSidebarWidth}px`, '--sidebar-expanded-width': `${expandedSidebarWidth}px` } as React.CSSProperties}>
     <aside className="sidebar" ref={sidebarRef}>
-      <div className="sidebar-top"><div className="brand"><span className="brand-icon"><Layers3 size={23} strokeWidth={1.8} /></span><div><strong>Skill Manager</strong></div></div><button className="icon-button sidebar-toggle" title={compactSidebar && !sidebarFlyout ? '展开侧栏' : '收起侧栏'} aria-label={compactSidebar && !sidebarFlyout ? '展开侧栏' : '收起侧栏'} aria-expanded={!compactSidebar || sidebarFlyout} onClick={() => { if (effectiveWidth < 720) setSidebarFlyout(value => !value); else toggleSidebar(); }}>{compactSidebar ? <PanelLeftOpen size={19} /> : <PanelLeftClose size={19} />}</button></div>
-      
+      <div className="sidebar-top"><div className="brand"><span className="brand-icon brand-artwork" aria-hidden="true" /><div><strong className="brand-title" title="Agent 资源管理器"><span>Agent</span>{' '}<span>资源管理器</span></strong></div></div></div>
+
       <nav aria-label="主要导航">
-        {([{ id: 'skills', label: 'Skills', icon: <Box size={19} />, count: state.skills.length }, { id: 'changes', label: '变化', icon: <ArrowLeftRight size={19} />, count: changedSkills.length || undefined }, { id: 'clients', label: '客户端', icon: <Monitor size={19} /> }, { id: 'settings', label: '设置', icon: <Settings2 size={19} /> }] as const).map(item => <button key={item.id} title={item.label} aria-label={item.label} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => { setView(item.id); setAddMenu(false); setSidebarFlyout(false); }}>{item.icon}<span>{item.label}</span>{'count' in item && item.count !== undefined && <span className="nav-count">{item.count}</span>}</button>)}
+        {([{ id: 'dashboard', label: '总览', icon: <LayoutGrid size={19} /> }, { id: 'resources', label: '全部资源', icon: <LayoutPanelLeft size={19} /> }, { id: 'skills', label: 'Skills', icon: <Box size={19} />, count: state.skills.length }, { id: 'tools', label: '工具', icon: <Layers3 size={19} /> }, { id: 'changes', label: '变化', icon: <ArrowLeftRight size={19} />, count: changedSkills.length || undefined }, { id: 'clients', label: '客户端', icon: <Monitor size={19} /> }, { id: 'settings', label: '设置', icon: <Settings2 size={19} /> }] as const).map(item => <button key={item.id} title={item.label} aria-label={item.label} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => { setView(item.id); setAddMenu(false); setSidebarFlyout(false); if (!sessionRef.current.active) sessionRef.current.goHome(item.id); }}>{item.icon}<span>{item.label}</span>{'count' in item && item.count !== undefined && <span className="nav-count">{item.count}</span>}</button>)}
       </nav>
       <button className="icon-button category-rail-toggle" title="打开分类" aria-label="打开分类" aria-expanded={sidebarFlyout} onClick={() => setSidebarFlyout(value => !value)} onDragEnter={event => { if (event.dataTransfer.types.includes('application/x-skill-manager-skills')) { clearTimeout(dragCategoryTimer.current); dragCategoryTimer.current = setTimeout(() => setSidebarFlyout(true), 350); } }} onDragOver={event => { if (event.dataTransfer.types.includes('application/x-skill-manager-skills')) event.preventDefault(); }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) clearTimeout(dragCategoryTimer.current); }}><Folder size={20} /></button>
       {categoryPanel}
-      <Button className="management-undo" variant="ghost" aria-label="撤销管理操作" title={managementBusy ? '正在保存管理操作，完成后可撤销' : state.managementUndo?.available ? `撤销${state.managementUndo.label || '管理操作'} (Ctrl+Z)` : '暂无可撤销的分类或收藏操作'} disabled={busy || managementBusy || !state.managementUndo?.available} onClick={() => void undoManagement()}><Undo2 size={14} />撤销</Button>
-      <OperationSummary tasks={tasks} visible={session.visible} onShowAll={() => sessionRef.current.openHistory()} onDetails={openTask} onReturn={locateTask} />
-      
+      <ManagementHistoryControls history={managementHistory} />
+      <OperationSummary tasks={tasks} visible={!session.closing} onShowAll={() => sessionRef.current.openHistory()} onDetails={openTask} onReturn={locateTask} />
+
     </aside>
     {!compactSidebar && <div className={`sidebar-resizer ${resizingSidebar ? 'is-resizing' : ''}`} role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin={200} aria-valuemax={Math.floor(Math.min(420, effectiveWidth - 520))} aria-valuenow={Math.round(expandedSidebarWidth)} tabIndex={0} title="拖动调整侧栏宽度；双击恢复默认" onDoubleClick={() => { setSidebarWidth(224); queueLayout({ sidebarWidth: 224 }); }} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); resizeSidebar(expandedSidebarWidth + (event.key === 'ArrowRight' ? 10 : -10), true); } else if (event.key === 'Home') { event.preventDefault(); setSidebarWidth(224); queueLayout({ sidebarWidth: 224 }); } }} onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); resizeStart.current = { x: event.clientX, width: expandedSidebarWidth, originalWidth: sidebarWidth }; queueLayout({ sidebarWidth }); setResizingSidebar(true); }} onPointerMove={event => { if (resizeStart.current) resizeSidebar(resizeStart.current.width + (event.clientX - resizeStart.current.x) / (currentLayout.current.zoom / 100), true); }} onPointerUp={event => { if (!resizeStart.current) return; resizeStart.current = null; setResizingSidebar(false); queueLayout({ sidebarWidth: currentLayout.current.width }); void flushLayout(); event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={cancelSidebarResize} onLostPointerCapture={cancelSidebarResize} />}
-    <main className="main" data-pane-scroll onScroll={event => { if (!homeRestorePending.current && event.currentTarget.clientHeight > 0) saveScroll(event.currentTarget.scrollTop); }}>
-      <header className="page-header"><h1>{title}</h1><div className="header-actions">{(view === 'skills' || view === 'changes') && <Button disabled={busy || !state.skills.length} onClick={() => void auditSkills()}><ShieldCheck size={15} />核对运行依赖</Button>}{view === 'skills' && <div className="add-menu"><Button variant="primary" onClick={() => setAddMenu(!addMenu)} disabled={busy}><Plus size={17} />添加 Skill</Button>{addMenu && <><button className="menu-dismiss" aria-label="关闭添加菜单" onClick={() => setAddMenu(false)} /><div className="dropdown"><button onClick={() => { setModal({ kind: 'local' }); setAddMenu(false); }}><FolderOpen size={17} /><span>添加本地目录<small>直接读取原位置</small></span></button><button onClick={() => { setModal({ kind: 'github' }); setAddMenu(false); }}><Github size={17} /><span>添加 GitHub 来源<small>读取仓库与说明</small></span></button></div></>}</div>}</div></header>
+  </div>;
+  return <div ref={paneRoot} data-session-pane={pane.id} data-read-generation={state.readGeneration ?? 'unknown'} className="app-shell workspace-home-content" style={{ '--workspace-sidebar-expansion': `${compactSidebar ? 0 : Math.max(0, expandedSidebarWidth - 72)}px` } as React.CSSProperties}>
+    {session.sidebarHost ? createPortal(sidebar, session.sidebarHost) : sidebar}
+    <main className="main" data-view={view} data-pane-scroll onScroll={event => { if (!homeRestorePending.current && event.currentTarget.clientHeight > 0) saveScroll(event.currentTarget.scrollTop); }}>
+      <header className="page-header"><div className="page-title-group"><h1>{title}</h1>{view === 'skills' && <div className="library-summary"><span><span className="summary-number">{state.skills.length}</span> 全部 Skill</span><span title="已有本地运行目录的 Skill，包含已关联项"><Folder size={15} /><strong>{localSkills.length}</strong> 本地</span><span title="已登记的 GitHub Skill 条目，包含已关联项"><Github size={15} /><strong>{libraryTotals.github}</strong> 远端 Skill</span><span title="同时具有本地目录与 GitHub 来源"><Link2 size={15} /><strong>{libraryTotals.linked}</strong> 已关联</span><span className="repository-total" title="按仓库地址去重统计，不是 Skill 数量"><GitBranch size={15} /><strong>{libraryTotals.repositories}</strong> GitHub 仓库</span></div>}</div><div className="header-actions">{commandPalette}{(view === 'skills' || view === 'changes') && <Button disabled={busy || !state.skills.length} onClick={() => void auditSkills()}><ShieldCheck size={15} />核对运行依赖</Button>}{view === 'skills' && <div className="add-menu"><Button variant="primary" onClick={() => setAddMenu(!addMenu)} disabled={busy}><Plus size={17} />添加 Skill</Button>{addMenu && <><button className="menu-dismiss" aria-label="关闭添加菜单" onClick={() => setAddMenu(false)} /><div className="dropdown"><button onClick={() => { setModal({ kind: 'local' }); setAddMenu(false); }}><FolderOpen size={17} /><span>添加本地目录<small>直接读取原位置</small></span></button><button onClick={() => { setModal({ kind: 'github' }); setAddMenu(false); }}><Github size={17} /><span>添加 GitHub 来源<small>读取仓库与说明</small></span></button></div></>}</div>}</div></header>
+      {management.error && <div className="management-data-error" role="alert">个人管理信息读取失败，已有显示仍保留。<button className="button" disabled={management.loading} onClick={() => void readManagementData().catch(() => undefined)}>重新读取</button></div>}
       {notices[0] && <WorkspaceFeedback message={notices[0].message} tone={notices[0].tone} onDismiss={() => setNotices(previous => previous.slice(1))} onOpenHistory={() => sessionRef.current.openHistory()} />}
       {!detailVisible && transferResult && <TransferNotice result={transferResult} onClose={() => setTransferResult(null)} />}
+      {view === 'resources' && <ResourceLibrary skills={displaySkills} tools={resourceCatalogue} categories={categories} ready={ready} paneRoot={paneRoot}
+        initialDraft={resourceLibraryDraftRef.current} onDraft={saveResourceLibraryDraft} onRetry={readPaletteResources} savedViews={management.data?.savedViews || []}
+        onOpen={entry => {
+          if (entry.owner === 'skill') { const skill = displaySkills.find(item => item.id === entry.resourceId); if (skill) openDetail(skill); }
+          else { setCommandResourceAction(null); setCommandResourceId(entry.resourceId); setCommandResourceRequest(value => value + 1); setView('tools'); }
+        }}
+        onSavedView={id => {
+          const saved = management.data?.savedViews.find(item => item.id === id);
+          if (saved?.view === 'skills') { applySkillView(saved.filters); setView('skills'); }
+          else if (saved?.view === 'tools') { setToolFilterRequest(previous => ({ sequence: (previous?.sequence || 0) + 1, filters: { ...saved.filters } })); setView('tools'); }
+        }} />}
+      {view === 'dashboard' && <Dashboard skills={displaySkills} categories={categories} sources={state.sources} tasks={tasks} tools={resourceCatalogue} ready={ready} canAdd={!basicMode && !busy && ready && session.owned && !session.closing}
+        onView={setView} onSkill={(id, section = 'docs') => { const skill = displaySkills.find(item => item.id === id); if (skill) openDetail(skill, section); }}
+        onCategory={selectCategory} onTask={task => void openTask(task)} onHistory={() => sessionRef.current.openHistory()}
+        onSources={() => { setSettingsSection('github'); setView('settings'); }} onRetryTools={readPaletteResources} onAdd={() => setModal({ kind: 'local' })} />}
 
 
       {view === 'skills' && <>
-        <div className="library-summary"><span><span className="summary-number">{state.skills.length}</span> 全部 Skill</span><span title="已有本地运行目录的 Skill，包含已关联项"><Folder size={15} /><strong>{localSkills.length}</strong> 本地</span><span title="已登记的 GitHub Skill 条目，包含已关联项"><Github size={15} /><strong>{libraryTotals.github}</strong> 远端 Skill</span><span title="同时具有本地目录与 GitHub 来源"><Link2 size={15} /><strong>{libraryTotals.linked}</strong> 已关联</span><span className="repository-total" title="按仓库地址去重统计，不是 Skill 数量"><GitBranch size={15} /><strong>{libraryTotals.repositories}</strong> GitHub 仓库</span></div>
+
         {(categoryFilter !== 'all' || categoryUndo) && <div className="category-toolbar"><div className="category-context"><Folder size={17} /><strong title={categoryTitle}>{categoryTitle}</strong><span>· {categoryTotal} 个 Skill</span>{categoryFilter !== 'all' && <button className="text-button" onClick={() => selectCategory('all')}>查看全部</button>}</div>{categoryUndo && <Button className="category-undo" variant="ghost" disabled={busy} onClick={() => void undoCategory()}><Undo2 size={14} />撤销归类</Button>}</div>}
         {categoryFeedback && <div className={`category-assignment-feedback ${categoryFeedback.error ? 'error' : ''}`} role={categoryFeedback.error ? 'alert' : 'status'}><span>{categoryFeedback.message}</span>{!categoryFeedback.error && categoryUndo && <button className="text-button" disabled={busy} onClick={() => void undoCategory()}><Undo2 size={13} />撤销归类</button>}{categoryFeedback.targetId && <button className="text-button" onClick={() => selectCategory(categoryFeedback.targetId!)}>查看分类</button>}<button className="icon-button" aria-label="关闭归类提示" onClick={() => setCategoryFeedback(null)}><X size={13} /></button></div>}
         {(query || filter !== 'all' || statusFilter !== 'all') && <div className="active-filter-chips" aria-label="当前筛选">{query && <button className="filter-chip" onClick={() => setQuery('')}>搜索：{query}<X size={12} /></button>}{filter !== 'all' && <button className="filter-chip" onClick={() => setFilter('all')}>来源：{filter === 'local' ? '本地' : filter === 'github' ? 'GitHub' : '已关联'}<X size={12} /></button>}{statusFilter !== 'all' && <button className="filter-chip" onClick={() => setStatusFilter('all')}>状态：{statusFilterLabel(statusFilter)}<X size={12} /></button>}</div>}
+        <LibraryReadingBoundary root={paneRoot} scope={JSON.stringify([libraryQueryKey, libraryMode, libraryNavigation])} items={libraryResult.items}>
         <div className={`library-panel library-${libraryMode}`}>
           <div className="library-controls">
-            <div className="library-search-row"><label className="search library-search"><Search size={17} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={`搜索${categoryFilter === 'all' ? '全部 Skill' : '当前分类'}：名称、用途、仓库、路径…`} aria-label="搜索 Skill" />{query && <button className="icon-button" aria-label="清空搜索" onClick={() => setQuery('')}><X size={15} /></button>}</label><div className="segmented library-mode" aria-label="技能库视图"><button className={libraryMode === 'list' ? 'selected' : ''} aria-pressed={libraryMode === 'list'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'list' })}><List size={16} />列表</button><button className={libraryMode === 'cards' ? 'selected' : ''} aria-pressed={libraryMode === 'cards'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'cards' })}><LayoutGrid size={16} />卡片</button><button className={libraryMode === 'details' ? 'selected' : ''} aria-pressed={libraryMode === 'details'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'details' })}><LayoutPanelLeft size={16} />详情</button></div></div>
-            <div className="library-filter-row"><div className="segmented source-filters" aria-label="来源筛选">{([{ id: 'all', label: '全部' }, { id: 'local', label: '本地' }, { id: 'github', label: 'GitHub' }, { id: 'linked', label: '已关联' }] as const).map(item => <button key={item.id} className={filter === item.id ? 'selected' : ''} aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}</button>)}</div><label className="compact-select"><span>状态</span><select aria-label="按状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value as LibraryStatusFilter)}>{libraryStatusOptions(state.skills, { categoryFilter, sourceFilter: filter, query, statusFilter }).map(option => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}</select></label><label className="compact-select library-sort"><span>排序</span><select aria-label="Skill 排序" value={librarySort} disabled={busy} onChange={event => void saveLibraryPreference({ librarySort: event.target.value as LibrarySort })}><option value="name">名称 A–Z</option><option value="status">状态优先</option><option value="checked">最近检查</option></select></label>{(query || filter !== 'all' || statusFilter !== 'all') && <button className="text-button clear-filters" onClick={clearLibraryFilters}><X size={13} />清除筛选</button>}</div>
-            {ready && matching.length > 0 && libraryMode !== 'details' && <div className="library-selection-bar">
+            {reading.pending && <div className="library-reading-status" role="status"><span>状态已更新，阅读位置已保留。</span><button className="text-button" onClick={() => { setReadingRefresh(value => value + 1); setLibraryPage(1); }}>重新整理列表</button></div>}
+            <div className="library-search-row"><label className="search library-search"><Search size={17} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 Skill、别名、用途…" title="可搜索名称、别名、备注、用途、仓库与本地路径" aria-label="搜索 Skill" />{query && <button className="icon-button" aria-label="清空搜索" onClick={() => setQuery('')}><X size={15} /></button>}</label><div className="segmented library-mode" aria-label="技能库视图"><button className={libraryMode === 'list' ? 'selected' : ''} aria-pressed={libraryMode === 'list'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'list' })}><List size={16} />列表</button><button className={libraryMode === 'cards' ? 'selected' : ''} aria-pressed={libraryMode === 'cards'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'cards' })}><LayoutGrid size={16} />卡片</button><button className={libraryMode === 'details' ? 'selected' : ''} aria-pressed={libraryMode === 'details'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'details' })}><LayoutPanelLeft size={16} />详情</button></div></div>
+            <div className="library-filter-row"><div className="segmented source-filters" aria-label="来源筛选">{([{ id: 'all', label: '全部' }, { id: 'local', label: '本地' }, { id: 'github', label: 'GitHub' }, { id: 'linked', label: '已关联' }] as const).map(item => <button key={item.id} className={filter === item.id ? 'selected' : ''} aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}</button>)}</div><label className="compact-select"><span>状态</span><select aria-label="按状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value as LibraryStatusFilter)}>{libraryStatusOptions(displaySkills, { categoryFilter, sourceFilter: filter, query, statusFilter }).map(option => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}</select></label><label className="compact-select library-sort"><span>排序</span><select aria-label="Skill 排序" value={librarySort} disabled={busy} onChange={event => void saveLibraryPreference({ librarySort: event.target.value as LibrarySort })}><option value="name">名称 A–Z</option><option value="status">状态优先</option><option value="checked">最近检查</option></select></label>{(query || filter !== 'all' || statusFilter !== 'all') && <button className="text-button clear-filters" onClick={clearLibraryFilters}><X size={13} />清除筛选</button>}</div>
+            <div className="library-selection-bar">
+              {ready && matching.length > 0 && libraryMode !== 'details' && <>
               <span><strong>{libraryResult.total}</strong> 项结果{visibleChecked.length > 0 && ` · 已选 ${visibleChecked.length} 项（仅本页）`}</span>
               <ShortcutHelp mode={libraryMode === 'cards' ? 'cards' : 'list'} visible={session.visible} />
               {libraryMode === 'cards' && <button className="text-button" disabled={busy} onClick={() => { setCheckedSkills(visibleChecked.length === pageSkillIds.length ? [] : pageSkillIds); selectionAnchor.current = pageSkillIds[0] || null; }}>{visibleChecked.length === pageSkillIds.length ? '取消本页选择' : '选择本页全部'}</button>}
               {visibleChecked.length > 0 && <div className="library-batch-actions">{categoryAssignmentMenu}<Button disabled={busy} onClick={() => void checkSelected()}><RefreshCw size={14} />检查所选 ({visibleChecked.length})</Button><Button variant="ghost" onClick={() => setCheckedSkills([])} disabled={busy}>取消选择</Button></div>}
-            </div>}
+              </>}
+              <Suspense fallback={null}><SavedViews view="skills" filters={{ query, sourceFilter: filter, statusFilter, categoryFilter, sort: librarySort, mode: libraryMode, pageSize: libraryPageSize }} data={management.data} action={managementAction} onChanged={managementDataCache.accept} onApply={applySkillView} readOnly={basicMode} /></Suspense>
+            </div>
           </div>
-          {!ready ? <Empty icon={<LoaderCircle className="spin" size={28} />} title="正在读取技能库" /> : !state.skills.length ? <Empty title="从你的第一个 Skill 开始"><p>连接本地文件夹，或添加 GitHub 仓库。<br />已有文件留在原位置，由你决定每次变化。</p><div className="empty-actions"><Button variant="primary" onClick={() => setModal({ kind: 'local' })}><FolderOpen size={16} />添加本地目录</Button><Button onClick={() => setModal({ kind: 'github' })}><Github size={16} />连接 GitHub</Button></div><span className="microcopy">本地管理无需登录 GitHub</span></Empty> : !categoryTotal ? <Empty icon={<Folder size={27} />} title={categoryFilter === 'favorites' ? '还没有收藏 Skill' : '分类中还没有 Skill'}><p>{categoryFilter === 'favorites' ? '点击 Skill 名称旁的星标即可收藏，原分类保持不变。' : '从“全部 Skills”拖入 Skill，或勾选后使用“归入分类”。'}</p><Button variant="ghost" onClick={() => selectCategory('all')}>浏览全部 Skills</Button></Empty> : !matching.length ? <Empty icon={<Search size={27} />} title="当前筛选无结果"><p>当前分类中有 {categoryTotal} 个 Skill，试试其他关键词、来源或状态。</p><Button variant="ghost" onClick={clearLibraryFilters}>清除筛选</Button></Empty> : libraryMode === 'list' ? <>
+          {!ready ? <Empty icon={<LoaderCircle className="spin" size={28} />} title="正在读取技能库" /> : !state.skills.length ? <Empty title="从你的第一个 Skill 开始"><p>连接本地文件夹，或添加 GitHub 仓库。<br />已有文件留在原位置，由你决定每次变化。</p><div className="empty-actions"><Button variant="primary" onClick={() => setModal({ kind: 'local' })}><FolderOpen size={16} />添加本地目录</Button><Button onClick={() => setModal({ kind: 'github' })}><Github size={16} />连接 GitHub</Button></div><span className="microcopy">本地管理无需登录 GitHub</span></Empty> : !categoryTotal && !matching.length ? <Empty icon={<Folder size={27} />} title={categoryFilter === 'favorites' ? '还没有收藏 Skill' : '分类中还没有 Skill'}><p>{categoryFilter === 'favorites' ? '点击 Skill 名称旁的星标即可收藏，原分类保持不变。' : '从“全部 Skills”拖入 Skill，或勾选后使用“归入分类”。'}</p><Button variant="ghost" onClick={() => selectCategory('all')}>浏览全部 Skills</Button></Empty> : !matching.length ? <Empty icon={<Search size={27} />} title="当前筛选无结果"><p>当前分类中有 {categoryTotal} 个 Skill，试试其他关键词、来源或状态。</p><Button variant="ghost" onClick={clearLibraryFilters}>清除筛选</Button></Empty> : libraryMode === 'list' ? <>
             <div className="skill-table-scroll" ref={tableRef} tabIndex={0} role="region" aria-label="可横向滚动的 Skill 列表" onKeyDown={tableKeys}>
               <table className="skill-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择本页全部 Skill" checked={!!pageSkillIds.length && visibleChecked.length === pageSkillIds.length} disabled={busy} onChange={event => { setCheckedSkills(event.target.checked ? pageSkillIds : []); selectionAnchor.current = pageSkillIds[0] || null; }} /></th><th scope="col">名称与用途</th><th scope="col">来源</th><th scope="col">状态</th><th scope="col">版本</th><th scope="col" className="actions-column">操作</th></tr></thead>
               <tbody>{libraryResult.items.map(skill => <tr key={skill.id} data-skill-id={skill.id} tabIndex={0} className={`skill-table-row ${selectedId === skill.id ? 'is-current' : ''} ${visibleChecked.includes(skill.id) ? 'is-checked' : ''}`} draggable={!busy && visibleChecked.includes(skill.id)} onPointerDownCapture={dragPointer} onDragStart={event => startSkillDrag(event, skill)} onDragEnd={endSkillDrag} onClick={() => { if (Date.now() >= dragSuppressedUntil.current) setSelectedId(skill.id); }} onFocus={event => { if (event.target === event.currentTarget) setSelectedId(skill.id); }}>
@@ -1461,14 +1705,15 @@ export default function SessionApp() {
                   <span className="skill-table-description" title={skill.description || undefined}>{skill.description || ''}</span>
                 </td>
                 <td className="skill-source-cell">{skill.repo && <button className="source-path-link" draggable={false} title={remoteDirectoryUrl(skill)} onClick={event => { event.stopPropagation(); void external(remoteDirectoryUrl(skill)); }}><Github size={13} /><span>{skill.repo}{skill.remotePath ? `/${skill.remotePath}` : ''}</span>{skill.private && <LockKeyhole size={10} />}</button>}{skill.localPath && <button className={`source-path-link local-source-link ${skill.repo ? 'is-icon' : ''}`} draggable={false} title={skill.localPath} aria-label="打开本地文件夹" disabled={busy} onClick={event => { event.stopPropagation(); void openFolder(skill); }}><FolderOpen size={13} />{!skill.repo && <span>{skill.localPath}</span>}</button>}{!skill.repo && !skill.localPath && <span className="muted">未知来源</span>}</td>
-                <td className="skill-status-cell"><Badge skill={skill} />{['changed', 'review', 'problem'].includes(displayStatus(skill).group) && <span className="table-row-notice status-detail" title={statusExplanation(skill)}>{skill.error ? skill.error.split('\n')[0] : displayStatus(skill).detail}</span>}{!skill.error && (!!runtimeAttentionCount(skill.runtimeIssues) || !!skill.localNotice || !!skill.untrackedFiles?.length) && <span className="table-row-notice" title={skill.localNotice || '详情中有待核对的信息'}><CircleHelp size={11} />{skill.untrackedFiles?.length ? `额外文件 ${skill.untrackedFiles.length}` : '待核对'}</span>}</td>
+                <td className="skill-status-cell"><Badge skill={skill} />{['changed', 'review', 'problem'].includes(displayStatus(skill).group) && <span className="table-row-notice status-detail" title={statusExplanation(skill)}>{skill.error ? skill.error.split('\n')[0] : displayStatus(skill).detail}</span>}{!skill.error && (!!skill.localNotice || !!skill.untrackedFiles?.length || !!runtimeAttentionCount(skill.runtimeIssues) && !['changed', 'review', 'problem'].includes(displayStatus(skill).group)) && <span className="table-row-notice" title={skill.localNotice || statusExplanation(skill)}><CircleHelp size={11} />{skill.untrackedFiles?.length ? `额外文件 ${skill.untrackedFiles.length}` : skill.localNotice || `文件问题 ${runtimeAttentionCount(skill.runtimeIssues)}`}</span>}</td>
                 <td className="skill-version-cell" title={skill.version || '来源未提供版本信息'}>{skill.version ? `v${skill.version.replace(/^v/, '')}` : <span aria-label="版本未知">—</span>}</td>
                 <td className="skill-row-actions"><div>{skill.localPath && <Button className="table-action" draggable={false} onClick={event => { event.stopPropagation(); void perform('正在打开编辑器', 'open_local', { skillId: skill.id }); }} disabled={busy || skill.readOnly} title={`在外部编辑器中编辑 ${skillName(skill)}`}><Code2 size={14} />编辑</Button>}{skill.sourceId && <Button className="table-action" draggable={false} onClick={event => { event.stopPropagation(); void (skill.localPath ? previewUpdate(skill) : selectOperation(skill, 'install')); }} disabled={busy || skill.readOnly || skill.remoteMissing} title={skill.localPath ? '先预览差异，再决定是否应用更新' : '选择运行文件并预览下载'}><Download size={14} />{skill.localPath ? '更新' : '下载'}</Button>}<Button className="table-action view-action" draggable={false} variant="ghost" onClick={event => { event.stopPropagation(); openDetail(skill); }}>查看<ChevronRight size={14} /></Button></div></td>
               </tr>)}</tbody></table>
             </div>
-          </> : libraryMode === 'cards' ? <LibraryCards items={libraryResult.items} selectedIds={visibleChecked} categories={categories} showCategory={!categories.some(item => item.id === categoryFilter)} onChoose={chooseRow} onSelectAll={() => { setCheckedSkills(pageSkillIds); selectionAnchor.current ||= pageSkillIds[0] || null; }} onOpenSkill={openDetail} onToggleFavorite={skill => void toggleFavorite(skill)} onDragStart={(event, skill) => { blockedDrag.current = false; startSkillDrag(event, skill); }} onDragEnd={endSkillDrag} disabled={busy} connectionCount={skill => state.connections.filter(item => item.skillId === skill.id && item.linked).length} renderActions={skill => <div>{skill.localPath && <Button className="table-action" draggable={false} onClick={event => { event.stopPropagation(); void perform('正在打开编辑器', 'open_local', { skillId: skill.id }); }} disabled={busy || skill.readOnly} title={`在外部编辑器中编辑 ${skillName(skill)}`}><Code2 size={14} />编辑</Button>}{skill.sourceId && <Button className="table-action" draggable={false} onClick={event => { event.stopPropagation(); void (skill.localPath ? previewUpdate(skill) : selectOperation(skill, 'install')); }} disabled={busy || skill.readOnly || skill.remoteMissing} title={skill.localPath ? '先预览差异，再决定是否应用更新' : '选择运行文件并预览下载'}><Download size={14} />{skill.localPath ? '更新' : '下载'}</Button>}<Button className="table-action view-action" draggable={false} variant="ghost" onClick={event => { event.stopPropagation(); openDetail(skill); }}>查看<ChevronRight size={14} /></Button></div>} renderSource={skill => <>{skill.repo && <button className="source-path-link" draggable={false} title={remoteDirectoryUrl(skill)} onClick={event => { event.stopPropagation(); void external(remoteDirectoryUrl(skill)); }}><Github size={13} /><span>{skill.repo}{skill.remotePath ? `/${skill.remotePath}` : ''}</span>{skill.private && <LockKeyhole size={10} />}</button>}{skill.localPath && <button className={`source-path-link local-source-link ${skill.repo ? 'is-icon' : ''}`} draggable={false} title={skill.localPath} aria-label="打开本地文件夹" disabled={busy} onClick={event => { event.stopPropagation(); void openFolder(skill); }}><FolderOpen size={13} />{!skill.repo && <span>{skill.localPath}</span>}</button>}{!skill.repo && !skill.localPath && <span className="muted">未知来源</span>}</>} /> : <div className="library-body library-detail-layout"><section className="skill-list" aria-label="Skill 列表">{libraryResult.items.map(skill => <div className="detail-row-drag-handle" key={skill.id}><button className="icon-button skill-drag-handle" draggable={!busy} disabled={busy} aria-label={`拖动 ${skillName(skill)} 归类`} title="拖入侧栏分类" onDragStart={event => startSkillDrag(event, skill)} onDragEnd={endSkillDrag}><GripVertical size={16} /></button><button className={`skill-row ${selectedId === skill.id ? 'selected' : ''}`} onClick={() => { setSelectedId(skill.id); setTab('docs'); }}><div className="skill-row-top"><span className={`skill-avatar ${skill.readOnly ? 'readonly' : ''}`}>{skill.readOnly ? <LockKeyhole size={18} /> : <FileCode2 size={18} />}</span><div className="skill-row-name"><strong>{skillName(skill)}</strong></div><ChevronRight size={15} className="row-chevron" /></div>{skill.description && <p>{skill.description}</p>}<div className="skill-row-bottom"><Badge skill={skill} />{skill.categoryId && !categories.some(item => item.id === categoryFilter) && <CategoryChip category={categories.find(category => category.id === skill.categoryId)} color={resolvedCategoryColors.get(skill.categoryId)} />}<span className="row-origin">{skill.localPath && <Folder size={12} />}{skill.sourceId && <Github size={12} />}{skill.version ? `v${skill.version.replace(/^v/, '')}` : ''}</span></div>{skill.error && <div className="row-error"><CircleAlert size={12} />检查失败</div>}</button></div>)}</section>{detailPanel}</div>}
-          {!!state.skills.length && <div className="library-pagination"><span className="library-result-count" role="status">第 {libraryResult.start}–{libraryResult.end} 项 / {libraryResult.total} 项{matching.length !== state.skills.length && `（全库 ${state.skills.length} 项）`}</span><label className="compact-select page-size-select"><span>每页</span><select aria-label="每页 Skill 数量" value={libraryPageSize} disabled={busy} onChange={event => void saveLibraryPreference({ libraryPageSize: Number(event.target.value) as LibraryPageSize })}><option value={20}>20 项</option><option value={50}>50 项</option><option value={100}>100 项</option></select></label><div className="page-navigation"><Button disabled={libraryResult.page <= 1} aria-label="上一页" onClick={() => setLibraryPage(libraryResult.page - 1)}><ChevronLeft size={15} /></Button><span>{libraryResult.page} / {libraryResult.pageCount} 页</span><Button disabled={libraryResult.page >= libraryResult.pageCount} aria-label="下一页" onClick={() => setLibraryPage(libraryResult.page + 1)}><ChevronRight size={15} /></Button></div></div>}
+          </> : libraryMode === 'cards' ? <LibraryCards items={libraryResult.items} selectedIds={visibleChecked} categories={categories} showCategory={!categories.some(item => item.id === categoryFilter)} onChoose={chooseRow} onSelectAll={() => { setCheckedSkills(pageSkillIds); selectionAnchor.current ||= pageSkillIds[0] || null; }} onOpenSkill={openDetail} onToggleFavorite={skill => void toggleFavorite(skill)} onDragStart={(event, skill) => { blockedDrag.current = false; startSkillDrag(event, skill); }} onDragEnd={endSkillDrag} disabled={busy} connectionCount={skill => state.connections.filter(item => item.skillId === skill.id && item.linked).length} renderActions={skill => <div>{skill.localPath && <Button className="table-action" draggable={false} onClick={event => { event.stopPropagation(); void perform('正在打开编辑器', 'open_local', { skillId: skill.id }); }} disabled={busy || skill.readOnly} title={`在外部编辑器中编辑 ${skillName(skill)}`}><Code2 size={14} />编辑</Button>}{skill.sourceId && <Button className="table-action" draggable={false} onClick={event => { event.stopPropagation(); void (skill.localPath ? previewUpdate(skill) : selectOperation(skill, 'install')); }} disabled={busy || skill.readOnly || skill.remoteMissing} title={skill.localPath ? '先预览差异，再决定是否应用更新' : '选择运行文件并预览下载'}><Download size={14} />{skill.localPath ? '更新' : '下载'}</Button>}<Button className="table-action view-action" draggable={false} variant="ghost" onClick={event => { event.stopPropagation(); openDetail(skill); }}>查看<ChevronRight size={14} /></Button></div>} renderSource={skill => <>{skill.repo && <button className="source-path-link" draggable={false} title={remoteDirectoryUrl(skill)} onClick={event => { event.stopPropagation(); void external(remoteDirectoryUrl(skill)); }}><Github size={13} /><span>{skill.repo}{skill.remotePath ? `/${skill.remotePath}` : ''}</span>{skill.private && <LockKeyhole size={10} />}</button>}{skill.localPath && <button className={`source-path-link local-source-link ${skill.repo ? 'is-icon' : ''}`} draggable={false} title={skill.localPath} aria-label="打开本地文件夹" disabled={busy} onClick={event => { event.stopPropagation(); void openFolder(skill); }}><FolderOpen size={13} />{!skill.repo && <span>{skill.localPath}</span>}</button>}{!skill.repo && !skill.localPath && <span className="muted">未知来源</span>}</>} /> : <div className="library-body library-detail-layout"><section className="skill-list" aria-label="Skill 列表">{libraryResult.items.map(skill => <div className="detail-row-drag-handle" key={skill.id} data-skill-id={skill.id} tabIndex={-1}><button className="icon-button skill-drag-handle" draggable={!busy} disabled={busy} aria-label={`拖动 ${skillName(skill)} 归类`} title="拖入侧栏分类" onDragStart={event => startSkillDrag(event, skill)} onDragEnd={endSkillDrag}><GripVertical size={16} /></button><button className={`skill-row ${selectedId === skill.id ? 'selected' : ''}`} onClick={() => { setSelectedId(skill.id); setTab('docs'); }}><div className="skill-row-top"><span className={`skill-avatar ${skill.readOnly ? 'readonly' : ''}`}>{skill.readOnly ? <LockKeyhole size={18} /> : <FileCode2 size={18} />}</span><div className="skill-row-name"><strong>{skillName(skill)}</strong></div><ChevronRight size={15} className="row-chevron" /></div>{skill.description && <p>{skill.description}</p>}<div className="skill-row-bottom"><Badge skill={skill} />{skill.categoryId && !categories.some(item => item.id === categoryFilter) && <CategoryChip category={categories.find(category => category.id === skill.categoryId)} color={resolvedCategoryColors.get(skill.categoryId)} />}<span className="row-origin">{skill.localPath && <Folder size={12} />}{skill.sourceId && <Github size={12} />}{skill.version ? `v${skill.version.replace(/^v/, '')}` : ''}</span></div>{skill.error && <div className="row-error"><CircleAlert size={12} />检查失败</div>}</button></div>)}</section>{detailPanel}</div>}
+          {!!state.skills.length && <div className="library-pagination"><span className="library-result-count" role="status">第 {libraryResult.start}–{libraryResult.end} 项 / {libraryResult.total} 项{matching.length !== state.skills.length && `（全库 ${state.skills.length} 项）`}</span><label className="compact-select page-size-select"><span>每页</span><select aria-label="每页 Skill 数量" value={libraryPageSize} disabled={busy} onChange={event => void saveLibraryPreference({ libraryPageSize: Number(event.target.value) as LibraryPageSize })}><option value={20}>20 项</option><option value={50}>50 项</option><option value={100}>100 项</option></select></label><div className="page-navigation"><Button disabled={libraryResult.page <= 1} aria-label="上一页" onClick={() => changeLibraryPage(libraryResult.page - 1)}><ChevronLeft size={15} /></Button><span>{libraryResult.page} / {libraryResult.pageCount} 页</span><Button disabled={libraryResult.page >= libraryResult.pageCount} aria-label="下一页" onClick={() => changeLibraryPage(libraryResult.page + 1)}><ChevronRight size={15} /></Button></div></div>}
         </div>
+        </LibraryReadingBoundary>
         {libraryMode === 'list' && detailOpen && selected && <DetailDrawer onClose={closeDetail} suspended={!!modal} feedback={<div className="drawer-feedback" aria-live="polite">{busy && <div className="operation-bar"><LoaderCircle size={15} className="spin" />{operation}</div>}{notices.filter(notice => notice.id >= detailOpenedAt.current && notice.skillId === selected.id).slice(0, 2).map(notice => <div className={`notice ${notice.tone}`} key={notice.id}><span>{notice.message}</span><button className="icon-button" aria-label="关闭详情消息" onClick={() => setNotices(previous => previous.filter(item => item.id !== notice.id))}><X size={14} /></button></div>)}</div>}>{detailPanel}</DetailDrawer>}
       </>}
 
@@ -1484,28 +1729,29 @@ export default function SessionApp() {
         onOpenConnect={client => setModal({ kind: 'client-connect', client })}
         onManage={(connections, mode) => { void previewManageConnections(connections, mode); }}
         onConfirmUsage={async connection => { const value = await perform('正在记录已成功使用', 'confirm_client_usage', { connectionId: connection.id, client: connection.client }); if (!value) throw new Error('使用记录未保存，请查看操作记录。'); return value; }} />}
-      {view === 'settings' && <SettingsLayout paneId={pane.id} scopeRef={paneRoot} expanded={settingsOutline} onExpandedChange={setSettingsOutline}>
-        <SettingsSection sectionKey="general" title="使用偏好"><section className="card"><div className="card-header"><div><h2>使用偏好</h2></div><SlidersHorizontal size={20} className="muted" /></div><div className="settings-form"><label>外部编辑器<div className="input-action"><input value={editorPath} placeholder="留空使用系统默认编辑器" onChange={event => setEditorPath(event.target.value)} /><Button onClick={async () => { try { const result = await open({ directory: false, multiple: false, title: '选择外部编辑器程序' }); if (typeof result === 'string') setEditorPath(result); } catch (error) { notify('error', errText(error)); } }}>选择</Button></div></label><div className="settings-readonly"><strong>检查方式：{state.checkMode === 'manual' ? '手动' : '自动'}</strong><p>{state.checkMode === 'manual' ? '点击窗口右上角“检查”时核对一次。' : '本地变化自动识别；每分钟轻量检查 GitHub 提交。'}</p><small>在窗口右上角切换，所有窗口共用。</small></div><div className="form-actions"><Button variant="primary" disabled={busy || !ready} onClick={() => void perform('正在保存设置', 'set_settings', { settings: { checkIntervalMinutes: 30, editorPath: editorPath.trim(), uiTheme, uiFontSize } }, '设置已保存。')}><Check size={15} />保存设置</Button></div></div></section></SettingsSection>
-        <SettingsSection sectionKey="display" title="显示"><section className="card display-settings"><div className="card-header"><div><h2>显示设置</h2><p>缩放自动保存；主题和字号预览后点击保存。</p></div><Monitor size={20} className="muted" /></div><div className="settings-form">
+      {(toolsVisited || view === 'tools') && <div hidden={view !== 'tools'}><Suspense fallback={<p className="document-read-status" role="status">正在准备工具界面…</p>}><ResourcePanel embedded filterRequest={toolFilterRequest} initialDraft={toolPanelDraft.current} onDraft={saveToolPanelDraft} visible={session.visible && view === 'tools'} managementData={management.data} managementAction={managementAction} onManagementChanged={managementDataCache.accept} action={resourceAction} readOnly={basicMode} revision={state.stateRevision || 0} focusResourceId={session.visible && view === 'tools' ? commandResourceId : undefined} focusActionId={commandResourceAction?.id} focusActionRevision={commandResourceAction?.revision} focusRequest={commandResourceRequest} /></Suspense></div>}
+      {view === 'settings' && <SettingsLayout paneId={pane.id} scopeRef={paneRoot} activeSection={settingsSection} onActiveSectionChange={setSettingsSection} expanded={settingsOutline} onExpandedChange={setSettingsOutline}>
+        <SettingsSection sectionKey="general" title="常规"><section className="card"><div className="card-header"><div><h2>常规设置</h2></div><SlidersHorizontal size={20} className="muted" /></div><div className="settings-form"><label>外部编辑器<div className="input-action"><input value={editorPath} placeholder="留空使用系统默认编辑器" onChange={event => setEditorPath(event.target.value)} /><Button onClick={async () => { try { const result = await open({ directory: false, multiple: false, title: '选择外部编辑器程序' }); if (typeof result === 'string') setEditorPath(result); } catch (error) { notify('error', errText(error)); } }}>选择</Button></div></label><div className="settings-readonly"><div><strong>检查方式</strong><p>{state.checkMode === 'manual' ? '仅点击“检查”时核对，可在右上角切换为自动。' : '自动识别本地变化，每分钟检查 GitHub 提交；可在右上角切换。'}</p></div><span className="settings-current-value" aria-label="当前检查方式">{state.checkMode === 'manual' ? '手动' : '自动'}</span></div><div className="form-actions"><Button variant="primary" disabled={busy || !ready} onClick={() => void perform('正在保存设置', 'set_settings', { settings: { editorPath: editorPath.trim() } }, '设置已保存。')}><Check size={15} />保存设置</Button></div></div></section></SettingsSection>
+        <SettingsSection sectionKey="display" title="外观"><section className="card display-settings"><div className="card-header"><div><h2>显示设置</h2><p>{basicMode ? '基本模式：外观调整仅在本次会话生效，不保存布局。' : '缩放自动保存；外观与字号预览后点击保存。'}</p></div><Monitor size={20} className="muted" /></div><div className="settings-form">
         <fieldset className="theme-fieldset"><legend>界面模式</legend><div className="theme-options">{THEMES.map(theme => <button type="button" key={theme.id} className={`theme-option ${uiTheme === theme.id ? 'selected' : ''}`} aria-pressed={uiTheme === theme.id} onClick={() => setUiTheme(theme.id)}><span className={`theme-swatch theme-swatch-${theme.id}`} aria-hidden="true"><i /><i /><i /></span><span><strong>{theme.label}</strong><small>{theme.description}</small></span>{uiTheme === theme.id && <CheckCircle2 size={17} />}</button>)}</div></fieldset>
-        <div className="display-controls"><label>界面缩放<div className="zoom-control"><input type="range" min="80" max="160" step="1" value={uiZoom} onChange={event => changeZoom(Number(event.target.value))} aria-label="界面缩放比例" /><div className="number-suffix"><input type="number" min="80" max="160" step="1" value={zoomInput} onChange={event => { setZoomInput(event.target.value); const value = Number(event.target.value); if (event.target.value && value >= 80 && value <= 160) { const zoom = Math.round(value); currentLayout.current.zoom = zoom; setUiZoom(zoom); queueLayout({ uiZoom: zoom }); } }} onBlur={() => changeZoom(zoomInput.trim() ? Number(zoomInput) : 100)} onKeyDown={event => { if (event.key === 'Enter') changeZoom(zoomInput.trim() ? Number(zoomInput) : 100); }} aria-label="自定义界面缩放百分比" /><span>%</span></div></div><small>80%–160%，自动保存。Ctrl＋滚轮或 Ctrl＋加减号调整，Ctrl＋0 恢复 100%。</small></label><label>基础字号<select value={uiFontSize} onChange={event => setUiFontSize(Number(event.target.value))} aria-label="基础字号">{Array.from({ length: 9 }, (_, index) => index + 14).map(size => <option value={size} key={size}>{size} px{size === 16 ? '（默认）' : ''}</option>)}</select><small>14–22 px。独立调整文字大小，不改变界面缩放比例。</small></label></div>
-        <div className="display-preview"><div><FileCode2 size={18} /><strong>显示预览</strong><span>{THEMES.find(theme => theme.id === uiTheme)?.label} · {uiZoom}% · {uiFontSize} px</span></div><p>Skill 说明与文件内容</p><small>说明文字与次要信息</small></div>
-        <div className="form-actions"><Button variant="primary" disabled={busy || !ready || !displayChanged} onClick={() => void perform('正在保存显示设置', 'set_settings', { settings: { checkIntervalMinutes: 30, editorPath: state.settings.editorPath || '', uiTheme, uiFontSize } }, '显示设置已保存，下次启动会继续使用。')}><Check size={15} />保存显示设置</Button><Button variant="ghost" onClick={resetDisplay} disabled={busy}>恢复显示默认值</Button><Button variant="ghost" onClick={resetLayout} disabled={!ready}>恢复默认布局</Button><span className="display-save-hint" role="status">{displayChanged ? '主题和字号正在预览，尚未保存' : '主题和字号已保存；缩放自动保存'}</span></div>
+        <AppearanceControls value={appearance} onChange={patch => setAppearance(current => ({ ...current, ...patch }))} />
+        <div className="display-controls display-sizing-controls setting-rows"><label className="setting-row setting-row-wide"><span className="setting-copy"><strong>界面缩放</strong><small>80%–160%，{basicMode ? '仅在本次会话生效。' : '自动保存。'}Ctrl＋滚轮或 Ctrl＋加减号调整，Ctrl＋0 恢复 100%。</small></span><div className="zoom-control"><input type="range" min="80" max="160" step="1" value={uiZoom} onChange={event => changeZoom(Number(event.target.value))} aria-label="界面缩放比例" /><div className="number-suffix"><input type="number" min="80" max="160" step="1" value={zoomInput} onChange={event => { setZoomInput(event.target.value); const value = Number(event.target.value); if (event.target.value && value >= 80 && value <= 160) { const zoom = Math.round(value); currentLayout.current.zoom = zoom; setUiZoom(zoom); queueLayout({ uiZoom: zoom }); } }} onBlur={() => changeZoom(zoomInput.trim() ? Number(zoomInput) : 100)} onKeyDown={event => { if (event.key === 'Enter') changeZoom(zoomInput.trim() ? Number(zoomInput) : 100); }} aria-label="自定义界面缩放百分比" /><span>%</span></div></div></label><label className="setting-row"><span className="setting-copy"><strong>基础字号</strong><small>14–22 px。独立调整文字大小，不改变界面缩放比例。</small></span><select value={uiFontSize} onChange={event => setUiFontSize(Number(event.target.value))} aria-label="基础字号">{Array.from({ length: 9 }, (_, index) => index + 14).map(size => <option value={size} key={size}>{size} px{size === 16 ? '（默认）' : ''}</option>)}</select></label></div>
+        <div className="display-preview"><div><FileCode2 size={18} /><strong>显示预览</strong><span>{THEMES.find(theme => theme.id === uiTheme)?.label} · {ACCENTS.find(accent => accent.id === appearance.uiAccent)?.label} · {appearance.uiDensity === 'comfortable' ? '舒适' : '紧凑'} · {uiZoom}% · {uiFontSize} px</span></div><p>Skill 说明与文件内容</p><small>说明文字与次要信息</small></div>
+        <div className="form-actions"><Button variant="primary" disabled={basicMode || busy || !ready || !displayChanged} title={basicMode ? '基本模式只预览外观，不保存设置' : undefined} onClick={() => void perform('正在保存显示设置', 'set_settings', { settings: { uiTheme, uiFontSize, ...appearance } }, '显示设置已保存，下次启动会继续使用。')}><Check size={15} />保存显示设置</Button><Button variant="ghost" onClick={resetDisplay} disabled={busy}>恢复显示默认值</Button><Button variant="ghost" onClick={resetLayout} disabled={!ready}>恢复默认布局</Button><span className="display-save-hint" role="status">{basicMode ? '基本模式：调整仅在本次会话生效' : displayChanged ? '外观与字号正在预览，尚未保存' : '外观与字号已保存；缩放自动保存'}</span></div>
       </div></section></SettingsSection>
-        <SettingsSection sectionKey="storage" title="保存位置"><StorageSettings request={request} onRequestRestart={session.requestStorageRestart} initialDraft={storageDraft.current} onDraftChange={draft => { storageDraft.current = draft; }} /></SettingsSection>
+        <SettingsSection sectionKey="maintenance" title="维护"><Suspense fallback={<p className="document-read-status" role="status">正在准备维护…</p>}><MaintenanceSettings visible={session.visible && settingsSection === 'maintenance'} state={state.maintenance} disabled={basicMode || !ready || session.closing || !session.owned} onSave={async request => { if (basicModeRef.current) throw new Error('基本模式不能更改维护设置。'); const result = await runTask<Snapshot>('正在保存维护设置', 'set_maintenance', request, { view: 'settings', paneId: pane.id }); snapshot(result); return result; }} /></Suspense></SettingsSection>
+        <SettingsSection sectionKey="scenes" title="场景"><Suspense fallback={<p className="document-read-status" role="status">正在准备场景…</p>}><SceneControls action={relationAction} revision={state.stateRevision || 0} visible={session.visible && view === 'settings' && settingsSection === 'scenes'} readOnly={basicMode || !ready || session.closing || !session.owned} initialDraft={sceneDraft.current} onDraft={saveSceneDraft} /></Suspense></SettingsSection>
+        <SettingsSection sectionKey="storage" title="保存位置"><StorageSettings visible={session.visible && settingsSection === 'storage'} request={request} onRequestRestart={session.requestStorageRestart} initialDraft={storageDraft.current} onDraftChange={draft => { storageDraft.current = draft; }} /></SettingsSection>
         <SettingsSection sectionKey="network" title="网络"><NetworkSettings request={request} notify={notify} onContextChange={refreshReadContext} initialDraft={networkDraft.current} onDraftChange={draft => { networkDraft.current = draft; }} /></SettingsSection>
-        <SettingsSection sectionKey="github" title="GitHub"><section className="card"><div className="card-header"><div><h2>GitHub 访问凭据</h2><p>按仓库保存到系统凭据管理器。</p></div><LockKeyhole size={20} className="muted" /></div><div className="settings-form"><label>仓库<input value={tokenRepo} list="known-repositories" placeholder="owner/repository" onChange={event => { setTokenRepo(event.target.value); setTokenLinkStatus(''); }} autoCapitalize="none" spellCheck={false} /><datalist id="known-repositories">{state.sources.map(source => <option key={source.id} value={source.repo} />)}</datalist></label><label>准备使用的权限<select value={tokenAccess} onChange={event => setTokenAccess(event.target.value as 'read' | 'write')}><option value="read">读取、检查和下载</option><option value="write">读取并提交选定修改</option></select><small>在 GitHub 创建仅授权目标仓库的细粒度令牌：Contents 选择 {tokenAccess === 'read' ? 'Read-only' : 'Read and write'}。此选择只提示所需权限，不修改令牌权限。</small></label><label>访问令牌<input type="password" value={token} onChange={event => setToken(event.target.value)} placeholder="输入后保存到系统凭据管理器" autoComplete="new-password" spellCheck={false} /><small>保存后清空输入；令牌不进入配置文件、项目或日志。</small></label><div className="form-actions"><Button variant="primary" disabled={busy || !tokenRepo.trim() || !token.trim()} onClick={async () => { setTokenLinkStatus('正在保存到系统凭据管理器…'); const result = await perform('正在保存仓库凭据', 'set_token', { repo: tokenRepo.trim(), token: token.trim() }, '凭据已保存到系统凭据管理器。'); setToken(''); if (result) { setTokenRepo(tokenRepo.trim()); setTokenLinkStatus('凭据已保存，可检查目标仓库以确认权限。'); } else setTokenLinkStatus('凭据保存未完成，请查看左侧操作记录中的异常。'); }}><LockKeyhole size={15} />保存凭据</Button><Button disabled={busy || !tokenRepo.trim()} onClick={async () => { setTokenLinkStatus('正在移除系统凭据…'); const result = await perform('正在移除仓库凭据', 'delete_token', { repo: tokenRepo.trim() }, '该仓库的系统凭据已移除。'); setToken(''); setTokenLinkStatus(result ? '该仓库的系统凭据已移除。' : '凭据移除未完成，请查看左侧操作记录中的异常。'); }}>移除凭据</Button><Button variant="ghost" onClick={() => void createTokenLink()}><ExternalLink size={14} />创建令牌</Button><Button variant="ghost" onClick={async () => { try { await navigator.clipboard.writeText(tokenCreationUrl(tokenRepo, tokenAccess)); setTokenLinkStatus('创建链接已复制，请在浏览器地址栏粘贴打开。'); } catch (error) { setTokenLinkStatus(`复制失败：${errText(error)}`); } }}><Copy size={14} />复制创建链接</Button></div><p className="muted small-text">这里使用访问令牌，不是 SSH 公钥。创建页选择 Only select repositories，仅勾选上方仓库。生成后将令牌粘贴到这里，再保存凭据；不要发送到聊天中。</p>{tokenLinkStatus && <p className="helper-note" role="status">{tokenLinkStatus}</p>}</div></section><section className="card sources-card"><div className="card-header"><h2 data-outline-key="settings:github-sources" data-outline-label="仓库来源" data-outline-level="2">GitHub 来源</h2><div className="form-actions"><Button disabled={busy || !ready} onClick={() => void refresh()}><RefreshCw size={15} />检查来源</Button><Button variant="ghost" disabled={busy} onClick={() => setModal({ kind: 'github' })}><Plus size={15} />添加来源</Button></div></div>{!state.sources.length ? <p className="muted settings-empty">尚未添加来源，本地 Skill 可独立管理。</p> : state.sources.map(source => <div className="source-item" key={source.id}><Github size={19} /><div><strong>{source.repo}</strong><span>{source.branch || '默认分支'} · {dateText(source.lastChecked)}</span><span>监视目录：{source.roots?.length ? source.roots.map(root => root === '' ? '整个仓库' : root).join('、') : '尚未确定'}</span>{source.rootsInferred && <span>监视范围由已有记录推断；如需调整，可重新添加对应的 GitHub URL。</span>}{source.error && <p className="error-text">{source.error}</p>}</div>{source.private && <span className="mini-tag"><LockKeyhole size={11} />私有</span>}<button className="icon-button" aria-label="打开仓库" onClick={() => void external(`https://github.com/${source.repo}`)}><ExternalLink size={15} /></button></div>)}</section></SettingsSection>
+        <SettingsSection sectionKey="github" title="GitHub"><section className="card"><div className="card-header"><div><h2>GitHub 访问凭据</h2><p>按仓库保存到系统凭据管理器。</p></div><LockKeyhole size={20} className="muted" /></div><div className="settings-form"><label>仓库<input value={tokenRepo} list="known-repositories" placeholder="owner/repository" onChange={event => { setTokenRepo(event.target.value); setTokenLinkStatus(''); }} autoCapitalize="none" spellCheck={false} /><datalist id="known-repositories">{state.sources.map(source => <option key={source.id} value={source.repo} />)}</datalist></label><label>准备使用的权限<select value={tokenAccess} onChange={event => setTokenAccess(event.target.value as 'read' | 'write')}><option value="read">读取、检查和下载</option><option value="write">读取并提交选定修改</option></select><small>在 GitHub 创建仅授权目标仓库的细粒度令牌：Contents 选择 {tokenAccess === 'read' ? 'Read-only' : 'Read and write'}。此选择只提示所需权限，不修改令牌权限。</small></label><label>访问令牌<input type="password" value={token} onChange={event => setToken(event.target.value)} placeholder="输入后保存到系统凭据管理器" autoComplete="new-password" spellCheck={false} /><small>保存后清空输入；令牌不进入配置文件、项目或日志。</small></label><div className="form-actions"><Button variant="primary" disabled={busy || !tokenRepo.trim() || !token.trim()} onClick={async () => { setTokenLinkStatus('正在保存到系统凭据管理器…'); const result = await perform('正在保存仓库凭据', 'set_token', { repo: tokenRepo.trim(), token: token.trim() }, '凭据已保存到系统凭据管理器。'); setToken(''); if (result) { setTokenRepo(tokenRepo.trim()); setTokenLinkStatus('凭据已保存，可检查目标仓库以确认权限。'); } else setTokenLinkStatus('凭据保存未完成，请查看左侧操作记录中的异常。'); }}><LockKeyhole size={15} />保存凭据</Button><Button variant="ghost" onClick={() => void createTokenLink()}><ExternalLink size={14} />创建令牌</Button><Button variant="ghost" onClick={async () => { try { await navigator.clipboard.writeText(tokenCreationUrl(tokenRepo, tokenAccess)); setTokenLinkStatus('创建链接已复制，请在浏览器地址栏粘贴打开。'); } catch (error) { setTokenLinkStatus(`复制失败：${errText(error)}`); } }}><Copy size={14} />复制创建链接</Button></div><p className="muted small-text">这里使用访问令牌，不是 SSH 公钥。创建页选择 Only select repositories，仅勾选上方仓库。生成后将令牌粘贴到这里，再保存凭据；不要发送到聊天中。</p>{tokenLinkStatus && <p className="helper-note" role="status">{tokenLinkStatus}</p>}</div><section className="settings-danger-zone" aria-label="移除仓库凭据"><div><strong>移除本机凭据</strong><p>仅移除上方仓库的本机访问凭据，仓库与 Skill 文件继续保留。</p></div><Button disabled={busy || !tokenRepo.trim()} onClick={async () => { setTokenLinkStatus('正在移除系统凭据…'); const result = await perform('正在移除仓库凭据', 'delete_token', { repo: tokenRepo.trim() }, '该仓库的系统凭据已移除。'); setToken(''); setTokenLinkStatus(result ? '该仓库的系统凭据已移除。' : '凭据移除未完成，请查看左侧操作记录中的异常。'); }}>移除凭据</Button></section></section><section className="card sources-card"><div className="card-header"><h2 data-outline-key="settings:github-sources" data-outline-label="仓库来源" data-outline-level="2">GitHub 来源</h2><div className="form-actions"><Button disabled={busy || !ready} onClick={() => void refresh()}><RefreshCw size={15} />检查来源</Button><Button variant="ghost" disabled={busy} onClick={() => setModal({ kind: 'github' })}><Plus size={15} />添加来源</Button></div></div>{!state.sources.length ? <p className="muted settings-empty">尚未添加来源，本地 Skill 可独立管理。</p> : state.sources.map(source => <div className="source-item" key={source.id}><Github size={19} /><div><strong>{source.repo}</strong><span>{source.branch || '默认分支'} · {dateText(source.lastChecked)}</span><span>监视目录：{source.roots?.length ? source.roots.map(root => root === '' ? '整个仓库' : root).join('、') : '尚未确定'}</span>{source.rootsInferred && <span>监视范围由已有记录推断；如需调整，可重新添加对应的 GitHub URL。</span>}{source.error && <p className="error-text">{source.error}</p>}</div>{source.private && <span className="mini-tag"><LockKeyhole size={11} />私有</span>}<button className="icon-button" aria-label="打开仓库" onClick={() => void external(`https://github.com/${source.repo}`)}><ExternalLink size={15} /></button></div>)}</section></SettingsSection>
+        <SettingsSection sectionKey="configuration" title="配置导入导出"><Suspense fallback={<p className="document-read-status" role="status">正在准备配置导入导出…</p>}><ConfigurationTransfer action={relationAction} revision={state.stateRevision || 0} visible={session.visible && settingsSection === 'configuration'} readOnly={basicMode || !ready || session.closing || !session.owned} onImported={value => snapshot(value as Snapshot)} chooseImport={async () => { const path = await open({ title: '选择管理配置文件', multiple: false, filters: [{ name: '管理配置', extensions: ['json'] }] }); return typeof path === 'string' ? path : null; }} chooseExport={async () => save({ title: '保存管理配置（不覆盖已有文件）', defaultPath: 'agent-resource-manager-config.json', filters: [{ name: '管理配置', extensions: ['json'] }] })} /></Suspense></SettingsSection>
+        <SettingsSection sectionKey="diagnostics" title="诊断"><Suspense fallback={<p className="document-read-status" role="status">正在准备诊断…</p>}><DiagnosticSummary version={packageInfo.version} basicMode={basicMode} tasks={tasks} skillCount={state.skills.length} sourceErrors={state.sources.filter(source => source.error).length} visible={session.visible && settingsSection === 'diagnostics'} /></Suspense></SettingsSection>
       </SettingsLayout>}
       <footer className="page-footer"><span>v{packageInfo.version}</span></footer>
     </main>
 
     {(zoomFeedback || layoutError) && <div className="zoom-feedback" role={layoutError ? 'alert' : 'status'}>{layoutError || zoomFeedback}{layoutError && <button className="icon-button" aria-label="关闭界面设置错误提示" onClick={() => setLayoutError('')}><X size={14} /></button>}</div>}
-    {paneDialogs}
+    {session.sidebarHost ? createPortal(paneDialogs, session.sidebarHost) : paneDialogs}
     {floatingMenu && <FloatingMenu menu={floatingMenu} onClose={closeFloatingMenu} />}
   </div>;
 }
-
-
-
-
-

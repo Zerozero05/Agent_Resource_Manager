@@ -1,7 +1,7 @@
 //! Read-only provenance for source declarations. This never establishes runtime verification.
 use super::{
-    catalog_item, catalog_items, github, join, local_root, read_local, remote_path, repo, snapshot,
-    source_for, text, Snapshot,
+    catalog_item, catalog_items, github, join, local_root, read_local, rebinding, remote_path,
+    repo, requested_documentation_snapshot, snapshot, source_for, text, Snapshot,
 };
 use crate::model::{now, Manager};
 use serde_json::{json, Value};
@@ -176,10 +176,17 @@ fn remote_information(skill: &Value, snap: &Snapshot) -> Result<Value, String> {
 pub fn get(m: &Manager, request: &Value) -> Result<Value, String> {
     let skill = m.skill(text(request, "skillId")?)?;
     let local = local_information(&skill);
-    let remote = if skill["sourceId"].as_str().is_none() || request["localOnly"] == true {
+    let remote = if (skill["sourceId"].as_str().is_none() && request["version"] != "installed")
+        || request["localOnly"] == true
+    {
         json!({"readStatus":"not_applicable"})
     } else {
         let read = (|| -> Result<Value, String> {
+            if request["version"] == "installed" {
+                let installed = rebinding::reading_skill(&skill, request)?;
+                let snap = requested_documentation_snapshot(m, &skill, request)?;
+                return remote_information(&installed, &snap);
+            }
             let source = source_for(m, &skill)?;
             if source["repo"] != skill["repo"] {
                 return Err("Skill/source association is inconsistent".into());
@@ -239,6 +246,7 @@ mod tests {
 
     #[test]
     fn offline_read_prefers_readme_keeps_local_declarations_and_does_not_mutate_state() {
+        let _configuration = crate::network::test_configuration_guard();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("skill");
         fs::create_dir(&root).unwrap();
@@ -264,6 +272,7 @@ mod tests {
 
     #[test]
     fn rejected_remote_commit_retains_local_information_and_never_falls_back_to_latest() {
+        let _configuration = crate::network::test_configuration_guard();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("skill");
         fs::create_dir(&root).unwrap();

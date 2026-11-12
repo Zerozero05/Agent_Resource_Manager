@@ -1,0 +1,8 @@
+.resource-space { min-width: 0; margin-block: .6rem; }
+.resource-space summary { cursor: pointer; padding-block: .4rem; }
+.resource-space .section-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-block: .55rem; }
+.resource-space table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.resource-space th, .resource-space td { text-align: left; vertical-align: top; padding: .5rem; border-bottom: 1px solid var(--line); }
+.resource-space td { white-space: nowrap; }
+.resource-space th small { display: block; font-weight: normal; color: var(--text-secondary); }
+.resource-space caption { text-align: left; color: var(--text-secondary); padding-block: .4rem; }

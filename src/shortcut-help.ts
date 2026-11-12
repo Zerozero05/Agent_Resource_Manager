@@ -3,9 +3,12 @@ export type ShortcutHelpRow = { keys: readonly string[]; action: string };
 export type ShortcutHelpRect = { left: number; top: number; right: number; bottom: number };
 
 const sharedRows: readonly ShortcutHelpRow[] = [
+  { keys: ['Ctrl＋K'], action: '打开快捷入口，搜索资源、能力或设置' },
   { keys: ['空格'], action: '勾选或取消当前项' },
   { keys: ['Shift＋空格', 'Shift＋点击'], action: '扩展勾选范围' },
   { keys: ['Ctrl＋A'], action: '选择本页全部' },
+  { keys: ['Ctrl＋Z'], action: '撤销管理操作（输入或编辑时使用原生撤销）' },
+  { keys: ['Ctrl＋Y', 'Ctrl＋Shift＋Z'], action: '重做管理操作（输入或编辑时使用原生重做）' },
 ];
 
 /** Mirrors tableKeys and LibraryCards; keyboard navigation does not open a Skill. */

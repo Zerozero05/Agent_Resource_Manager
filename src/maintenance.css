@@ -1,0 +1,17 @@
+.maintenance-body { display: grid; gap: 14px; padding: 16px 24px 24px; }
+.maintenance-status { margin: 0; overflow-wrap: anywhere; }
+.maintenance-status span { display: block; margin-top: 4px; color: var(--muted); }
+.maintenance-actions, .maintenance-time-range { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; }
+.maintenance-pause { display: grid; gap: 12px; }
+.maintenance-pause > label { display: grid; grid-template-columns: minmax(0, 1fr) minmax(9rem, 12rem); align-items: center; gap: 12px 28px; }
+.maintenance-pause .maintenance-actions { justify-content: flex-end; gap: 8px; }
+.maintenance-pause select { min-width: 0; width: 100%; }
+.maintenance-time-range label { display: grid; gap: 6px; }
+.maintenance-window { border-top: 1px solid var(--line); padding-top: 14px; display: grid; gap: 10px; }
+.maintenance-window-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 44px; }
+.maintenance-window-toggle input { width: 18px; height: 18px; flex: 0 0 auto; margin: 0; }
+.maintenance-time-range input { min-width: 110px; }
+.maintenance-time-range > span { align-self: center; }
+.maintenance-window > .button { justify-self: start; }
+.maintenance-invalid p, .maintenance-window p { margin: 0; }
+.maintenance-window .text-button { margin-left: 8px; }

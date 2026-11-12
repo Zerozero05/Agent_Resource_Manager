@@ -1,0 +1,7 @@
+.task-results, .task-result-file { display: grid; gap: .6rem; min-width: 0; }
+.task-results { margin-block: .85rem; }
+.task-result-file { padding-block: .6rem; border-block-start: 1px solid var(--line); }
+.task-result-file code { overflow-wrap: anywhere; white-space: pre-wrap; }
+.task-results p { margin: 0; }
+.task-results .section-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.task-results button { min-height: 2rem; }

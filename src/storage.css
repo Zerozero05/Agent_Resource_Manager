@@ -7,3 +7,29 @@
 .storage-secondary>summary>span{font-weight:400;color:var(--muted);font-size:.82rem}
 .storage-secondary>.storage-paths{padding:0 12px 12px}
 @container storage-settings (max-width:700px){.storage-input-row{flex-wrap:wrap}.storage-input-row input{min-width:0;width:100%;flex-basis:100%}.storage-path-title{flex-wrap:wrap;gap:4px 10px}.storage-preview>div{grid-template-columns:minmax(0,1fr)}.storage-preview>div>span{text-align:left}.storage-content{padding:16px}}
+
+.storage-paths>.storage-path{display:grid;grid-template-columns:minmax(9rem,.32fr) minmax(0,1fr);gap:5px 16px;border:0;border-bottom:1px solid var(--line);border-radius:0;padding:12px 0}
+.storage-paths>.storage-path:last-child{border-bottom:0}
+.storage-path-title{display:grid;align-content:start;align-self:start;gap:4px;min-width:0}
+.storage-path-title strong{overflow-wrap:anywhere;line-height:1.6}
+.storage-path-title span{white-space:normal;line-height:1.6}
+.storage-effective{grid-column:2;grid-row:1;align-items:start;gap:12px}
+.storage-effective code{line-height:1.7;overflow-wrap:anywhere;word-break:normal}
+.storage-link{flex:0 0 auto;min-height:2rem;padding:3px 6px;border-radius:5px}
+.storage-link:hover{background:var(--hover)}
+.storage-link:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.storage-path-meta{grid-column:2;display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:4px 16px;min-width:0}
+.storage-path-meta>span{overflow-wrap:anywhere}
+.storage-path-stat{margin-inline-start:auto;text-align:end;font-variant-numeric:tabular-nums}
+.storage-path>.storage-input-row,.storage-path>.storage-error{grid-column:2;min-width:0}
+.storage-secondary{border:0;border-radius:0}
+.storage-secondary>summary{padding:12px 0;gap:6px 12px}
+.storage-secondary>.storage-paths{padding:0}
+.storage-boundaries code{overflow-wrap:anywhere;word-break:normal}
+.storage-boundaries>.storage-path{border:0;border-bottom:1px solid var(--line);border-radius:0;padding:12px 0}
+.storage-boundaries>.storage-path>small,.storage-preview p{font-variant-numeric:tabular-nums}
+@container storage-settings (max-width:700px){
+  .storage-paths>.storage-path{grid-template-columns:minmax(0,1fr);gap:6px;padding-block:12px}
+  .storage-path-title{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap}
+  .storage-effective,.storage-path-meta,.storage-path>.storage-input-row,.storage-path>.storage-error{grid-column:1;grid-row:auto}
+}

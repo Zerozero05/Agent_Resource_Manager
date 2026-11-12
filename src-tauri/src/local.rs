@@ -90,6 +90,10 @@ fn relative_parts(relative: &str) -> Result<Vec<&str>, String> {
     Ok(parts)
 }
 
+pub(crate) fn validate_relative_path(relative: &str) -> Result<(), String> {
+    relative_parts(relative).map(|_| ())
+}
+
 /// Validate each existing component before joining. This supports new files,
 /// but never traverses an interior link or a Windows reparse point.
 pub fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, String> {

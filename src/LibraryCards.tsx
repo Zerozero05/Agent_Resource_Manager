@@ -37,15 +37,23 @@ export function LibraryCards<T extends LibraryCardItem>({ items, selectedIds, ca
     if (next !== null) { event.preventDefault(); event.stopPropagation(); if (event.shiftKey && !disabled) onChoose(items[next].id, true, true); nodes[next]?.focus({ preventScroll: true }); nodes[next]?.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
   };
   return <div className="library-card-grid" ref={root} role="group" aria-label="Skill 卡片列表" onKeyDown={keys}>{items.map(skill => {
-    const chosen = selected.has(skill.id), name = skill.displayName || skill.name, status = displayStatus(skill);
+    const chosen = selected.has(skill.id), name = skill.alias || skill.displayName || skill.name, status = displayStatus(skill);
     const category = categories.find(item => item.id === skill.categoryId), count = connectionCount?.(skill);
     return <article key={skill.id} className={`library-card ${chosen ? 'is-selected' : ''}`} data-skill-id={skill.id} data-category-color={category ? colors.get(category.id) : undefined} tabIndex={0} draggable={!disabled && chosen} onDragStart={event => { if ((event.target as Element).closest('button,input,a,select,textarea')) { event.preventDefault(); return; } onDragStart(event, skill); }} onDragEnd={onDragEnd} aria-label={`${name}，${status.label}${chosen ? '，已选择' : ''}`}>
-      <div className="library-card-top"><input type="checkbox" aria-label={`选择 ${name}`} checked={chosen} disabled={disabled} onClick={event => { pointerShift.current = event.shiftKey; }} onChange={event => { onChoose(skill.id, event.target.checked, pointerShift.current); pointerShift.current = false; }} /><button type="button" className="skill-drag-handle icon-button" aria-label={`拖动 ${name} 到分类`} title="拖入左侧分类；已选时一起移动所选 Skill" draggable={!disabled} disabled={disabled} onDragStart={event => onDragStart(event, skill)} onDragEnd={onDragEnd}><GripVertical size={16} /></button><span className={`badge ${status.tone}`} title={statusExplanation(skill)}>{status.label}</span><button type="button" className={`library-card-favorite icon-button ${skill.favorite ? 'active' : ''}`} aria-label={`${skill.favorite ? '取消收藏' : '收藏'} ${name}`} aria-pressed={!!skill.favorite} title={skill.favorite ? '取消收藏' : '收藏'} disabled={disabled} onClick={() => onToggleFavorite(skill)}><Star size={17} fill={skill.favorite ? 'currentColor' : 'none'} /></button></div>
-      <button type="button" className="library-card-name" onClick={() => onOpenSkill(skill)} title={`查看 ${name}${name !== skill.name ? ` · ${skill.name}` : ''}`}><strong>{name}</strong></button>
+      <div className="library-card-header">
+        <button type="button" className="library-card-name" onClick={() => onOpenSkill(skill)} title={`查看 ${name}${name !== skill.name ? ` · ${skill.name}` : ''}`}><strong>{name}</strong></button>
+        <button type="button" className={`library-card-favorite icon-button ${skill.favorite ? 'active' : ''}`} aria-label={`${skill.favorite ? '取消收藏' : '收藏'} ${name}`} aria-pressed={!!skill.favorite} title={skill.favorite ? '取消收藏' : '收藏'} disabled={disabled} onClick={() => onToggleFavorite(skill)}><Star size={17} fill={skill.favorite ? 'currentColor' : 'none'} /></button>
+      </div>
       {skill.description && <p className="library-card-description" title={skill.description}>{skill.description}</p>}
-      {(showCategory || skill.version || !!count) && <div className="library-card-category">{showCategory && <CategoryChip category={category} color={category ? colors.get(category.id) : undefined} />}{skill.version && <span className="library-card-version">{skill.version}</span>}{!!count && <span className="library-card-connections" title={`${count} 个客户端连接`}>{count} 个连接</span>}</div>}
-      <div className="library-card-source">{renderSource ? renderSource(skill) : <span title={skill.localPath || skill.repo || undefined}>{skill.repo || (skill.localPath ? '本地 Skill' : '')}</span>}{skill.readOnly && <span className="library-card-readonly">只读</span>}</div>
-      <div className="library-card-actions">{renderActions(skill)}</div>
+      <div className="library-card-labels">{showCategory && <CategoryChip category={category} color={category ? colors.get(category.id) : undefined} />}<span className={`library-card-status ${status.tone}`} title={statusExplanation(skill)}>{status.label}</span></div>
+      <div className="library-card-footer">
+        <div className="library-card-source">{renderSource ? renderSource(skill) : <span title={skill.localPath || skill.repo || undefined}>{skill.repo || (skill.localPath ? '本地 Skill' : '')}</span>}</div>
+        {(skill.version || !!count || skill.readOnly) && <div className="library-card-metadata">{skill.version && <span className="library-card-version" title={skill.version}>{skill.version}</span>}{!!count && <span className="library-card-connections" title={`${count} 个客户端连接`}>{count} 个连接</span>}{skill.readOnly && <span className="library-card-readonly">只读</span>}</div>}
+        <div className="library-card-bottom">
+          <div className="library-card-selection"><input type="checkbox" aria-label={`选择 ${name}`} checked={chosen} disabled={disabled} onClick={event => { pointerShift.current = event.shiftKey; }} onChange={event => { onChoose(skill.id, event.target.checked, pointerShift.current); pointerShift.current = false; }} /><button type="button" className="skill-drag-handle icon-button" aria-label={`拖动 ${name} 到分类`} title="拖入左侧分类；已选时一起移动所选 Skill" draggable={!disabled} disabled={disabled} onDragStart={event => onDragStart(event, skill)} onDragEnd={onDragEnd}><GripVertical size={16} /></button></div>
+          <div className="library-card-actions">{renderActions(skill)}</div>
+        </div>
+      </div>
     </article>;
   })}</div>;
 }

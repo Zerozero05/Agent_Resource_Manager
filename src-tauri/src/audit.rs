@@ -607,6 +607,7 @@ mod tests {
 
     #[test]
     fn registration_and_changed_inventory_reads_automatically_record_scope_once() {
+        let _configuration = crate::network::test_configuration_guard();
         // The real task service configures the process transport before exposing
         // snapshots. Establish that same context before asserting full equality;
         // another parallel TaskSystem must not perform its first initialization
@@ -668,6 +669,7 @@ mod tests {
 
     #[test]
     fn manual_and_legacy_confirmed_ranges_remain_exact_when_new_required_files_are_detected() {
+        let _configuration = crate::network::test_configuration_guard();
         for kind in [Value::Null, json!("manual"), json!("legacy_unknown")] {
             let fixture = fixture();
             let root = fixture.path().join("skill");
@@ -775,6 +777,7 @@ mod tests {
 
     #[test]
     fn missing_registered_root_read_persists_failure_without_changing_manual_scope_or_history() {
+        let _configuration = crate::network::test_configuration_guard();
         for manual in [false, true] {
             let fixture = fixture();
             let root = fixture.path().join("skill");
@@ -865,6 +868,7 @@ mod tests {
 
     #[test]
     fn real_single_writer_inventory_and_plan_reads_persist_evidence_even_when_a_later_read_fails() {
+        let _configuration = crate::network::test_configuration_guard();
         let fixture = fixture();
         let root = fixture.path().join("skill");
         fs::create_dir_all(&root).unwrap();

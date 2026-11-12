@@ -39,6 +39,8 @@ export function ClientConnectPage({ skills, connections, client, initialDraft, o
   const hidden = selectedIds.filter(id => !filteredIds.includes(id)).length, clientName = CLIENT_OPTIONS.find(item => item.id === client)?.name || client;
   const alreadyConnected = skills.filter(skill => skill.localPath && !skill.readOnly).length - available.length;
   const busy = connecting || pendingBatch;
+  const sharedError = results.length > 1 && results[0].error && results.every(item => item.error === results[0].error) ? results[0].error : undefined;
+  const displayedError = error || sharedError;
   const update = (next: ClientConnectDraft) => { draftRef.current = next; setDraft(next); latestDraftChange.current(next); };
   const choose = (id: string, checked: boolean, shift = false) => update({ ...draftRef.current, selectedIds: clientSelectionRange(draftRef.current.selectedIds, filteredIds, draftRef.current.anchorId, id, checked, shift), anchorId: id });
   const selectAll = () => update({ ...draftRef.current, selectedIds: selectFilteredClientItems(draftRef.current.selectedIds, filteredIds) });
@@ -62,8 +64,8 @@ export function ClientConnectPage({ skills, connections, client, initialDraft, o
       const selected = selectedIds.includes(skill.id);
       return <label key={skill.id} className={selected ? 'is-selected' : ''} tabIndex={0} onKeyDown={event => { if (!busy && event.target === event.currentTarget && event.key === ' ' && !event.ctrlKey && !event.altKey && !event.metaKey) { event.preventDefault(); choose(skill.id, !selected, event.shiftKey); } }}><input type="checkbox" aria-label={`选择 ${clientSkillName(skill)}`} checked={selected} disabled={busy} onClick={event => { pointerShift.current = event.shiftKey; }} onChange={event => { choose(skill.id, event.target.checked, pointerShift.current); pointerShift.current = false; }} /><span><strong>{clientSkillName(skill)}</strong><code title={skill.localPath || undefined}>{skill.localPath}</code></span></label>;
     })}{!choices.length && <p className="client-connect-empty">{available.length ? '没有匹配的可连接 Skill；已选项目仍保留。' : '当前可用 Skill 已连接，或尚无可连接的本地 Skill。'}</p>}</div>
-    {error && <p className="inline-error" role="alert">{error}</p>}
-    {results.length > 0 && <section className="client-batch-results" role="status"><h3>本批结果 · 成功 {results.filter(item => item.success && !item.error).length}／共 {results.length} 项</h3>{results.map(result => <p key={result.id} className={result.error ? 'error-text' : undefined}>{result.label}：{result.error || '连接成功'}</p>)}{results.some(result => result.error) && <button type="button" className="button" disabled={busy} onClick={() => void connect(results.filter(item => item.error).map(item => item.id))}>仅重试失败项</button>}</section>}
+    {displayedError && <p className="inline-error" role="alert">{displayedError}</p>}
+    {results.length > 0 && <section className="client-batch-results" role="status"><h3>本批结果 · 成功 {results.filter(item => item.success && !item.error).length}／共 {results.length} 项</h3>{results.map(result => <p key={result.id} className={result.error ? 'error-text' : undefined}>{result.label}：{result.error ? result.error === displayedError ? '未连接' : result.error : '连接成功'}</p>)}{results.some(result => result.error) && <button type="button" className="button" disabled={busy} onClick={() => void connect(results.filter(item => item.error).map(item => item.id))}>仅重试失败项</button>}</section>}
     <footer className="client-connect-footer"><p>{busy ? '正在逐项连接；切换标签后任务会继续，结果保留在操作记录。' : 'Shift 可连续选择；列表获得焦点后可用 Ctrl＋A 全选当前筛选、空格切换当前项。'}</p><div>{onClose && <button type="button" className="button" onClick={onClose}>关闭页面</button>}<button type="button" className="button primary" disabled={busy || !selectedIds.length} onClick={() => void connect(selectedIds)}>{busy ? '正在逐项连接…' : `连接所选（${selectedIds.length}）`}</button></div></footer>
   </section>;
 }

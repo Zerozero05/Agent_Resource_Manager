@@ -9,7 +9,9 @@ mod information;
 mod logic;
 #[cfg(test)]
 mod protocol_tests;
+mod rebinding;
 mod runtime;
+pub(crate) use rebinding::guard as association_guard;
 mod upload;
 
 use crate::{
@@ -538,104 +540,6 @@ fn add_github(m: &mut Manager, req: &Value) -> Result<Value, String> {
     save_association_state(m, previous)
 }
 
-fn associate(m: &mut Manager, req: &Value) -> Result<Value, String> {
-    let previous = m.state.clone();
-    let mut skill = m.skill(text(req, "skillId")?)?;
-    let mut source = m
-        .state
-        .sources
-        .iter()
-        .find(|s| s["id"] == req["sourceId"])
-        .cloned()
-        .ok_or("Source does not exist")?;
-    let root = text(req, "remotePath")?;
-    if !root.is_empty() {
-        github::validate_relative(root)?;
-    }
-    let snap = Snapshot::load(text(&source, "repo")?, source["branch"].as_str())?;
-    snap.skill_files(root)?;
-    let (_, item) = manifests(&snap, root)?;
-    track_scope(&mut source, &m.state.skills, root, false)?;
-    skill["sourceId"] = source["id"].clone();
-    skill["repo"] = source["repo"].clone();
-    skill["branch"] = json!(snap.branch);
-    skill["remotePath"] = json!(root);
-    skill["commit"] = json!(snap.commit);
-    skill["baselineCommit"] = Value::Null;
-    skill["baselineKind"] = Value::Null;
-    skill["baselineVerifiedAt"] = Value::Null;
-    skill["installedCommit"] = Value::Null;
-    skill["baselineHashes"] = json!({});
-    skill["baselineDocHash"] = Value::Null;
-    skill["remoteHashes"] = Value::Null;
-    skill["lastRemoteCheckedAt"] = Value::Null;
-    skill["remoteDocHash"] = Value::Null;
-    skill["remoteCheckRequired"] = json!(true);
-    skill["runtimeSources"] = json!({});
-    for field in [
-        "comparisonLocalHashes",
-        "comparisonRemoteHashes",
-        "comparisonObservedAt",
-        "comparisonRuntimeFiles",
-        "comparisonRuntimeSelection",
-        "comparisonCommit",
-        "comparisonScope",
-        "comparisonDocHash",
-    ] {
-        skill[field] = Value::Null;
-    }
-    skill["changeDetails"] = json!([]);
-    skill["associationReason"] = json!("用户明确选择了此 GitHub 来源");
-    skill["private"] = json!(snap.private);
-    skill["lastChecked"] = json!(now());
-    skill["error"] = Value::Null;
-    skill["remoteMissing"] = json!(false);
-    skill["documentationPath"] = item
-        .as_ref()
-        .and_then(|i| i.get("usage"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    skill["status"] = json!(if skill["localPath"].as_str().is_some() {
-        "unknown_baseline"
-    } else {
-        "remote_only"
-    });
-    // Explicit association unifies an existing remote-only listing; unrelated local folders remain independent.
-    let local_id = skill["id"].clone();
-    for remote in m.state.skills.iter().filter(|s| {
-        s["id"] != local_id
-            && s["sourceId"] == source["id"]
-            && s["remotePath"] == root
-            && s["localPath"].is_null()
-    }) {
-        if remote["favorite"] == true {
-            skill["favorite"] = json!(true);
-        }
-        if !skill["categoryId"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty())
-        {
-            skill["categoryId"] = remote["categoryId"].clone();
-        }
-    }
-    m.state.skills.retain(|s| {
-        s["id"] == skill["id"]
-            || !(s["sourceId"] == source["id"]
-                && s["remotePath"] == root
-                && s["localPath"].is_null())
-    });
-    if let Err(error) = refresh_skill(&mut skill, &snap) {
-        skill["error"] = json!(error);
-        skill["remoteCheckRequired"] = json!(true);
-    }
-    m.upsert_skill(skill);
-    if let Some(stored) = m.state.sources.iter_mut().find(|s| s["id"] == source["id"]) {
-        *stored = source.clone();
-    }
-    update_source(m, &snap, &source["id"]);
-    save_association_state(m, previous)
-}
-
 fn get_remote_files(m: &Manager, skill: &Value) -> Result<Value, String> {
     let snap = snapshot(m, skill)?;
     let entries = snap.skill_files(remote_path(skill)?)?;
@@ -672,12 +576,10 @@ fn documentation_snapshot(m: &Manager, skill: &Value, version: &str) -> Result<S
             Some(commit) => Snapshot::at_commit(repo(skill)?, commit),
             None => snapshot(m, skill),
         },
-        "installed" => Snapshot::at_commit(
-            repo(skill)?,
-            skill["installedCommit"].as_str().ok_or(
-                "Installed version is unknown; a comparison baseline is not an installation record",
-            )?,
-        ),
+        "installed" => {
+            let installed = rebinding::reading_skill(skill, &json!({"version":"installed"}))?;
+            Snapshot::at_commit(repo(&installed)?, text(&installed, "installedCommit")?)
+        }
         _ => Err("Choose installed or latest documentation".into()),
     }
 }
@@ -686,18 +588,33 @@ fn requested_documentation_snapshot(
     skill: &Value,
     req: &Value,
 ) -> Result<Snapshot, String> {
+    let skill = rebinding::reading_skill(skill, req)?;
     if let Some(commit) = req["remoteCommit"].as_str() {
-        Snapshot::at_commit(repo(skill)?, commit)
+        github::sha(&json!(commit))?;
+        Snapshot::at_commit(repo(&skill)?, commit)
     } else {
-        documentation_snapshot(m, skill, req["version"].as_str().unwrap_or("latest"))
+        documentation_snapshot(m, &skill, req["version"].as_str().unwrap_or("latest"))
     }
 }
 fn get_document(m: &Manager, req: &Value) -> Result<Value, String> {
-    let generation = crate::network::read_generation()?;
+    get_document_with_generation(m, req, crate::network::read_generation)
+}
+fn local_document_requested(skill: &Value, req: &Value) -> bool {
+    req["origin"] == "local"
+        || skill["sourceId"].is_null()
+            && skill["localPath"].is_string()
+            && !(req["version"] == "installed"
+                && (!skill["installedProvenance"].is_null()
+                    || skill["installedCommit"].is_string()))
+}
+fn get_document_with_generation(
+    m: &Manager,
+    req: &Value,
+    read_generation: impl Fn() -> Result<u64, String>,
+) -> Result<Value, String> {
+    let generation = read_generation()?;
     let skill = m.skill(text(req, "skillId")?)?;
-    if req["origin"] == "local"
-        || skill["sourceId"].is_null() && skill["localPath"].as_str().is_some()
-    {
+    if local_document_requested(&skill, req) {
         let root = local_root(&skill)?;
         let path = req["path"].as_str().unwrap_or("SKILL.md");
         let raw = read_local(&root, path)?;
@@ -707,9 +624,11 @@ fn get_document(m: &Manager, req: &Value) -> Result<Value, String> {
         let fingerprint = hash(&raw);
         let markdown =
             String::from_utf8(raw).map_err(|_| "This local document is not UTF-8 text")?;
-        if crate::network::read_generation()? != generation {
-            return Err("读取来源或访问凭据已变化，请重新读取说明".into());
-        }
+        // Local bytes do not depend on remote credentials. An unrelated access
+        // change must not turn a successful local read into an authentication
+        // error. Keep the response's cache namespace current without re-tagging
+        // any response obtained through the remote branch below.
+        let generation = read_generation()?;
         return Ok(
             json!({"markdown":markdown,"documentPath":path,"basePath":path.rsplit_once('/').map(|(p,_)|p).unwrap_or(""),"baseUrl":null,"source":"本地运行文件","commit":null,"localFingerprint":fingerprint,"readGeneration":generation,"checkedAt":now(),"private":false}),
         );
@@ -720,7 +639,7 @@ fn get_document(m: &Manager, req: &Value) -> Result<Value, String> {
             github::validate_relative(p)?;
             p.into()
         }
-        None => documentation_path(&skill, &snap)?,
+        None => documentation_path(&rebinding::reading_skill(&skill, req)?, &snap)?,
     };
     let raw = snap.read(&path)?;
     if raw.len() > 1024 * 1024 {
@@ -742,7 +661,7 @@ fn get_document(m: &Manager, req: &Value) -> Result<Value, String> {
             parts.push(p);
         }
     }
-    if crate::network::read_generation()? != generation {
+    if read_generation()? != generation {
         return Err("读取来源或访问凭据已变化，请重新读取说明".into());
     }
     Ok(
@@ -753,9 +672,7 @@ fn get_doc_asset(m: &Manager, req: &Value) -> Result<Value, String> {
     let skill = m.skill(text(req, "skillId")?)?;
     let path = text(req, "path")?;
     github::validate_relative(path)?;
-    let raw = if req["origin"] == "local"
-        || skill["sourceId"].is_null() && skill["localPath"].as_str().is_some()
-    {
+    let raw = if local_document_requested(&skill, req) {
         read_local(&local_root(&skill)?, path)?
     } else {
         requested_documentation_snapshot(m, &skill, req)?.read(path)?
@@ -1095,7 +1012,9 @@ fn auto_associate_selected(
                         allowed
                             && refresh_matches(selected, skill)
                             && skill["sourceId"].is_null()
-                            && skill["baselineCommit"].is_null(),
+                            && skill["baselineCommit"].is_null()
+                            && skill["installedCommit"].is_null()
+                            && skill["installedProvenance"].is_null(),
                     )
                 }
                 Err(_) => (
@@ -1831,7 +1750,8 @@ fn note_untracked(skill: &mut Value, all: &BTreeMap<String, String>, scope: &[St
 fn skill_stamp(skill: &Value) -> String {
     hash(&serde_json::to_vec(&json!({"localPath":skill["localPath"],"sourceId":skill["sourceId"],"repo":skill["repo"],"branch":skill["branch"],
         "remotePath":skill["remotePath"],"baselineCommit":skill["baselineCommit"],"baselineHashes":skill["baselineHashes"],
-        "runtimeFiles":skill["runtimeFiles"],"runtimeConfirmed":skill["runtimeConfirmed"],"readOnly":skill["readOnly"]})).expect("serializable stamp"))
+        "runtimeFiles":skill["runtimeFiles"],"runtimeConfirmed":skill["runtimeConfirmed"],"readOnly":skill["readOnly"],
+        "installedCommit":skill["installedCommit"],"installedProvenance":skill["installedProvenance"]})).expect("serializable stamp"))
 }
 fn preview_text(data: &[u8]) -> String {
     if data.len() > 128 * 1024 {
@@ -2064,13 +1984,20 @@ fn preview_install(m: &mut Manager, req: &Value, updating: bool) -> Result<Value
     };
     let id = m.id();
     let kind = if updating { "update" } else { "install" };
-    let public = json!({"id":id,"kind":kind,"skillId":skill["id"],"summary":summary,"files":rows,"warnings":warnings,"canApply":can_apply,"targetPath":target.to_string_lossy(),"commit":snap.commit});
+    let backup_plan = transaction::plan_backup(
+        &m.storage.path("recovery")?,
+        &target,
+        &expected,
+        &data,
+        &deletes,
+    )?;
+    let public = json!({"id":id,"kind":kind,"skillId":skill["id"],"summary":summary,"files":rows,"warnings":warnings,"canApply":can_apply,"targetPath":target.to_string_lossy(),"commit":snap.commit,"backupPlan":backup_plan});
     let encoded: BTreeMap<String, String> = data
         .iter()
         .map(|(p, b)| (p.clone(), STANDARD.encode(b)))
         .collect();
     m.previews.clear();
-    m.previews.insert(id,json!({"public":public,"skillStamp":skill_stamp(&skill),"repo":snap.api.repo,"branch":snap.branch,"commit":snap.commit,
+    m.previews.insert(id,json!({"public":public,"backupPlan":backup_plan,"skillStamp":skill_stamp(&skill),"repo":snap.api.repo,"branch":snap.branch,"commit":snap.commit,
         "targetPath":target.to_string_lossy(),"expected":expected,"writes":encoded,"deletes":deletes,"runtimeFiles":selected,"runtimeSources":entries.iter().filter(|(p,_)|new_hashes.contains_key(*p)).map(|(p,e)|(p.clone(),e.source.clone())).collect::<BTreeMap<_,_>>(),
         "newHashes":new_hashes,"docHash":doc_hash(&snap,root_path,&selected,item.as_ref())?,"private":snap.private,"version":item.as_ref().and_then(|i|i.get("version_in_source")).cloned().unwrap_or(Value::Null)}));
     Ok(public)
@@ -2094,7 +2021,165 @@ fn consume_preview(m: &mut Manager, req: &Value, kind: &str) -> Result<Value, St
     }
     Ok(p)
 }
-fn apply_install(m: &mut Manager, req: &Value, updating: bool) -> Result<Value, String> {
+fn record_managed_files(
+    skill: &mut Value,
+    target: &Path,
+    writes: &BTreeMap<String, Vec<u8>>,
+    deletes: &[String],
+    updating: bool,
+) -> Result<(), String> {
+    use crate::resource_files::{FileRole, OwnedFile};
+    let existing = &skill["installation"];
+    let trusted = existing["schemaVersion"] == 1 && existing["origin"] == "managerInstall";
+    // An update of a registered local folder does not prove ownership of its files.
+    if updating && !trusted {
+        return Ok(());
+    }
+    if trusted {
+        let old_root = existing["rootPath"]
+            .as_str()
+            .ok_or("Skill安装归属缺少原目录")?;
+        if local::canonical(Path::new(old_root))? != local::canonical(target)? {
+            return Err("Skill安装归属目录已变化，未扩大文件归属".into());
+        }
+    }
+    let mut files: Vec<OwnedFile> = if trusted {
+        serde_json::from_value(existing["files"].clone()).map_err(|_| "Skill安装归属清单不可读")?
+    } else {
+        Vec::new()
+    };
+    files.retain(|file| !deletes.contains(&file.path));
+    for (path, bytes) in writes {
+        let role = if Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|name| {
+                let upper = name.to_ascii_uppercase();
+                upper.starts_with("LICENSE")
+                    || upper.starts_with("COPYING")
+                    || upper.starts_with("NOTICE")
+            }) {
+            FileRole::License
+        } else {
+            FileRole::Runtime
+        };
+        let owned = OwnedFile {
+            path: path.clone(),
+            role,
+            installed_sha256: hash(bytes),
+        };
+        if let Some(prior) = files.iter_mut().find(|file| file.path == *path) {
+            *prior = owned;
+        } else {
+            files.push(owned);
+        }
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    skill["installation"] = json!({"schemaVersion":1,"origin":"managerInstall","rootPath":target.to_string_lossy(),
+        "files":files,"recordedAt":now(),"repository":skill["repo"],"commit":skill["commit"]});
+    Ok(())
+}
+
+#[cfg(test)]
+mod managed_file_tests {
+    use super::*;
+    fn fixture() -> tempfile::TempDir {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("work/skill-ownership-tests");
+        fs::create_dir_all(&path).unwrap();
+        tempfile::tempdir_in(path).unwrap()
+    }
+    #[test]
+    fn install_receipt_only_records_written_files_not_existing_folder_inventory() {
+        let dir = fixture();
+        fs::write(dir.path().join("private-notes.md"), "unowned user data").unwrap();
+        let mut skill = json!({"id":"skill","repo":"example/repo","commit":"fixed"});
+        let writes = BTreeMap::from([
+            ("SKILL.md".into(), b"entry".to_vec()),
+            ("LICENSE".into(), b"license".to_vec()),
+        ]);
+        record_managed_files(&mut skill, dir.path(), &writes, &[], false).unwrap();
+        let receipt = &skill["installation"];
+        assert_eq!(receipt["origin"], "managerInstall");
+        let owned: Vec<crate::resource_files::OwnedFile> =
+            serde_json::from_value(receipt["files"].clone()).unwrap();
+        assert_eq!(owned.len(), 2);
+        assert!(owned.iter().all(|file| file.path != "private-notes.md"));
+        assert_eq!(
+            owned
+                .iter()
+                .find(|file| file.path == "LICENSE")
+                .unwrap()
+                .role,
+            crate::resource_files::FileRole::License
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("private-notes.md")).unwrap(),
+            "unowned user data"
+        );
+    }
+    #[test]
+    fn updating_a_registered_local_skill_does_not_grant_removal_ownership() {
+        let dir = fixture();
+        let mut skill = json!({"id":"local","baselineHashes":{"SKILL.md":"known-content"}});
+        let writes = BTreeMap::from([("SKILL.md".into(), b"new".to_vec())]);
+        record_managed_files(&mut skill, dir.path(), &writes, &[], true).unwrap();
+        assert!(skill["installation"].is_null());
+    }
+    #[test]
+    fn trusted_update_preserves_old_hash_for_unchanged_owned_files_and_checks_root() {
+        let dir = fixture();
+        let mut skill = json!({"id":"managed"});
+        let initial = BTreeMap::from([
+            ("SKILL.md".into(), b"old".to_vec()),
+            ("script.py".into(), b"original script".to_vec()),
+            ("obsolete.txt".into(), b"old obsolete".to_vec()),
+        ]);
+        record_managed_files(&mut skill, dir.path(), &initial, &[], false).unwrap();
+        fs::write(dir.path().join("script.py"), b"local customization").unwrap();
+        let update = BTreeMap::from([("SKILL.md".into(), b"new".to_vec())]);
+        record_managed_files(
+            &mut skill,
+            dir.path(),
+            &update,
+            &["obsolete.txt".into()],
+            true,
+        )
+        .unwrap();
+        let files: Vec<crate::resource_files::OwnedFile> =
+            serde_json::from_value(skill["installation"]["files"].clone()).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            files
+                .iter()
+                .find(|file| file.path == "script.py")
+                .unwrap()
+                .installed_sha256,
+            hash(b"original script")
+        );
+        assert_eq!(
+            files
+                .iter()
+                .find(|file| file.path == "SKILL.md")
+                .unwrap()
+                .installed_sha256,
+            hash(b"new")
+        );
+        let other = fixture();
+        let before = skill.clone();
+        assert!(record_managed_files(&mut skill, other.path(), &update, &[], true).is_err());
+        assert_eq!(skill, before);
+    }
+}
+
+fn apply_install(
+    m: &mut Manager,
+    req: &Value,
+    updating: bool,
+    grant: Option<transaction::BackupGrant>,
+) -> Result<Value, String> {
     let p = consume_preview(m, req, if updating { "update" } else { "install" })?;
     let mut skill = m.skill(text(&p["public"], "skillId")?)?;
     writable(&skill)?;
@@ -2135,8 +2220,14 @@ fn apply_install(m: &mut Manager, req: &Value, updating: bool) -> Result<Value, 
         writes.insert(path, bytes);
     }
     let deletes = paths(&p["deletes"]);
+    let backup_plan: transaction::BackupPlan = serde_json::from_value(p["backupPlan"].clone())
+        .map_err(|_| "备份计划缺失或无效，请重新预览")?;
     // Documentation-only changes update the verified receipt without touching runtime bytes.
     writes.retain(|path, bytes| expected.get(path) != Some(&hash(bytes)));
+    record_managed_files(&mut skill, &target, &writes, &deletes, updating)?;
+    if skill["installation"]["origin"] == "managerInstall" {
+        skill["installation"]["commit"] = p["commit"].clone();
+    }
     if !writes.is_empty() || !deletes.is_empty() {
         transaction::apply_in(
             &m.storage.path("recovery")?,
@@ -2144,6 +2235,8 @@ fn apply_install(m: &mut Manager, req: &Value, updating: bool) -> Result<Value, 
             &expected,
             &writes,
             &deletes,
+            &backup_plan,
+            grant,
         )?;
     }
     skill["localPath"] = json!(target.to_string_lossy());
@@ -2184,10 +2277,47 @@ fn apply_install(m: &mut Manager, req: &Value, updating: bool) -> Result<Value, 
     if !p["version"].is_null() {
         skill["version"] = p["version"].clone();
     }
+    rebinding::record_installation(&mut skill)?;
     update_source(m, &snap, &skill["sourceId"]);
     m.upsert_skill(skill);
     m.save()?;
     Ok(m.snapshot())
+}
+
+fn backup_grant(
+    m: &Manager,
+    req: &Value,
+    local_ui: bool,
+) -> Result<Option<transaction::BackupGrant>, String> {
+    if req.get("confirmed").is_some() || req.get("backupAllowed").is_some() {
+        return Err("不能用请求中的布尔值授权备份；请在本地预览中核对并确认".into());
+    }
+    let preview = m
+        .previews
+        .get(text(req, "previewId")?)
+        .ok_or("Preview expired or was already used; create a fresh preview")?;
+    let plan: transaction::BackupPlan = serde_json::from_value(preview["backupPlan"].clone())
+        .map_err(|_| "备份计划缺失或无效，请重新预览")?;
+    if !plan.required {
+        return Ok(None);
+    }
+    if !local_ui {
+        return Err("本次更新需要复制原文件备份，必须由用户在本地管理器中明确允许".into());
+    }
+    if req["backupPlanId"].as_str() != Some(plan.id.as_str()) {
+        return Err("尚未允许本次固定备份计划，请核对对象、完整位置和复制方式".into());
+    }
+    transaction::authorize_local_preview(&plan).map(Some)
+}
+
+pub(crate) fn apply_local(m: &mut Manager, req: &Value) -> Result<Option<Value>, String> {
+    let updating = match req["action"].as_str().unwrap_or_default() {
+        "apply_install" => false,
+        "apply_update" => true,
+        _ => return Ok(None),
+    };
+    let grant = backup_grant(m, req, true)?;
+    apply_install(m, req, updating, grant).map(Some)
 }
 
 fn preview_push(m: &mut Manager, req: &Value) -> Result<Value, String> {
@@ -2459,7 +2589,14 @@ pub fn handle(m: &mut Manager, req: &Value) -> Result<Option<Value>, String> {
     let result = match req["action"].as_str().unwrap_or("") {
         "add_github" => add_github(m, req)?,
         "auto_associate" => auto_associate(m)?,
-        "associate" => associate(m, req)?,
+        "associate" => {
+            return Err(
+                "来源关联必须先 preview_associate，再以 previewId 调用 apply_associate".into(),
+            )
+        }
+        "preview_associate" => rebinding::preview(m, req)?,
+        "apply_associate" => rebinding::apply(m, req)?,
+        "skill_source_health" => rebinding::health(m, req)?,
         "refresh" => refresh(m, req)?,
         "get_document" => get_document(m, req)?,
         "get_doc_asset" => get_doc_asset(m, req)?,
@@ -2472,8 +2609,14 @@ pub fn handle(m: &mut Manager, req: &Value) -> Result<Option<Value>, String> {
         }
         "preview_install" => preview_install(m, req, false)?,
         "preview_update" => preview_install(m, req, true)?,
-        "apply_install" => apply_install(m, req, false)?,
-        "apply_update" => apply_install(m, req, true)?,
+        "apply_install" => {
+            let grant = backup_grant(m, req, false)?;
+            apply_install(m, req, false, grant)?
+        }
+        "apply_update" => {
+            let grant = backup_grant(m, req, false)?;
+            apply_install(m, req, true, grant)?
+        }
         "preview_push" => preview_push(m, req)?,
         "apply_push" => apply_push(m, req)?,
         "set_token" | "delete_token" => {
@@ -2497,8 +2640,66 @@ pub fn handle(m: &mut Manager, req: &Value) -> Result<Option<Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_permission_is_local_plan_bound_and_consumed_before_applying() {
+        let parent = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("work/backup-permission-tests");
+        fs::create_dir_all(&parent).unwrap();
+        let temp = tempfile::tempdir_in(parent).unwrap();
+        let root = temp.path().join("skill");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("SKILL.md"), b"synthetic original").unwrap();
+        let mut manager = Manager::new(temp.path().join("data")).unwrap();
+        let history = manager.storage.path("recovery").unwrap();
+        let expected = local::files(&root).unwrap();
+        let writes = BTreeMap::from([("SKILL.md".into(), b"synthetic update".to_vec())]);
+        let plan = transaction::plan_backup(&history, &root, &expected, &writes, &[]).unwrap();
+        manager.previews.insert("update-preview".into(), json!({
+            "public":{"id":"update-preview","kind":"update","skillId":"synthetic","canApply":true},
+            "backupPlan":plan
+        }));
+        // A read-only target stops the valid local route before any remote lookup.
+        // Its purpose here is to observe preview consumption even when apply fails.
+        manager
+            .state
+            .skills
+            .push(json!({"id":"synthetic","readOnly":true}));
+        let request =
+            json!({"action":"apply_update","previewId":"update-preview","backupPlanId":plan.id});
+        for forged in [
+            request.clone(),
+            json!({"action":"apply_update","previewId":"update-preview","confirmed":true}),
+            json!({"action":"apply_update","previewId":"update-preview","backupAllowed":true}),
+        ] {
+            assert!(crate::dispatch(&mut manager, &forged).is_err());
+            assert!(manager.previews.contains_key("update-preview"));
+            assert!(!history.exists());
+        }
+        assert!(apply_local(
+            &mut manager,
+            &json!({"action":"apply_update","previewId":"update-preview"})
+        )
+        .is_err());
+        assert!(apply_local(&mut manager, &json!({"action":"apply_update","previewId":"update-preview","backupPlanId":"another-plan"})).is_err());
+        assert!(apply_local(&mut manager, &json!({"action":"apply_update","previewId":"update-preview","backupPlanId":plan.id,"confirmed":true})).is_err());
+        assert!(manager.previews.contains_key("update-preview"));
+        assert!(backup_grant(&manager, &request, true).unwrap().is_some());
+        assert!(apply_local(&mut manager, &request).is_err());
+        assert!(
+            !manager.previews.contains_key("update-preview"),
+            "a permitted apply attempt consumes the preview, including on failure"
+        );
+        assert!(apply_local(&mut manager, &request).is_err());
+        assert_eq!(local::files(&root).unwrap(), expected);
+        assert!(!history.exists());
+    }
+
     #[test]
     fn v025_access_change_broadcasts_new_read_context_without_persisting_credentials() {
+        let _configuration = crate::network::test_configuration_guard();
         let parent = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -2584,6 +2785,26 @@ mod tests {
         let changed = get_document(&m, &json!({"skillId":"offline","version":"latest"})).unwrap();
         assert_ne!(doc["localFingerprint"], changed["localFingerprint"]);
         assert!(changed["markdown"].as_str().unwrap().contains("changed"));
+        // Control the access-epoch change during the real local read without
+        // changing global credentials or disturbing other parallel tests.
+        let generation = std::cell::Cell::new(40u64);
+        let changing_access = get_document_with_generation(
+            &m,
+            &json!({"skillId":"offline","version":"latest"}),
+            || {
+                let value = generation.get();
+                generation.set(value + 1);
+                Ok(value)
+            },
+        )
+        .unwrap();
+        assert_eq!(changing_access["readGeneration"], 41);
+        assert_eq!(changing_access["source"], "本地运行文件");
+        assert_eq!(
+            changing_access["localFingerprint"],
+            changed["localFingerprint"]
+        );
+        assert_eq!(changing_access["markdown"], changed["markdown"]);
         assert!(get_document(&m, &json!({"skillId":"offline","path":"../outside.md"})).is_err());
     }
     #[test]

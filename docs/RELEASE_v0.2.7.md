@@ -20,7 +20,7 @@ Skill Manager 是面向 Windows 的本地与 GitHub Agent Skills 管理器：每
 | `Skill_Manager_v0.2.7_source.zip` | 本版本源码、锁文件、测试及构建配置，用于开发与维护。 |
 | `SOURCE_MANIFEST.json`、`SHA256SUMS.txt` | 核对正式源码成员及各发行附件摘要。 |
 
-[发行下载与附件清单](https://github.com/Zerozero05/Skill_Manager/releases/tag/v0.2.7) · [公开仓库](https://github.com/Zerozero05/Skill_Manager)
+[发行下载与附件清单](https://github.com/Zerozero05/Agent_Resource_Manager/releases/tag/v0.2.7) · [公开仓库](https://github.com/Zerozero05/Agent_Resource_Manager)
 
 程序需要 Microsoft Edge WebView2 Runtime。当前交付为 Windows x64；其他系统、架构和其他电脑未完成验证。附件集合与摘要以发行页为准，不含个人设置、令牌、Skill 原件或本机维护记录。
 
@@ -30,13 +30,13 @@ Skill Manager 是面向 Windows 的本地与 GitHub Agent Skills 管理器：每
 
 必要文件默认加入 ZIP，可选包内与外部文件默认不选；GitHub 独有的已选资源可直接进入最终 ZIP，不在 Skill 目录生成副本。长期文件范围与本次导出选择仍分别处理。布局恢复只恢复导航，不自动重放上传、更新、删除或导出。
 
-使用与恢复步骤见[用户指南](https://github.com/Zerozero05/Skill_Manager/blob/v0.2.7/docs/USER_GUIDE.md)。
+使用与恢复步骤见[用户指南](https://github.com/Zerozero05/Agent_Resource_Manager/blob/v0.2.7/docs/USER_GUIDE.md)。
 
 ## 验证与性能
 
 本机构建与验证：**351 项 Rust 测试、136 项前端测试、93 组原生界面／流程验证**通过；TypeScript、Vite、格式、Clippy、Windows 优化版与 NSIS 安装包构建通过。原生流程区分真实业务、受控状态呈现、保存对话框返回值替代及真实回复延迟，没有把这些场景当作真实 GitHub 或模型调用结果。
 
-云端 CI 以[Windows checks 的实际运行](https://github.com/Zerozero05/Skill_Manager/actions/workflows/check.yml)为准，正式发行页记录对应提交与运行结果；本机验证不等同于云端 CI。
+云端 CI 以[Windows checks 的实际运行](https://github.com/Zerozero05/Agent_Resource_Manager/actions/workflows/check.yml)为准，正式发行页记录对应提交与运行结果；本机验证不等同于云端 CI。
 
 同机 100 个合成 Skill、20 轮本地切换，保留 v0.2.6 与本版的完整实测增减：
 
@@ -54,4 +54,4 @@ Skill Manager 是面向 Windows 的本地与 GitHub Agent Skills 管理器：每
 
 ## 许可与来源
 
-项目自身尚未指定开源许可证，公开源码不等于授予 MIT 等额外使用许可。第三方依赖继续遵循各自许可证，随程序保留 `THIRD_PARTY_NOTICES.txt`；方法参考与依赖说明见[来源记录](https://github.com/Zerozero05/Skill_Manager/blob/v0.2.7/docs/SOURCES.md)。本次未复制第三方应用源码或升级依赖。
+项目自身尚未指定开源许可证，公开源码不等于授予 MIT 等额外使用许可。第三方依赖继续遵循各自许可证，随程序保留 `THIRD_PARTY_NOTICES.txt`；方法参考与依赖说明见[来源记录](https://github.com/Zerozero05/Agent_Resource_Manager/blob/v0.2.7/docs/SOURCES.md)。本次未复制第三方应用源码或升级依赖。

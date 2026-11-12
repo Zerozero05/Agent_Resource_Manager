@@ -1,13 +1,22 @@
 /* Compact shared layout; existing font, zoom, scroll and task behavior stay authoritative. */
 .desktop-workspace .app-shell>.main{padding-top:0;scrollbar-gutter:stable}
-.desktop-workspace .page-header{padding-top:1.25rem;margin-bottom:1.1rem;gap:.75rem}
-.desktop-workspace .page-header h1{margin-top:.45rem;margin-bottom:.4rem}
+.desktop-workspace .page-header{padding-top:1rem;margin-bottom:.85rem;gap:.75rem 1rem;align-items:center}
+.desktop-workspace .page-header h1{margin:0;font-size:1.4rem;line-height:1.4;letter-spacing:-.02em}
+.desktop-workspace .page-title-group{flex:1;min-width:0}
+.desktop-workspace .page-title-group h1{overflow-wrap:anywhere}
+.desktop-workspace .page-title-group .library-summary{padding:0;margin:.3rem 0 0;border:0;gap:.3rem .85rem;font-size:.8125rem;line-height:1.6;flex-wrap:wrap;color:var(--text-secondary)}
+.desktop-workspace .page-title-group .library-summary .summary-number{font-size:inherit;font-weight:650}
+.desktop-workspace .page-title-group .library-summary .repository-total{margin-left:0;font-size:inherit}
+.desktop-workspace .page-header .header-actions{flex:0 1 auto;margin-top:0;gap:6px;flex-wrap:wrap}
+.desktop-workspace .page-header .header-actions .button{font-size:.8125rem;padding:7px 10px}
 .desktop-workspace .page-header p{margin:0;line-height:1.65}
 .desktop-workspace .eyebrow{margin-bottom:.3rem}
 .desktop-workspace .library-summary{margin:.7rem 0 1rem;gap:.55rem 1.25rem}
-.desktop-workspace .category-toolbar{margin-bottom:.75rem}
-.desktop-workspace .library-controls{padding:.9rem 1rem .65rem}
-.library-panel.library-cards{min-height:0;flex:initial;box-shadow:none;border-radius:10px}
+.desktop-workspace .category-toolbar{margin-bottom:.65rem;padding-bottom:0}
+.desktop-workspace .library-controls{padding:.75rem 1rem .65rem}
+.desktop-workspace .library-panel.library-cards{min-height:0;flex:initial;box-shadow:none;border-radius:0;border:0;background:transparent}
+.desktop-workspace .library-panel.library-cards .library-controls{padding-inline:0;background:transparent}
+.desktop-workspace .library-panel.library-cards>.table-footer{padding-inline:0}
 .desktop-workspace .library-controls .library-selection-bar{padding:.5rem 0 0;margin-top:.5rem;min-height:0;gap:.35rem .75rem;border-top:1px solid var(--line);background:transparent;font-size:.875rem}
 .desktop-workspace .library-selection-bar>.library-batch-actions{margin-left:auto;display:flex;gap:.4rem;align-items:center;flex-wrap:wrap}
 .desktop-workspace .library-mode button{white-space:nowrap}
@@ -34,12 +43,8 @@
 }
 /* Compact hierarchy: one title, one source overview, contextual category and actions. */
 .desktop-workspace .sidebar nav{margin-top:1rem}
-.desktop-workspace .page-header{margin-bottom:.65rem;align-items:center}
-.desktop-workspace .page-header h1{margin:0;font-size:1.5rem;line-height:1.4}
-.desktop-workspace .page-header .header-actions{margin-top:0;flex-wrap:wrap}
 .desktop-workspace .library-summary{padding:0;margin:.15rem 0 .85rem;border:0;gap:.4rem 1rem;font-size:.85rem;flex-wrap:wrap}
 .desktop-workspace .library-summary .summary-number{font-size:1rem}
-.desktop-workspace .category-toolbar{margin-bottom:.65rem}
 .desktop-workspace .skill-source-cell{vertical-align:middle}
 .desktop-workspace .skill-source-cell>.source-path-link{display:inline-flex;vertical-align:middle;max-width:calc(100% - 2rem)}
 .desktop-workspace .source-path-link.is-icon{width:1.6rem;height:1.6rem;justify-content:center;border-radius:4px;flex:none}

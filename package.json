@@ -1,7 +1,7 @@
 {
   "name": "skill-manager",
   "private": true,
-  "version": "0.2.11",
+  "version": "0.3.0-dev.1",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -9,7 +9,7 @@
     "check": "tsc --noEmit",
     "tauri": "tauri",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
-    "test:ui": "node --experimental-strip-types --test tests/categories.test.ts tests/changes.test.ts tests/clients.test.ts tests/destination.test.ts tests/export-selection.test.ts tests/external.test.ts tests/folds.test.ts tests/history.test.ts tests/information.test.ts tests/library.test.ts tests/network-diagnostics.test.ts tests/read-cache.test.ts tests/runtime-presentation.test.ts tests/runtime.test.ts tests/shortcut-help.test.ts tests/snapshot-clock.test.ts tests/themes.test.ts tests/workspace.test.ts tests/bridge-recovery.test.ts tests/export-recovery-hook.test.ts tests/local-sources.test.ts tests/check-ui.test.ts tests/local-import-ui.test.ts"
+    "test:ui": "node --experimental-strip-types --test tests/resource-library.test.ts tests/resource-library-ui.test.ts tests/dashboard.test.ts tests/categories.test.ts tests/changes.test.ts tests/clients.test.ts tests/destination.test.ts tests/export-selection.test.ts tests/external.test.ts tests/folds.test.ts tests/history.test.ts tests/information.test.ts tests/library.test.ts tests/network-diagnostics.test.ts tests/network-settings-ui.test.ts tests/read-cache.test.ts tests/runtime-presentation.test.ts tests/runtime.test.ts tests/shortcut-help.test.ts tests/snapshot-clock.test.ts tests/themes.test.ts tests/workspace.test.ts tests/bridge-recovery.test.ts tests/export-recovery-hook.test.ts tests/local-sources.test.ts tests/check-ui.test.ts tests/local-import-ui.test.ts tests/resources.test.ts tests/resource-panel.test.ts tests/appearance.test.ts tests/appearance-ui.test.ts tests/commands.test.ts tests/command-palette.test.ts tests/markdown-renderer.test.ts tests/backup-consent.test.ts tests/startup.test.ts tests/workspace-close-ui.test.ts tests/workspace-sidebar-ui.test.ts tests/resource-github.test.ts tests/resource-repair.test.ts tests/management-history-ui.test.ts tests/maintenance-ui.test.ts tests/management-data.test.ts tests/management-data-ui.test.ts tests/management-app.test.ts tests/library-reading.test.ts tests/library-reading-boundary.test.ts tests/invocation-templates.test.ts tests/resource-relations.test.ts tests/resource-source.test.ts tests/skill-source.test.ts tests/scenes.test.ts tests/resource-idle.test.ts tests/task-results.test.ts tests/task-updates.test.ts tests/diagnostics.test.ts tests/diagnostics-ui.test.ts tests/resource-space.test.ts tests/configuration-ui.test.ts tests/skill-removal.test.ts tests/resource-update.test.ts tests/resource-recovery.test.ts tests/resource-automation.test.ts tests/resource-adapters.test.ts tests/resource-capability-evidence.test.ts tests/runtime-package.test.ts tests/runtime-package-ui.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

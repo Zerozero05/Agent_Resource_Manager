@@ -1,0 +1,10 @@
+.skill-removal { margin-block: .8rem; }
+.skill-removal-panel, .skill-removal-plan { display: grid; gap: .8rem; padding-block: .75rem; min-width: 0; }
+.skill-removal-panel p, .skill-removal-panel h3 { margin: 0; }
+.skill-removal-heading { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.skill-removal-panel > label { display: grid; gap: .4rem; }
+.skill-removal-panel > button, .skill-removal-plan > button { justify-self: start; }
+.skill-removal-panel li { display: grid; grid-template-columns: 4rem minmax(0, 1fr); gap: .3rem .65rem; padding-block: .5rem; border-block-end: 1px solid var(--border); }
+.skill-removal-panel li small { grid-column: 2; }
+.skill-removal-panel span, .skill-removal-panel p { overflow-wrap: anywhere; }
+.skill-removal-files label { display: flex; align-items: start; gap: .5rem; padding-block: .35rem; }

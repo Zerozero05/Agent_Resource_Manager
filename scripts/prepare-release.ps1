@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $utf8 = [Text.UTF8Encoding]::new($false)
-if ($env:GITHUB_REPOSITORY -ne 'Zerozero05/Skill_Manager' -or $env:GITHUB_SHA -notmatch '^[0-9a-f]{40}$') {
+if ($env:GITHUB_REPOSITORY -ne 'Zerozero05/Agent_Resource_Manager' -or $env:GITHUB_SHA -notmatch '^[0-9a-f]{40}$') {
     throw 'Release preparation requires the exact repository and GitHub Actions source commit'
 }
 Set-Location -LiteralPath $projectRoot
@@ -41,32 +41,33 @@ foreach ($line in Get-Content -LiteralPath (Join-Path $candidate 'SHA256SUMS.txt
     if ((Get-Sha256 $path) -ne $expected) { throw "Candidate checksum mismatch: $relative" }
 }
 $info = Get-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.json') -Raw | ConvertFrom-Json
-$program = Join-Path $candidate 'skill-manager.exe'
+$program = Join-Path $candidate 'agent-resource-manager.exe'
 if ($info.version -ne $version -or [string]$info.workflowRunId -ne $CandidateRunId -or $info.repository -ne $env:GITHUB_REPOSITORY -or $info.sourceCommit -notmatch '^[0-9a-f]{40}$') {
     throw 'Candidate build identity does not match the requested release'
+}
+if ($run.head_sha -cne $info.sourceCommit -or [string]$run.run_attempt -ne [string]$info.workflowRunAttempt) {
+    throw 'Candidate build identity differs from the successful workflow attempt'
 }
 if ((Get-Sha256 $program) -ne $ExpectedExecutableSha256 -or $info.executableSha256 -ne $ExpectedExecutableSha256) { throw 'Candidate executable differs from the independently verified program' }
 if ((Get-Item -LiteralPath $program).VersionInfo.ProductVersion -ne $version) { throw 'Executable version does not match source' }
 
 # Documentation and this packaging layer may evolve after the tested application.
 # All actual application inputs must still match the verified build commit.
-$comparison = Invoke-GitHubJson "repos/$env:GITHUB_REPOSITORY/compare/$($info.sourceCommit)...$env:GITHUB_SHA"
 $allowed = @('README.md', 'CHANGELOG.md', 'docs/USER_GUIDE.md', "docs/RELEASE_v$version.md", '.github/workflows/package-release.yml', 'scripts/prepare-release.ps1')
-$changed = @($comparison.files | ForEach-Object filename)
-if ($changed.Count -ge 300) { throw 'Source comparison is too large to establish candidate equivalence' }
-foreach ($path in $changed) { if ($path -notin $allowed) { throw "Application input changed after the verified candidate: $path" } }
+$sourceComparison = & "$PSScriptRoot/verify-release-source.ps1" -RepositoryPath $projectRoot -CandidateCommit $info.sourceCommit -ReleaseCommit $env:GITHUB_SHA -AllowedPaths $allowed
+Write-Utf8 (Join-Path $verification 'source-comparison.json') ($sourceComparison | ConvertTo-Json -Depth 4)
 if ((Get-Sha256 (Join-Path $projectRoot 'docs/THIRD_PARTY_NOTICES.txt')) -ne (Get-Sha256 (Join-Path $candidate 'THIRD_PARTY_NOTICES.txt'))) { throw 'Candidate license notices differ from source' }
 
 $target = Join-Path $projectRoot 'src-tauri/target/release'
 New-Item -ItemType Directory -Path $target -Force | Out-Null
-Copy-Item -LiteralPath $program -Destination (Join-Path $target 'skill-manager.exe')
+Copy-Item -LiteralPath $program -Destination (Join-Path $target 'agent-resource-manager.exe')
 New-Item -ItemType Directory -Path (Join-Path $projectRoot 'dist') -Force | Out-Null
 & pnpm tauri bundle --bundles nsis --ci --no-sign --no-binary-patching 2>&1 | Tee-Object -FilePath (Join-Path $verification 'nsis-bundle.log') -Encoding utf8NoBOM
 if ($LASTEXITCODE -ne 0) { throw 'NSIS bundling failed' }
-if ((Get-Sha256 (Join-Path $target 'skill-manager.exe')) -ne $ExpectedExecutableSha256) { throw 'Bundler modified the verified executable' }
+if ((Get-Sha256 (Join-Path $target 'agent-resource-manager.exe')) -ne $ExpectedExecutableSha256) { throw 'Bundler modified the verified executable' }
 $installers = @(Get-ChildItem -LiteralPath (Join-Path $target 'bundle/nsis') -File -Filter '*.exe')
 if ($installers.Count -ne 1) { throw 'Expected one Windows NSIS installer' }
-$installer = Join-Path $assets "Skill_Manager_v${version}_windows_x64_setup.exe"
+$installer = Join-Path $assets "Agent_Resource_Manager_v${version}_windows_x64_setup.exe"
 Copy-Item -LiteralPath $installers[0].FullName -Destination $installer
 $sevenZip = Join-Path $env:ProgramFiles '7-Zip/7z.exe'
 if (-not (Test-Path -LiteralPath $sevenZip)) { throw 'The Windows runner is missing 7-Zip for installer verification' }
@@ -75,28 +76,20 @@ if ($LASTEXITCODE -ne 0) { throw 'Installer archive integrity check failed' }
 $expanded = Join-Path $staging 'installer-contents'
 & $sevenZip x $installer "-o$expanded" -y 2>&1 | Tee-Object -FilePath (Join-Path $verification 'nsis-extraction.log') -Encoding utf8NoBOM
 if ($LASTEXITCODE -ne 0) { throw 'Installer extraction failed' }
-$embeddedPrograms = @(Get-ChildItem -LiteralPath $expanded -File -Recurse -Filter 'skill-manager.exe')
-if ($embeddedPrograms.Count -ne 1 -or (Get-Sha256 $embeddedPrograms[0].FullName) -ne $ExpectedExecutableSha256) { throw 'Installer does not contain the exact verified executable' }
 
 $portable = Join-Path $staging 'portable'
-New-Item -ItemType Directory -Path $portable | Out-Null
-Copy-Item -LiteralPath $program -Destination (Join-Path $portable 'skill-manager.exe')
+$portableApp = Join-Path $portable 'app'
+New-Item -ItemType Directory -Path $portableApp | Out-Null
+Copy-Item -LiteralPath $program -Destination (Join-Path $portableApp 'agent-resource-manager.exe')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/USER_GUIDE.md') -Destination (Join-Path $portable 'USER_GUIDE.md')
-Copy-Item -LiteralPath (Join-Path $candidate 'THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $portable 'THIRD_PARTY_NOTICES.txt')
-Write-Utf8 (Join-Path $portable 'data-directory.txt') ".`n"
-$portableZip = Join-Path $assets "Skill_Manager_v${version}_windows_x64_portable.zip"
+Copy-Item -LiteralPath (Join-Path $candidate 'THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $portableApp 'THIRD_PARTY_NOTICES.txt')
+Write-Utf8 (Join-Path $portableApp 'data-directory.txt') ".`n"
+$portableZip = Join-Path $assets "Agent_Resource_Manager_v${version}_windows_x64_portable.zip"
 [IO.Compression.ZipFile]::CreateFromDirectory($portable, $portableZip, [IO.Compression.CompressionLevel]::Optimal, $false)
-$portableArchive = [IO.Compression.ZipFile]::OpenRead($portableZip)
-try {
-    if ($portableArchive.Entries.Count -ne 4) { throw 'Portable ZIP contains unexpected files' }
-    $stream = $portableArchive.GetEntry('skill-manager.exe').Open()
-    try { $portableExecutableSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant() }
-    finally { $stream.Dispose() }
-    if ($portableExecutableSha256 -ne $ExpectedExecutableSha256) { throw 'Portable ZIP executable differs from the verified program' }
-} finally { $portableArchive.Dispose() }
+$payload = & "$PSScriptRoot/verify-release-payload.ps1" -InstallerContents $expanded -PortableZip $portableZip -ExpectedProgram $program -ExpectedNotices (Join-Path $candidate 'THIRD_PARTY_NOTICES.txt') -ExpectedGuide (Join-Path $projectRoot 'docs/USER_GUIDE.md')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/USER_GUIDE.md') -Destination (Join-Path $assets 'USER_GUIDE.md')
-$sourceZip = Join-Path $assets "Skill_Manager_v${version}_source.zip"
-& git archive --format=zip --prefix=Skill_Manager/ -o $sourceZip $env:GITHUB_SHA
+$sourceZip = Join-Path $assets "Agent_Resource_Manager_v${version}_source.zip"
+& git archive --format=zip --prefix=Agent_Resource_Manager/ -o $sourceZip $env:GITHUB_SHA
 if ($LASTEXITCODE -ne 0) { throw 'Source archive creation failed' }
 $archive = [IO.Compression.ZipFile]::OpenRead($sourceZip)
 try {
@@ -104,16 +97,21 @@ try {
         $stream = $_.Open()
         try { $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant() }
         finally { $stream.Dispose() }
-        [ordered]@{ path = $_.FullName.Substring('Skill_Manager/'.Length); bytes = $_.Length; sha256 = $hash }
+        [ordered]@{ path = $_.FullName.Substring('Agent_Resource_Manager/'.Length); bytes = $_.Length; sha256 = $hash }
     })
 } finally { $archive.Dispose() }
 $manifest = [ordered]@{
     formatVersion = 1; version = $version; repository = $env:GITHUB_REPOSITORY
     sourceCommit = $env:GITHUB_SHA; candidateRunId = $CandidateRunId; candidateBuildCommit = $info.sourceCommit
     candidateExecutableSha256 = $ExpectedExecutableSha256; sourceArchiveSha256 = Get-Sha256 $sourceZip
-    installerExecutableSha256 = Get-Sha256 $embeddedPrograms[0].FullName
+    installerExecutableSha256 = $payload.installerExecutableSha256
+    portableExecutableSha256 = $payload.portableExecutableSha256
+    installerNoticesSha256 = $payload.installerNoticesSha256
+    portableNoticesSha256 = $payload.portableNoticesSha256
+    portableGuideSha256 = $payload.portableGuideSha256
+    portableDataDirectoryVerified = $payload.portableDataDirectoryVerified
     installerWizardVerified = $false; installerArchiveVerified = $true
-    applicationInputsMatchCandidate = $true; postCandidateFiles = $changed; files = $files
+    applicationInputsMatchCandidate = $true; postCandidateFiles = @($sourceComparison.changedPaths); files = $files
 }
 Write-Utf8 (Join-Path $assets 'SOURCE_MANIFEST.json') (($manifest | ConvertTo-Json -Depth 6) + "`n")
 $releaseNotes = Join-Path $projectRoot "docs/RELEASE_v$version.md"
@@ -124,7 +122,7 @@ else {
     if (-not $match.Success) { throw 'Release changelog section is missing' }
     Write-Utf8 (Join-Path $assets 'RELEASE_NOTES.md') ("# v$version`n`n" + $match.Groups[1].Value.Trim() + "`n`n## Windows 附件`n`n便携 ZIP 与 NSIS 安装器包含同一份已验证 EXE；需要现有 Windows x64 与 WebView2 环境。本次不新增自动更新签名。源码、指南及摘要随附；安装器包内容已解包核验，安装向导运行尚待单独验证。`n`n源码提交：$env:GITHUB_SHA`n候选构建：$($info.sourceCommit)`n候选检查：https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$CandidateRunId`n程序 SHA256：$ExpectedExecutableSha256`n")
 }
-$assetNames = @('RELEASE_NOTES.md', 'USER_GUIDE.md', 'SOURCE_MANIFEST.json', "Skill_Manager_v${version}_source.zip", "Skill_Manager_v${version}_windows_x64_portable.zip", "Skill_Manager_v${version}_windows_x64_setup.exe")
+$assetNames = @('RELEASE_NOTES.md', 'USER_GUIDE.md', 'SOURCE_MANIFEST.json', "Agent_Resource_Manager_v${version}_source.zip", "Agent_Resource_Manager_v${version}_windows_x64_portable.zip", "Agent_Resource_Manager_v${version}_windows_x64_setup.exe")
 $sums = @($assetNames | Sort-Object | ForEach-Object { (Get-Sha256 (Join-Path $assets $_)) + '  ' + $_ })
 Write-Utf8 (Join-Path $assets 'SHA256SUMS.txt') (($sums -join "`n") + "`n")
 Write-Utf8 (Join-Path $verification 'BUILD_INFO.json') (([pscustomobject]$manifest | Select-Object -Property * -ExcludeProperty files | ConvertTo-Json -Depth 5) + "`n")

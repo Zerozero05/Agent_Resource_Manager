@@ -10,14 +10,16 @@ type Storage = { managedRoot: string; config: Config; paths: Record<Kind, PathIn
 type Preview = { id: string; changes: { kind: Kind; from: string; to: string; restartRequired: boolean }[]; files: number; bytes: number; spaceChecked: boolean; restartRequired: boolean; scope: string };
 type Statistics = { checkedAt: string; rows: { kind: string; label?: string; developer?: boolean; path: string; files: number; bytes: number; skippedLinks: number; error?: string }[] };
 type Request = <T = unknown>(action: string, args?: Record<string, unknown>) => Promise<T>;
-export type StorageSettingsProps = { request: Request; onRequestRestart: (previewId: string) => Promise<void> };
+export type StorageSettingsProps = { request: Request; onRequestRestart: (previewId: string) => Promise<void>; visible?: boolean };
 export type StorageSettingsDraft = { config?: Config; advanced?: boolean };
 const labels: Record<Kind, string> = { state: '管理数据', webview: '界面缓存', recovery: '更新恢复材料', receipts: '上传恢复记录', temp: '临时工作目录', newSkill: '新下载 Skill', export: '导出 ZIP' };
 const sources: Record<string, string> = { commandLine: '启动参数', environment: '环境变量', legacySidecar: '启动路径文件', bootstrap: '保存位置配置', override: '单独指定', applicationDefault: '程序默认', fixture: '独立测试目录' };
 function size(bytes: number) { return bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KB` : bytes < 1073741824 ? `${(bytes / 1048576).toFixed(1)} MB` : `${(bytes / 1073741824).toFixed(2)} GB`; }
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 
-export function StorageSettings({ request: suppliedRequest, onRequestRestart, initialDraft, onDraftChange }: StorageSettingsProps & { initialDraft?: StorageSettingsDraft; onDraftChange?: (draft: StorageSettingsDraft) => void }) {
+export function StorageSettings({ request: suppliedRequest, onRequestRestart, initialDraft, onDraftChange, visible = true }: StorageSettingsProps & { initialDraft?: StorageSettingsDraft; onDraftChange?: (draft: StorageSettingsDraft) => void }) {
+  const visibleRef = useRef(visible); visibleRef.current = visible;
+  const refreshPending = useRef(false);
   const requestRef = useRef(suppliedRequest); requestRef.current = suppliedRequest;
   const request = useCallback<Request>((action, args) => requestRef.current(action, args), []);
   const [storage, setStorage] = useState<Storage | null>(null);
@@ -36,7 +38,19 @@ export function StorageSettings({ request: suppliedRequest, onRequestRestart, in
     if (replaceDraft) setConfig(result.storage.config);
   }, [request]);
   useEffect(() => { let alive = true; void request<{ storage: Storage }>('storage_get').then(result => { if (alive) { setStorage(result.storage); setConfig(draftRef.current?.config || result.storage.config); } }).catch(cause => { if (alive) setError(errorText(cause)); }); return () => { alive = false; }; }, [request]);
-  useEffect(() => { let unlisten: (() => void) | undefined; let stopped = false; void listen('state-changed', () => { void refresh(false).catch(() => undefined); }).then(stop => { if (stopped) stop(); else unlisten = stop; }).catch(() => undefined); return () => { stopped = true; unlisten?.(); }; }, [refresh]);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined; let stopped = false;
+    void listen('state-changed', () => {
+      if (!visibleRef.current) { refreshPending.current = true; return; }
+      void refresh(false).catch(cause => setError(errorText(cause)));
+    }).then(stop => { if (stopped) stop(); else unlisten = stop; }).catch(() => undefined);
+    return () => { stopped = true; unlisten?.(); };
+  }, [refresh]);
+  useEffect(() => {
+    if (!visible || !refreshPending.current) return;
+    refreshPending.current = false;
+    void refresh(false).catch(cause => setError(errorText(cause)));
+  }, [visible, refresh]);
   const update = (next: Config) => { setConfig(next); setPreview(null); setMessage(''); setError(''); };
   async function choose(kind?: Kind) {
     if (!config) return;
@@ -72,7 +86,7 @@ export function StorageSettings({ request: suppliedRequest, onRequestRestart, in
   const renderPath = (kind: Kind) => <div className="storage-path" key={kind}>
           <div className="storage-path-title"><strong>{labels[kind]}</strong><span>{storage.paths[kind].restartRequired ? '更改后重启' : '立即应用'}</span></div>
           <div className="storage-effective"><code>{storage.paths[kind].effective}</code><button className="storage-link" onClick={() => void request('storage_open_path', { kind }).catch(cause => setError(errorText(cause)))}>打开</button></div>
-          <small>当前来源：{sources[storage.paths[kind].source] || storage.paths[kind].source}{storage.paths[kind].locked ? ' · 已锁定' : ''}{statistics?.rows.find(row => row.kind === kind) ? ` · ${size(statistics.rows.find(row => row.kind === kind)!.bytes)} · ${statistics.rows.find(row => row.kind === kind)!.files} 个文件` : ''}</small>
+          <small className="storage-path-meta"><span>当前来源：{sources[storage.paths[kind].source] || storage.paths[kind].source}{storage.paths[kind].locked ? ' · 已锁定' : ''}</span>{statistics?.rows.find(row => row.kind === kind) && <span className="storage-path-stat">{size(statistics.rows.find(row => row.kind === kind)!.bytes)} · {statistics.rows.find(row => row.kind === kind)!.files} 个文件</span>}</small>
           {advanced && <div className="storage-input-row"><input aria-label={`${labels[kind]}自定义目录`} placeholder="留空跟随根目录" value={config.overrides[kind] || ''} readOnly={storage.paths[kind].locked} onChange={event => { const overrides = { ...config.overrides }; if (event.target.value) overrides[kind] = event.target.value; else delete overrides[kind]; update({ ...config, overrides }); }} /><button className="button secondary" disabled={storage.paths[kind].locked || !!busy} onClick={() => void choose(kind)}>选择</button></div>}
           {statistics?.rows.find(row => row.kind === kind)?.error && <small className="storage-error">统计未完成：{statistics.rows.find(row => row.kind === kind)?.error}</small>}
         </div>;

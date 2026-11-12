@@ -1,21 +1,16 @@
 name: Prepare Windows release assets
 on:
-  push:
-    branches: [fix/v0.2.8-runtime-ui]
   workflow_dispatch:
     inputs:
       candidate_run_id:
         description: Successful Windows candidate run
         required: true
-        default: '40306926235'
       candidate_artifact:
         description: Exact verified candidate artifact name
         required: true
-        default: Skill_Manager_v0.2.10_windows_x64_candidate_caa94532aa9e8e57f284adc7a3de4a49dd92e3d7
       executable_sha256:
         description: Independently verified candidate executable SHA256
         required: true
-        default: b8449fd56195ff0005e271f52fbf4bed096d40d4788228a5b0f3f0728b2771ad
 permissions:
   contents: read
   actions: read
@@ -45,21 +40,21 @@ jobs:
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || '40306926235' }}
-          CANDIDATE_ARTIFACT: ${{ inputs.candidate_artifact || 'Skill_Manager_v0.2.10_windows_x64_candidate_caa94532aa9e8e57f284adc7a3de4a49dd92e3d7' }}
-          EXPECTED_EXECUTABLE_SHA256: ${{ inputs.executable_sha256 || 'b8449fd56195ff0005e271f52fbf4bed096d40d4788228a5b0f3f0728b2771ad' }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_ARTIFACT: ${{ inputs.candidate_artifact }}
+          EXPECTED_EXECUTABLE_SHA256: ${{ inputs.executable_sha256 }}
         run: ./scripts/prepare-release.ps1 -CandidateRunId $env:CANDIDATE_RUN_ID -CandidateArtifact $env:CANDIDATE_ARTIFACT -ExpectedExecutableSha256 $env:EXPECTED_EXECUTABLE_SHA256
       - name: Upload reviewable release assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Skill_Manager_v${{ steps.release.outputs.version }}_release_assets_${{ github.sha }}
+          name: Agent_Resource_Manager_v${{ steps.release.outputs.version }}_release_assets_${{ github.sha }}
           path: outputs/release-assets/
           if-no-files-found: error
           retention-days: 14
       - name: Upload packaging verification
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Skill_Manager_release_verification_${{ github.sha }}
+          name: Agent_Resource_Manager_release_verification_${{ github.sha }}
           path: outputs/release-verification/
           if-no-files-found: error
           retention-days: 14

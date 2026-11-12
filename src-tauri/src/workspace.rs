@@ -104,8 +104,42 @@ struct Transfer {
     target: String,
     created: Instant,
 }
+#[derive(Clone, Debug, PartialEq)]
+enum ClosePurpose {
+    Windows,
+    Quit,
+    Migration(String),
+}
+impl ClosePurpose {
+    fn from_request(request: &Value) -> Result<Self, String> {
+        let purpose = match request["mode"].as_str().unwrap_or("windows") {
+            "windows" => Self::Windows,
+            "quit" => Self::Quit,
+            "migration" => Self::Migration(identifier(request, "storagePreviewId")?),
+            _ => return Err("未知关闭方式".into()),
+        };
+        if !matches!(purpose, Self::Windows) && request["all"] != true {
+            return Err("完全退出或存储迁移必须协调全部窗口".into());
+        }
+        if !matches!(purpose, Self::Migration(_)) && request.get("storagePreviewId").is_some() {
+            return Err("存储迁移必须在关闭前明确选择".into());
+        }
+        Ok(purpose)
+    }
+    fn mode(&self) -> &'static str {
+        match self {
+            Self::Windows => "windows",
+            Self::Quit => "quit",
+            Self::Migration(_) => "migration",
+        }
+    }
+    fn stops_backend(&self) -> bool {
+        !matches!(self, Self::Windows)
+    }
+}
 struct CloseIntent {
     id: String,
+    purpose: ClosePurpose,
     labels: BTreeSet<String>,
     acknowledgements: BTreeSet<String>,
     error: Option<String>,
@@ -188,6 +222,12 @@ fn pane(value: &Value, label: &str, restored: bool) -> Result<Value, String> {
             result["state"][key] = json!(text.chars().take(1024).collect::<String>());
         }
     }
+    if let Some(revision) = value["state"]["focusRevision"]
+        .as_u64()
+        .filter(|revision| *revision > 0 && *revision <= 9_007_199_254_740_991)
+    {
+        result["state"]["focusRevision"] = json!(revision);
+    }
     if let Some(n) = value["state"]["scrollTop"]
         .as_f64()
         .filter(|n| n.is_finite() && *n >= 0.0 && *n <= 10_000_000.0)
@@ -220,27 +260,32 @@ fn pane(value: &Value, label: &str, restored: bool) -> Result<Value, String> {
     }
     Ok(result)
 }
-fn focus_navigation(pane: &mut Value, request: &Value) {
+fn focus_navigation(pane: &mut Value, request: &Value, revision: u64) {
     if let Some(section) = request["section"]
         .as_str()
         .filter(|section| matches!(*section, "docs" | "files" | "source"))
     {
         pane["state"]["section"] = json!(section);
+        pane["state"]["focusRevision"] = json!(revision);
     }
     if pane["kind"] != "home" {
         return;
     }
-    if let Some(view) = request["view"]
-        .as_str()
-        .filter(|view| matches!(*view, "skills" | "changes" | "clients" | "settings"))
-    {
+    if let Some(view) = request["view"].as_str().filter(|view| {
+        matches!(
+            *view,
+            "dashboard" | "resources" | "skills" | "tools" | "changes" | "clients" | "settings"
+        )
+    }) {
         pane["state"]["view"] = json!(view);
+        pane["state"]["focusRevision"] = json!(revision);
     }
     if let Some(client) = request["clientId"]
         .as_str()
         .filter(|client| matches!(*client, "codex" | "claude" | "cursor"))
     {
         pane["state"]["clientId"] = json!(client);
+        pane["state"]["focusRevision"] = json!(revision);
     }
 }
 fn bounds(value: &Value) -> Option<Value> {
@@ -662,7 +707,7 @@ impl Registry {
                 && !close.acknowledgements.contains(label)
                 && close.error.is_none())
             .then(|| {
-                json!({"closeId":close.id,"round":close.round,"preserveRuntime":self.close_preserves_runtime})
+                json!({"closeId":close.id,"round":close.round,"mode":close.purpose.mode(),"preserveRuntime":self.close_preserves_runtime})
             })
         });
         let closing = self.closing_windows.contains(label)
@@ -670,7 +715,7 @@ impl Registry {
                 .close
                 .as_ref()
                 .is_some_and(|close| close.labels.contains(label));
-        json!({"windowLabel":label,"workspace":layout,"nativeCloseRequested":self.pending_native_close.contains(label),"closing":closing,"ownedCloseId":self.close_owners.get(label),"closeRequest":close_request})
+        json!({"windowLabel":label,"workspace":layout,"nativeCloseRequested":self.pending_native_close.contains(label),"closing":closing,"closingMode":self.close.as_ref().filter(|close|close.labels.contains(label)).map(|close|close.purpose.mode()),"ownedCloseId":self.close_owners.get(label),"closeRequest":close_request})
     }
     fn native_close_requested(&mut self, label: &str) -> (bool, bool) {
         if !self.live.contains(label) || self.window(label).is_err() {
@@ -831,7 +876,7 @@ impl WorkspaceSystem {
     ) -> Result<(), String> {
         let mut config = self.window_config.clone();
         config.label = label.to_owned();
-        config.title = "Skill Manager".into();
+        config.title = "Agent Resource Manager".into();
         config.url = tauri::WebviewUrl::App("index.html".into());
         config.visible = true;
         config.create = true;
@@ -895,6 +940,25 @@ impl WorkspaceSystem {
         }
         Ok(())
     }
+    pub(crate) fn show_windows(&self, app: &tauri::AppHandle) -> Result<(), String> {
+        {
+            let mut registry = self.registry.lock().map_err(|_| "Workspace lock failed")?;
+            if registry.close.is_some() || !registry.closing_windows.is_empty() {
+                return Err("界面正在保存并关闭，请在完成后重新打开".into());
+            }
+            registry.pending_native_close.clear();
+        }
+        self.restore_windows(app)?;
+        let windows = app.webview_windows();
+        for window in windows.values() {
+            window.show().map_err(|error| error.to_string())?;
+        }
+        if let Some(window) = windows.get("main").or_else(|| windows.values().next()) {
+            window.unminimize().map_err(|error| error.to_string())?;
+            window.set_focus().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
     pub(crate) fn destroyed(&self, app: &tauri::AppHandle, label: &str) {
         let mut export_events = Vec::new();
         if let Ok(mut r) = self.registry.lock() {
@@ -912,6 +976,14 @@ impl WorkspaceSystem {
             }
             r.transfers
                 .retain(|_, t| t.source != label && t.target != label);
+            if r.live.is_empty()
+                && r.close
+                    .as_ref()
+                    .is_some_and(|close| close.purpose == ClosePurpose::Windows)
+            {
+                // The UI has gone, but the service, tasks and in-memory drafts remain alive.
+                r.clear_close();
+            }
             export_events = r.prune_export_selections();
         }
         for event in export_events {
@@ -930,7 +1002,10 @@ impl WorkspaceSystem {
         }
         prevent
     }
-    fn schedule(self: &Arc<Self>) {
+    pub(crate) fn schedule(self: &Arc<Self>) {
+        if self.service.basic_mode() {
+            return;
+        }
         if !self.started.swap(true, Ordering::SeqCst) {
             crate::checks::start(&self.service);
         }
@@ -958,6 +1033,13 @@ impl WorkspaceSystem {
     }
     fn wait_close_acknowledgements(&self, id: &str, round: &str) -> Result<Vec<String>, String> {
         self.wait_close_until(id, round, Duration::from_secs(30))
+    }
+    fn prepare_backend_close(&self, purpose: &ClosePurpose) -> Result<(), String> {
+        if purpose.stops_backend() {
+            self.service
+                .execute(json!({"action":"prepare_close"}), crate::dispatch)?;
+        }
+        Ok(())
     }
     fn begin_final_close(
         &self,
@@ -1033,6 +1115,9 @@ impl WorkspaceSystem {
         label: &str,
         request: &Value,
     ) -> Result<Option<Value>, String> {
+        if self.service.basic_mode() && request["storagePreviewId"].is_string() {
+            return Err("基本模式不执行存储迁移；窗口保持打开".into());
+        }
         let action = request["action"].as_str().unwrap_or_default();
         if !action.starts_with("workspace_") {
             return Ok(None);
@@ -1126,25 +1211,30 @@ impl WorkspaceSystem {
         }
         if action == "workspace_finish_close" {
             let close_id = identifier(request, "closeId")?;
-            if self
-                .registry
-                .lock()
-                .map_err(|_| "Workspace lock failed")?
-                .close_owners
-                .get(label)
-                != Some(&close_id)
-            {
-                return Err("当前窗口不拥有此关闭请求".into());
+            let purpose = {
+                let registry = self.registry.lock().map_err(|_| "Workspace lock failed")?;
+                if registry.close_owners.get(label) != Some(&close_id) {
+                    return Err("当前窗口不拥有此关闭请求".into());
+                }
+                registry
+                    .close
+                    .as_ref()
+                    .filter(|close| close.id == close_id)
+                    .ok_or("关闭请求已失效")?
+                    .purpose
+                    .clone()
+            };
+            if request.get("mode").is_some() || request.get("storagePreviewId").is_some() {
+                return Err("关闭方式和迁移预览已绑定，请重新发起关闭以更改".into());
             }
             let outcome = (|| -> Result<Vec<String>, String> {
                 self.wait_close_acknowledgements(&close_id, "initial")?;
-                self.service
-                    .execute(json!({"action":"prepare_close"}), crate::dispatch)?;
+                self.prepare_backend_close(&purpose)?;
                 self.begin_final_close(&close_id, |target| {
                     app.emit_to(
                         target,
                         "workspace-close-request",
-                        json!({"closeId":close_id,"round":"final","preserveRuntime":request["storagePreviewId"].is_string()}),
+                        json!({"closeId":close_id,"round":"final","mode":purpose.mode(),"preserveRuntime":true}),
                     )
                     .map_err(|error| error.to_string())
                 })?;
@@ -1157,7 +1247,10 @@ impl WorkspaceSystem {
                     return Err(error);
                 }
             };
-            let migration = request["storagePreviewId"].as_str();
+            let migration = match &purpose {
+                ClosePurpose::Migration(id) => Some(id.as_str()),
+                _ => None,
+            };
             if migration.is_some() {
                 self.migrating.store(true, Ordering::SeqCst);
             }
@@ -1166,7 +1259,14 @@ impl WorkspaceSystem {
                     if let Err(error) = window.destroy() {
                         self.cancel_close(app, &close_id);
                         self.migrating.store(false, Ordering::SeqCst);
-                        return Err(error.to_string());
+                        let restored = self.restore_windows(app);
+                        return Err(format!(
+                            "界面未全部关闭：{error}{}",
+                            restored
+                                .err()
+                                .map(|e| format!("；已关闭窗口未能恢复：{e}"))
+                                .unwrap_or_default()
+                        ));
                     }
                 }
             }
@@ -1197,7 +1297,12 @@ impl WorkspaceSystem {
                 app.request_restart();
                 return Ok(Some(json!({"ready":true,"restarting":true})));
             }
-            return Ok(Some(json!({"ready":true})));
+            if purpose == ClosePurpose::Quit {
+                app.exit(0);
+            }
+            return Ok(Some(
+                json!({"ready":true,"background":purpose == ClosePurpose::Windows}),
+            ));
         }
         let mut r = self.registry.lock().map_err(|_| "Workspace lock failed")?;
         r.window(label)?;
@@ -1224,7 +1329,7 @@ impl WorkspaceSystem {
                     (r.read_export_selection(label, request)?, None)
                 }
                 "workspace_update_export_selection" => r.update_export_selection(label, request)?,
-                _ if self.migrating.load(Ordering::SeqCst) => {
+                _ if self.migration_in_progress() => {
                     (json!({"released":false,"ignored":true}), None)
                 }
                 _ => r.release_export_selection(label, request)?,
@@ -1423,10 +1528,11 @@ impl WorkspaceSystem {
                 let section = request["section"]
                     .as_str()
                     .filter(|section| matches!(*section, "docs" | "files" | "source"));
+                let focus_revision = r.layout.revision + 1;
                 let target = r.window_mut(&owner)?;
                 activate(target, &id);
                 if let Some(pane) = target.panes.iter_mut().find(|pane| pane["id"] == id) {
-                    focus_navigation(pane, request);
+                    focus_navigation(pane, request, focus_revision);
                 }
                 if let Err(error) = self.persist(&mut r) {
                     r.layout = before;
@@ -1495,6 +1601,7 @@ impl WorkspaceSystem {
                 {
                     return Err("页面正在转移，请等待目标窗口接收后再关闭".into());
                 }
+                let purpose = ClosePurpose::from_request(request)?;
                 let all = request["all"] == true;
                 if r.closing_windows.contains(label) {
                     return Err("当前窗口已开始关闭".into());
@@ -1502,7 +1609,7 @@ impl WorkspaceSystem {
                 let (final_close, labels) = r.close_labels(label, all);
                 r.closing_windows.insert(label.to_owned());
                 r.pending_native_close.remove(label);
-                r.close_preserves_runtime = request["storageMigration"] == true;
+                r.close_preserves_runtime = true;
                 let id = uuid::Uuid::new_v4().to_string();
                 r.close_owners.insert(label.to_owned(), id.clone());
                 let pending: Vec<_> = labels
@@ -1513,6 +1620,7 @@ impl WorkspaceSystem {
                 if final_close {
                     r.close = Some(CloseIntent {
                         id: id.clone(),
+                        purpose: purpose.clone(),
                         labels: labels.clone(),
                         acknowledgements: BTreeSet::from([label.to_owned()]),
                         error: None,
@@ -1523,7 +1631,7 @@ impl WorkspaceSystem {
                         let _ = app.emit_to(
                             target.as_str(),
                             "workspace-close-request",
-                            json!({"closeId":id,"round":"initial","preserveRuntime":request["storageMigration"]==true}),
+                            json!({"closeId":id,"round":"initial","mode":purpose.mode(),"preserveRuntime":true}),
                         );
                     }
                 }
@@ -1604,6 +1712,38 @@ impl WorkspaceSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn close_purpose_requires_an_explicit_global_quit_or_bound_migration() {
+        assert_eq!(
+            ClosePurpose::from_request(&json!({})).unwrap(),
+            ClosePurpose::Windows
+        );
+        assert_eq!(
+            ClosePurpose::from_request(&json!({"all":true})).unwrap(),
+            ClosePurpose::Windows
+        );
+        assert!(!ClosePurpose::Windows.stops_backend());
+        assert_eq!(
+            ClosePurpose::from_request(&json!({"all":true,"mode":"quit"})).unwrap(),
+            ClosePurpose::Quit
+        );
+        assert_eq!(
+            ClosePurpose::from_request(
+                &json!({"all":true,"mode":"migration","storagePreviewId":"fixed-plan"})
+            )
+            .unwrap(),
+            ClosePurpose::Migration("fixed-plan".into())
+        );
+        for request in [
+            json!({"mode":"quit"}),
+            json!({"mode":"migration","all":true}),
+            json!({"mode":"windows","storagePreviewId":"plan"}),
+            json!({"mode":"quit","all":true,"storagePreviewId":"plan"}),
+            json!({"mode":"unknown","all":true}),
+        ] {
+            assert!(ClosePurpose::from_request(&request).is_err());
+        }
+    }
     fn export_registry() -> Registry {
         let mut r = Registry::new(None).unwrap();
         r.window_mut("main").unwrap().panes.extend([
@@ -1653,6 +1793,7 @@ mod tests {
         r.close_owners.insert("main".into(), "close-main".into());
         r.close = Some(CloseIntent {
             id: "close-main".into(),
+            purpose: ClosePurpose::Windows,
             labels: r.live.clone(),
             acknowledgements: BTreeSet::new(),
             error: None,
@@ -1707,6 +1848,7 @@ mod tests {
         r.closing_windows.clear();
         r.close = Some(CloseIntent {
             id: "another-close".into(),
+            purpose: ClosePurpose::Windows,
             labels: BTreeSet::from(["workspace-child".into()]),
             acknowledgements: BTreeSet::new(),
             error: None,
@@ -1723,6 +1865,7 @@ mod tests {
         r.close_preserves_runtime = true;
         r.close = Some(CloseIntent {
             id: "close-snapshot".into(),
+            purpose: ClosePurpose::Windows,
             labels: BTreeSet::from(["main".into(), "workspace-child".into()]),
             acknowledgements: BTreeSet::from(["main".into()]),
             error: None,
@@ -1998,6 +2141,7 @@ mod tests {
         );
         r.close = Some(CloseIntent {
             id: "migration-close".into(),
+            purpose: ClosePurpose::Windows,
             labels: BTreeSet::from(["main".into()]),
             acknowledgements: BTreeSet::new(),
             error: None,
@@ -2146,6 +2290,51 @@ mod tests {
         (dir, workspace)
     }
     #[test]
+    fn closing_only_windows_keeps_the_service_available_but_quit_closes_admission() {
+        let (_dir, workspace) = fixture();
+        workspace
+            .prepare_backend_close(&ClosePurpose::Windows)
+            .unwrap();
+        assert!(workspace
+            .service
+            .execute(json!({"action":"resource_list"}), crate::dispatch)
+            .is_ok());
+        workspace
+            .prepare_backend_close(&ClosePurpose::Quit)
+            .unwrap();
+        assert!(workspace
+            .service
+            .execute(json!({"action":"resource_list"}), crate::dispatch)
+            .unwrap_err()
+            .contains("关闭"));
+    }
+    #[test]
+    fn basic_mode_workspace_does_not_start_maintenance_or_persist_session_layout() {
+        let (dir, normal) = fixture();
+        drop(normal);
+        let database = dir.path().join("manager.sqlite3");
+        let original = std::fs::read(&database).unwrap();
+        let manager = crate::model::Manager::with_storage_mode(
+            crate::storage::Storage::isolated(dir.path().to_owned()),
+            true,
+        )
+        .unwrap();
+        let service = TaskSystem::new(manager).unwrap();
+        let workspace =
+            WorkspaceSystem::new(service, dir.path().into(), Default::default()).unwrap();
+        workspace.schedule();
+        workspace.schedule();
+        assert!(!workspace.started.load(Ordering::SeqCst));
+        {
+            let mut registry = workspace.registry.lock().unwrap();
+            let revision = registry.layout.revision;
+            workspace.persist(&mut registry).unwrap();
+            assert_eq!(registry.layout.revision, revision + 1);
+        }
+        drop(workspace);
+        assert_eq!(std::fs::read(&database).unwrap(), original);
+    }
+    #[test]
     fn injected_task_window_comes_from_native_caller_and_rejects_other_pane_owner() {
         let (_dir, workspace) = fixture();
         let mut request = json!({"action":"start_task","request":{"action":"get_state"},"origin":{"paneId":"home","windowLabel":"spoofed"}});
@@ -2162,6 +2351,7 @@ mod tests {
             let mut r = workspace.registry.lock().unwrap();
             r.close = Some(CloseIntent {
                 id: "close-1".into(),
+                purpose: ClosePurpose::Windows,
                 labels: BTreeSet::from(["main".into(), "workspace-child".into()]),
                 acknowledgements: BTreeSet::from(["main".into(), "workspace-child".into()]),
                 error: None,
@@ -2205,6 +2395,7 @@ mod tests {
             let mut r = workspace.registry.lock().unwrap();
             r.close = Some(CloseIntent {
                 id: "close-final-delivery".into(),
+                purpose: ClosePurpose::Windows,
                 labels: BTreeSet::from(["main".into(), "workspace-child".into()]),
                 acknowledgements: BTreeSet::from(["main".into(), "workspace-child".into()]),
                 error: None,
@@ -2422,31 +2613,49 @@ mod tests {
         focus_navigation(
             &mut target,
             &json!({"view":"clients","clientId":"cursor","section":"files","runtime":{"request":"never"},"scrollTop":900}),
+            10,
         );
         assert_eq!(
             target["state"],
-            json!({"view":"clients","clientId":"cursor","section":"files","scrollTop":77.0})
+            json!({"view":"clients","clientId":"cursor","section":"files","scrollTop":77.0,"focusRevision":10})
         );
-        for view in ["skills", "changes", "clients", "settings"] {
-            focus_navigation(&mut target, &json!({"view":view}));
+        for view in [
+            "dashboard",
+            "resources",
+            "skills",
+            "tools",
+            "changes",
+            "clients",
+            "settings",
+        ] {
+            focus_navigation(&mut target, &json!({"view":view}), 11);
             assert_eq!(target["state"]["view"], view);
+            assert_eq!(
+                pane(&target, "workspace-child", true).unwrap()["state"]["view"],
+                view
+            );
         }
         for client in ["codex", "claude", "cursor"] {
-            focus_navigation(&mut target, &json!({"clientId":client}));
+            focus_navigation(&mut target, &json!({"clientId":client}), 12);
             assert_eq!(target["state"]["clientId"], client);
         }
         let before = target.clone();
         focus_navigation(
             &mut target,
             &json!({"view":"execute","clientId":"other","section":"apply"}),
+            13,
         );
         assert_eq!(target, before);
         let mut detail = json!({"id":"detail-focus","kind":"detail","state":{"section":"docs"}});
         focus_navigation(
             &mut detail,
             &json!({"view":"clients","clientId":"cursor","section":"source"}),
+            14,
         );
-        assert_eq!(detail["state"], json!({"section":"source"}));
+        assert_eq!(
+            detail["state"],
+            json!({"section":"source","focusRevision":14})
+        );
         let restored = pane(&target, "workspace-child", true).unwrap();
         assert_eq!(restored["state"], target["state"]);
     }

@@ -66,7 +66,7 @@ fn auto() -> String {
     "auto".into()
 }
 impl Settings {
-    fn from_value(value: &Value) -> Result<Self, String> {
+    pub(crate) fn from_value(value: &Value) -> Result<Self, String> {
         let mut settings: Self = if value.is_null() {
             Self {
                 mode: auto(),
@@ -188,6 +188,17 @@ fn transport() -> &'static Mutex<Transport> {
     static VALUE: OnceLock<Mutex<Transport>> = OnceLock::new();
     VALUE.get_or_init(|| Mutex::new(Transport::default()))
 }
+#[cfg(test)]
+pub(crate) fn test_configuration_guard() -> std::sync::MutexGuard<'static, ()> {
+    static CONFIGURATION: Mutex<()> = Mutex::new(());
+    let guard = CONFIGURATION
+        .lock()
+        .expect("test network configuration lock");
+    // Stabilize the initial read generation before full-snapshot comparisons.
+    // This separate lock never holds the transport lock across a snapshot read.
+    configure(&json!({})).expect("initialize default test network configuration");
+    guard
+}
 pub fn configure(settings: &Value) -> Result<(), String> {
     let desired = Settings::from_value(&settings["network"])?;
     let mut transport = transport().lock().map_err(|_| "网络设置锁不可用")?;
@@ -251,16 +262,54 @@ struct Gate {
     state: Mutex<GateState>,
     changed: Condvar,
 }
-fn gate() -> &'static Gate {
-    static VALUE: OnceLock<Gate> = OnceLock::new();
-    VALUE.get_or_init(Gate::default)
+fn gate() -> Arc<Gate> {
+    #[cfg(test)]
+    if let Some(gate) = TEST_GATE.with(|slot| slot.borrow().clone()) {
+        return gate;
+    }
+    static VALUE: OnceLock<Arc<Gate>> = OnceLock::new();
+    VALUE.get_or_init(|| Arc::new(Gate::default())).clone()
+}
+
+// Each synthetic HTTP service owns its real scheduling/limit state. Threads
+// using the same endpoint share it, while another fixture cannot pause them.
+#[cfg(test)]
+thread_local! {
+    static TEST_GATE: RefCell<Option<Arc<Gate>>> = const { RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) struct TestGateGuard {
+    previous: Option<Arc<Gate>>,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+#[cfg(test)]
+impl Drop for TestGateGuard {
+    fn drop(&mut self) {
+        TEST_GATE.with(|slot| *slot.borrow_mut() = self.previous.take());
+    }
+}
+#[cfg(test)]
+pub(crate) fn test_gate_scope(endpoint: &str) -> TestGateGuard {
+    static GATES: OnceLock<Mutex<HashMap<String, Arc<Gate>>>> = OnceLock::new();
+    let selected = GATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .entry(endpoint.to_owned())
+        .or_insert_with(|| Arc::new(Gate::default()))
+        .clone();
+    TestGateGuard {
+        previous: TEST_GATE.with(|slot| slot.replace(Some(selected))),
+        _thread_bound: std::marker::PhantomData,
+    }
 }
 pub struct Permit {
     raw: bool,
+    gate: Arc<Gate>,
 }
 impl Drop for Permit {
     fn drop(&mut self) {
-        let gate = gate();
+        let gate = &self.gate;
         if let Ok(mut state) = gate.state.lock() {
             if self.raw {
                 state.raw_active -= 1;
@@ -320,7 +369,10 @@ pub fn acquire(raw: bool, cancellable: bool) -> Result<Permit, String> {
                     state.foreground_api -= 1;
                 }
             }
-            return Ok(Permit { raw });
+            return Ok(Permit {
+                raw,
+                gate: gate.clone(),
+            });
         }
         if paused {
             // Return a visible deferred result; never occupy the worker for a minute.
@@ -337,10 +389,11 @@ pub fn acquire(raw: bool, cancellable: bool) -> Result<Permit, String> {
     }
 }
 pub fn pause_api(duration: Duration) {
-    if let Ok(mut state) = gate().state.lock() {
+    let gate = gate();
+    if let Ok(mut state) = gate.state.lock() {
         state.paused_until = Some(Instant::now() + duration);
-        gate().changed.notify_all();
-    }
+        gate.changed.notify_all();
+    };
 }
 
 #[derive(Clone)]
@@ -374,6 +427,14 @@ impl Default for Cache {
 fn cache() -> &'static Cache {
     static VALUE: OnceLock<Cache> = OnceLock::new();
     VALUE.get_or_init(Cache::default)
+}
+/// Aggregate counters only: never expose cache keys, URLs or cached contents.
+pub(crate) fn cache_stats() -> Result<Value, String> {
+    let cache = cache();
+    let memory = cache.memory.lock().map_err(|_| "内容缓存状态暂不可读")?;
+    Ok(
+        serde_json::json!({"bytes":memory.bytes,"entries":memory.entries.len(),"inFlight":memory.pending.len(),"limitBytes":cache.limit}),
+    )
 }
 pub fn clear_cache() {
     if let Ok(mut memory) = cache().memory.lock() {
@@ -610,6 +671,54 @@ pub fn handle(manager: &mut Manager, request: &Value) -> Result<Option<Value>, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    #[test]
+    fn cache_diagnostics_expose_only_bounded_aggregate_counts() {
+        let value = cache_stats().unwrap();
+        let fields: BTreeSet<_> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            BTreeSet::from(["bytes", "entries", "inFlight", "limitBytes"])
+        );
+        assert_eq!(value["limitBytes"], 64 * 1024 * 1024);
+        assert!(value["bytes"].as_u64().unwrap() <= value["limitBytes"].as_u64().unwrap());
+    }
+    #[test]
+    fn synthetic_endpoints_isolate_limits_but_share_them_across_worker_threads() {
+        let first = format!("synthetic-rate:{}", uuid::Uuid::new_v4());
+        let second = format!("synthetic-rate:{}", uuid::Uuid::new_v4());
+        let original = gate();
+        {
+            let _first = test_gate_scope(&first);
+            pause_api(Duration::from_secs(60));
+            assert!(acquire(false, true).is_err());
+            let same_endpoint = first.clone();
+            assert!(std::thread::spawn(move || {
+                let _same = test_gate_scope(&same_endpoint);
+                acquire(false, true).is_err()
+            })
+            .join()
+            .unwrap());
+            // A permit may outlive the nested scope; its drop must release the
+            // gate from which it was acquired, not whichever scope is current.
+            let permit = {
+                let _second = test_gate_scope(&second);
+                acquire(false, true).unwrap()
+            };
+            drop(permit);
+            assert!(acquire(false, true).is_err());
+            let _second = test_gate_scope(&second);
+            drop(acquire(false, true).unwrap());
+        }
+        assert!(Arc::ptr_eq(&original, &gate()));
+        let _again = test_gate_scope(&first);
+        assert!(acquire(false, true).is_err());
+    }
     #[test]
     fn v025_read_generation_only_reports_the_transport_epoch() {
         let transport = Mutex::new(Transport::default());
@@ -665,6 +774,104 @@ mod tests {
         ] {
             assert!(Settings::from_value(&json!({"mode":"manual","proxyUrl":address})).is_ok());
         }
+    }
+    #[test]
+    fn production_cache_limit_survives_full_size_pressure_and_eviction() {
+        let cache = Cache::default();
+        let chunk = 4 * 1024 * 1024;
+        assert_eq!(cache.limit, 64 * 1024 * 1024);
+        for index in 0..64 {
+            let body = cached_with(
+                &cache,
+                &format!("pressure-{index}"),
+                CachePolicy::Immutable,
+                |_| {
+                    Ok(Loaded {
+                        body: vec![index as u8; chunk],
+                        etag: None,
+                        not_modified: false,
+                    })
+                },
+            )
+            .unwrap();
+            assert_eq!(body.len(), chunk);
+            assert!(body.iter().all(|byte| *byte == index as u8));
+            let memory = cache.memory.lock().unwrap();
+            assert_eq!(memory.bytes, ((index + 1) * chunk).min(cache.limit));
+            assert_eq!(
+                memory.bytes,
+                memory
+                    .entries
+                    .values()
+                    .map(|entry| entry.body.len())
+                    .sum::<usize>()
+            );
+            assert!(memory.pending.is_empty());
+        }
+        // Touch the oldest survivor, then verify a new entry evicts its neighbour.
+        cached_with(&cache, "pressure-48", CachePolicy::Immutable, |_| {
+            panic!("resident entry reloaded")
+        })
+        .unwrap();
+        cached_with(&cache, "extra", CachePolicy::Immutable, |_| {
+            Ok(Loaded {
+                body: vec![99; chunk],
+                etag: None,
+                not_modified: false,
+            })
+        })
+        .unwrap();
+        let memory = cache.memory.lock().unwrap();
+        assert_eq!(memory.entries.len(), 16);
+        assert_eq!(memory.bytes, cache.limit);
+        assert!(memory.entries.contains_key("pressure-48"));
+        assert!(!memory.entries.contains_key("pressure-49"));
+        assert!(!memory.entries.contains_key("pressure-0"));
+    }
+
+    #[test]
+    fn production_cache_limit_holds_after_concurrent_full_size_loads() {
+        let cache = std::sync::Arc::new(Cache::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let workers = (0..4)
+            .map(|worker| {
+                let cache = cache.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for sequence in 0..8 {
+                        let key = format!("worker-{worker}-{sequence}");
+                        let body = cached_with(&cache, &key, CachePolicy::Immutable, |_| {
+                            Ok(Loaded {
+                                body: vec![worker; 4 * 1024 * 1024],
+                                etag: None,
+                                not_modified: false,
+                            })
+                        })
+                        .unwrap();
+                        assert_eq!(body.len(), 4 * 1024 * 1024);
+                        assert!(body.iter().all(|byte| *byte == worker));
+                        let memory = cache.memory.lock().unwrap();
+                        assert!(memory.bytes <= cache.limit);
+                        assert_eq!(
+                            memory.bytes,
+                            memory
+                                .entries
+                                .values()
+                                .map(|entry| entry.body.len())
+                                .sum::<usize>()
+                        );
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let memory = cache.memory.lock().unwrap();
+        assert_eq!(memory.bytes, cache.limit);
+        assert_eq!(memory.entries.len(), 16);
+        assert!(memory.pending.is_empty());
     }
     #[test]
     fn memory_cache_revalidates_and_keeps_fixed_bytes_without_disk_files() {

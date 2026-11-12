@@ -1,0 +1,7 @@
+.diagnostic-summary { display: grid; gap: .65rem; min-width: 0; }
+.diagnostic-summary p { margin: 0; }
+.diagnostic-summary .section-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.diagnostic-summary textarea { width: 100%; min-width: 0; resize: vertical; line-height: 1.6; }
+.operation-problems { display: grid; gap: .5rem; }
+.operation-problems summary { cursor: pointer; padding-block: .35rem; }
+.operation-problems p { margin: .3rem 0; }

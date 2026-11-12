@@ -1,4 +1,5 @@
 .operation-history { min-width: 0; padding: 1.4rem; }
+.operation-history-task-error { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; }
 .operation-history-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 .operation-history-heading h1 { margin: 0; font-size: 1.4rem; }
 .operation-history-heading p { margin: .45rem 0 0; }

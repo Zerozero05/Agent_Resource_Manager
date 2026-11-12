@@ -21,7 +21,7 @@ Skill Manager 是面向Windows的本地与GitHub Agent Skills管理器：每个S
 | `USER_GUIDE.md` | 使用与故障处理指南。 |
 | `RELEASE_NOTES.md` | 本发行说明。 |
 
-[发行页与附件](https://github.com/Zerozero05/Skill_Manager/releases/tag/v0.2.11) · [公开仓库](https://github.com/Zerozero05/Skill_Manager)
+[发行页与附件](https://github.com/Zerozero05/Agent_Resource_Manager/releases/tag/v0.2.11) · [公开仓库](https://github.com/Zerozero05/Agent_Resource_Manager)
 
 便携包与安装器使用同一份已验EXE，程序SHA256为`1ca90747eca2ac3229762928d05036724229e910463c28be40925e9b2fb2092f`。需要现有Windows x64与Microsoft Edge WebView2 Runtime；附件不包含个人数据库、令牌、私人Skill或本机维护资料。
 
@@ -35,7 +35,7 @@ Skill Manager 是面向Windows的本地与GitHub Agent Skills管理器：每个S
 
 ## 验证与局限
 
-- [Windows CI run40380368432](https://github.com/Zerozero05/Skill_Manager/actions/runs/40380368432)通过183项前端、389项Rust、TypeScript/Vite、rustfmt、Clippy（警告视为错误）、Windows优化构建及候选打包。测试源码`10e4e2c25a54f9d8d78a94fa87b83742ef132dbd`与构建提交`fa585966f21a20db298ba3410c59209a85cec180`的源码树一致；后续仅定稿发行文档。
+- [Windows CI run40380368432](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/40380368432)通过183项前端、389项Rust、TypeScript/Vite、rustfmt、Clippy（警告视为错误）、Windows优化构建及候选打包。测试源码`10e4e2c25a54f9d8d78a94fa87b83742ef132dbd`与构建提交`fa585966f21a20db298ba3410c59209a85cec180`的源码树一致；后续仅定稿发行文档。
 - 原生Windows实测覆盖默认单项布局、直接检查、Ctrl+A、清空／退出、Esc、宽窄分栏和正常重启。最终单项检查约3.184秒、完整重复检查约1.383秒，均错误0；说明变化不再重复进入待办，真实本地修改继续保留。18个Skill、138文件、16连接及用户设置独立核验保持。
 - 打包仅复用已验EXE；便携ZIP、NSIS完整性、解包后的内部EXE及源码ZIP成员摘要分别核验，具体打包提交与结果见`SOURCE_MANIFEST.json`。安装向导未实际运行。
 - 耗时属于同机观测，不保证首次联网、VPN、其他电脑或所有场景速度。多条真实待办批量由组件回归覆盖，没有修改用户数据制造夹具。
@@ -43,4 +43,4 @@ Skill Manager 是面向Windows的本地与GitHub Agent Skills管理器：每个S
 
 ## 许可与来源
 
-项目自身尚未指定开源许可证，公开源码不等于授予MIT等额外许可。第三方许可随程序保留，见[第三方许可](https://github.com/Zerozero05/Skill_Manager/blob/v0.2.11/docs/THIRD_PARTY_NOTICES.txt)和[来源记录](https://github.com/Zerozero05/Skill_Manager/blob/v0.2.11/docs/SOURCES.md)。本版沿用既有组件与官方打包工具，没有新增第三方管理器代码。
+项目自身尚未指定开源许可证，公开源码不等于授予MIT等额外许可。第三方许可随程序保留，见[第三方许可](https://github.com/Zerozero05/Agent_Resource_Manager/blob/v0.2.11/docs/THIRD_PARTY_NOTICES.txt)和[来源记录](https://github.com/Zerozero05/Agent_Resource_Manager/blob/v0.2.11/docs/SOURCES.md)。本版沿用既有组件与官方打包工具，没有新增第三方管理器代码。

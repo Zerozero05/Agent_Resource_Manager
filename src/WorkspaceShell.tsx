@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
-import { Check, ChevronDown, ChevronRight, CircleAlert, CircleHelp, Columns2, CornerUpLeft, GripVertical, Home, ListTree, LoaderCircle, PanelTop, RotateCcw, SquareArrowOutUpRight, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, CircleAlert, CircleHelp, Columns2, CornerUpLeft, GripVertical, Home, ListTree, LoaderCircle, PanelLeftClose, PanelLeftOpen, PanelTop, RotateCcw, SquareArrowOutUpRight, X } from 'lucide-react';
 import { DEFAULT_SPLIT_RATIO, MIN_SPLIT_PANE_WIDTH, SPLIT_DIVIDER_WIDTH, markdownHeadingAnchor, nextPaneId, outlineId, paneAnchorIndex, paneAnchorScrollTop, paneScrollScale, paneTitle, splitRatioForPosition, splitViewForPanes, visibleWorkspacePaneIds, workspaceShortcut, type OutlineEntry, type PaneTaskBadge, type ScreenPoint, type SplitView, type WorkspacePane } from './workspace';
 import './workspace.css';
 
@@ -13,10 +13,12 @@ export type WorkspaceShellProps = {
   splitView?: SplitView; onSplitChange?: (splitView?: SplitView) => void;
   renderPane: (pane: WorkspacePane, active: boolean, visible: boolean) => ReactNode;
   onResetLayout?: () => void; onShowHelp?: () => void; shortcutsBlocked?: boolean; checkControl?: ReactNode;
+  sidebarExpanded?: boolean; onToggleSidebar?: () => void;
+  onSidebarHost?: (host: HTMLDivElement | null) => void;
 };
 
 /** A native window has one shell. Pages remain mounted when their tab is inactive. */
-export function WorkspaceShell({ panes, activePaneId, onActivate, onClose, onReorder, onDetach, onReturn, pendingTransfers, taskBadges, splitView, onSplitChange, renderPane, onResetLayout, onShowHelp, shortcutsBlocked = false, checkControl }: WorkspaceShellProps) {
+export function WorkspaceShell({ panes, activePaneId, onActivate, onClose, onReorder, onDetach, onReturn, pendingTransfers, taskBadges, splitView, onSplitChange, renderPane, onResetLayout, onShowHelp, shortcutsBlocked = false, checkControl, sidebarExpanded, onToggleSidebar, onSidebarHost }: WorkspaceShellProps) {
   const strip = useRef<HTMLDivElement>(null);
   const pages = useRef<HTMLDivElement>(null);
   const gesture = useRef<{ paneId: string; pointerId: number; startX: number; startY: number; moved: boolean; beforeId?: string; detach: boolean } | null>(null);
@@ -31,6 +33,7 @@ export function WorkspaceShell({ panes, activePaneId, onActivate, onClose, onReo
   const home = panes.find(pane => pane.kind === 'home');
   const splitCandidate = active?.kind !== 'home' ? active : [...panes].reverse().find(pane => pane.kind !== 'home');
   const helpId = useId();
+  const sidebarHostId = useId();
   useEffect(() => {
     const owner = pages.current; if (!owner) return;
     const guarded = new Map<HTMLElement, { value: string; priority: string; frame: number }>();
@@ -117,6 +120,7 @@ export function WorkspaceShell({ panes, activePaneId, onActivate, onClose, onReo
   };
   return <div className={`workspace-shell ${draftRatio !== undefined ? 'is-split-resizing' : ''}`}>
     <div className="workspace-bar">
+      {onToggleSidebar && <button className="icon-button workspace-sidebar-toggle" type="button" aria-label={sidebarExpanded ? '收起侧栏' : '展开侧栏'} title={sidebarExpanded ? '收起侧栏' : '展开侧栏'} aria-expanded={!!sidebarExpanded} aria-controls={sidebarHostId} disabled={shortcutsBlocked} onClick={onToggleSidebar}>{sidebarExpanded ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button>}
       <div className="workspace-tabs" role="tablist" aria-label="工作区标签" aria-describedby={helpId} ref={strip}>
         {panes.map(pane => { const pending = !!pendingTransfers?.has(pane.id); const badge = taskBadges?.get(pane.id); return <div key={pane.id} className={`workspace-tab ${pane.id === active?.id ? 'is-active' : ''} ${draggedId === pane.id ? 'is-dragging' : ''} ${dropId === pane.id ? 'is-drop-target' : ''}`} data-workspace-tab={pane.id} data-home={pane.kind === 'home'}>
           <button className="workspace-tab-select" type="button" role="tab" id={`tab-${encodeURIComponent(pane.id)}`} aria-selected={pane.id === active?.id} aria-controls={`panel-${encodeURIComponent(pane.id)}`} tabIndex={pane.id === active?.id ? 0 : -1} title={pending ? `${paneTitle(pane)} · 正在移动，完成前保留此页` : `${paneTitle(pane)}${pane.kind === 'home' ? '' : ' · 拖动排序，向外拖出为独立窗口'}`} onClick={() => { if (suppressClick.current) { suppressClick.current = false; return; } onActivate(pane.id); }} onPointerDown={event => pointerStart(event, pane)} onPointerMove={pointerMove} onPointerUp={event => finishDrag(event)} onPointerCancel={event => finishDrag(event, true)} onKeyDown={event => {
@@ -144,10 +148,10 @@ export function WorkspaceShell({ panes, activePaneId, onActivate, onClose, onReo
     </div>
     <span id={helpId} className="workspace-sr-only">Ctrl 加 Tab 切换，Ctrl 加 Shift 加 Tab 反向切换，Ctrl 加 W 关闭当前业务标签；拖出标签可单独打开窗口。左右分栏时点击工作台聚焦左侧，业务标签切换右侧；拖动分隔条调整大小，双击恢复默认比例。</span>
     {draggedId && <div className="workspace-drag-hint" role="status">{detaching ? '松开后移至独立窗口；原页面在新窗口就绪前保留' : '拖动调整标签顺序，向外拖动可移至独立窗口'}</div>}
-    <div ref={pages} className={`workspace-pages ${split ? 'is-split' : ''}`} style={split ? { gridTemplateColumns: `minmax(${MIN_SPLIT_PANE_WIDTH}px,${ratio}fr) ${SPLIT_DIVIDER_WIDTH}px minmax(${MIN_SPLIT_PANE_WIDTH}px,${1 - ratio}fr)` } : undefined}>
-      {panes.map(pane => { const isVisible = visible.has(pane.id); const isActive = pane.id === active?.id; return <section key={pane.id} className={`workspace-page ${isActive ? 'is-focused' : ''}`} id={`panel-${encodeURIComponent(pane.id)}`} role="tabpanel" aria-labelledby={`tab-${encodeURIComponent(pane.id)}`} hidden={!isVisible} data-pane-id={pane.id} data-pane-kind={pane.kind} data-pane-side={split && isVisible ? pane.kind === 'home' ? 'left' : 'right' : undefined} onPointerDownCapture={() => { if (isVisible && !isActive && !shortcutsBlocked) onActivate(pane.id); }} onFocusCapture={() => { if (isVisible && !isActive && !shortcutsBlocked) onActivate(pane.id); }}>{renderPane(pane, isActive, isVisible)}</section>; })}
+    <div className="workspace-body"><div className="workspace-sidebar-host" id={sidebarHostId} ref={onSidebarHost} /><div ref={pages} className={`workspace-pages ${split ? 'is-split' : ''}`} style={split ? { gridTemplateColumns: `minmax(${MIN_SPLIT_PANE_WIDTH}px,${ratio}fr) ${SPLIT_DIVIDER_WIDTH}px minmax(${MIN_SPLIT_PANE_WIDTH}px,${1 - ratio}fr)` } : undefined}>
+      {panes.map(pane => { const isVisible = visible.has(pane.id); const isActive = pane.id === active?.id; return <section key={pane.id} className={`workspace-page ${isActive ? 'is-focused' : ''}`} id={`panel-${encodeURIComponent(pane.id)}`} role="tabpanel" aria-labelledby={`tab-${encodeURIComponent(pane.id)}`} hidden={!isVisible} data-pane-id={pane.id} data-pane-kind={pane.kind} data-pane-side={split && isVisible ? pane.kind === 'home' ? 'left' : 'right' : undefined} onPointerDownCapture={event => { if (event.currentTarget.contains(event.target as Node) && isVisible && !isActive && !shortcutsBlocked) onActivate(pane.id); }} onFocusCapture={event => { if (event.currentTarget.contains(event.target as Node) && isVisible && !isActive && !shortcutsBlocked) onActivate(pane.id); }}>{renderPane(pane, isActive, isVisible)}</section>; })}
       {split && <div className="workspace-divider" role="separator" aria-label="调整工作台与业务页宽度" aria-orientation="vertical" aria-valuemin={10} aria-valuemax={90} aria-valuenow={Math.round(ratio * 100)} aria-valuetext={`工作台 ${Math.round(ratio * 100)}%，业务页 ${Math.round((1 - ratio) * 100)}%`} tabIndex={0} title="拖动调整宽度；双击恢复 55% / 45%" onDoubleClick={() => onSplitChange?.({ ...split, ratio: DEFAULT_SPLIT_RATIO })} onPointerDown={event => { if (event.button !== 0 || !onSplitChange) return; event.preventDefault(); event.currentTarget.focus({ preventScroll: true }); event.currentTarget.setPointerCapture(event.pointerId); dividerGesture.current = { pointerId: event.pointerId, ratio, rightPaneId: split.rightPaneId }; setDraftRatio(ratio); }} onPointerMove={event => { const current = dividerGesture.current; if (!current || current.pointerId !== event.pointerId) return; current.ratio = pointerRatio(event.clientX); setDraftRatio(current.ratio); }} onPointerUp={event => finishDivider(event)} onPointerCancel={event => finishDivider(event, true)} onLostPointerCapture={event => finishDivider(event, true)} onKeyDown={event => { if (event.key === 'Escape' && dividerGesture.current) { event.preventDefault(); const pointerId = dividerGesture.current.pointerId; dividerGesture.current = null; setDraftRatio(undefined); if (event.currentTarget.hasPointerCapture(pointerId)) event.currentTarget.releasePointerCapture(pointerId); return; } if (!onSplitChange || event.ctrlKey || event.metaKey || event.altKey) return; if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); const width = Math.max(pages.current?.clientWidth || 0, MIN_SPLIT_PANE_WIDTH * 2 + SPLIT_DIVIDER_WIDTH) - SPLIT_DIVIDER_WIDTH; onSplitChange({ ...split, ratio: splitRatioForPosition(width * (ratio + (event.key === 'ArrowRight' ? 0.02 : -0.02)), width) }); } else if (event.key === 'Home') { event.preventDefault(); onSplitChange({ ...split, ratio: DEFAULT_SPLIT_RATIO }); } }} />}
-    </div>
+    </div></div>
   </div>;
 }
 

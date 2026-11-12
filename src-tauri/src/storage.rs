@@ -140,6 +140,49 @@ fn resolved(config: &Config, kind: &str) -> PathBuf {
             other => config.managed_root.join(other),
         })
 }
+
+// Fresh product packages use an app/data/cache layout. Existing databases,
+// explicit paths and older executable names retain their previous resolution.
+fn fresh_product_layout(base: &Path, executable: &Path, locked: bool) -> Option<Config> {
+    let program = executable.file_stem()?.to_str()?;
+    let app = executable.parent()?;
+    if locked
+        || !program.eq_ignore_ascii_case("agent-resource-manager")
+        || key(base) != key(app)
+        || [
+            "manager.sqlite3",
+            "manager.sqlite3-wal",
+            "manager.sqlite3-shm",
+        ]
+        .iter()
+        .any(|name| base.join(name).exists())
+    {
+        return None;
+    }
+    let root = if app
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("app"))
+    {
+        app.parent()?
+    } else {
+        app
+    };
+    let mut overrides = BTreeMap::from([
+        ("state".into(), root.join("data")),
+        ("webview".into(), root.join("cache/webview")),
+        ("recovery".into(), root.join("data/recovery")),
+        ("receipts".into(), root.join("data/receipts")),
+        ("temp".into(), root.join("cache/temp")),
+    ]);
+    if let Some(parent) = root.parent() {
+        // A suggestion only: resource installation still requires its own preview.
+        overrides.insert("newSkill".into(), parent.join("Agent_Skills"));
+    }
+    Some(Config {
+        managed_root: root.to_owned(),
+        overrides,
+    })
+}
 fn validate(mut config: Config) -> Result<Config, String> {
     config.managed_root = absolute(&config.managed_root)?;
     for (kind, path) in &mut config.overrides {
@@ -208,7 +251,7 @@ fn enumerate(root: &Path, result: &mut Vec<PathBuf>, skipped: &mut usize) -> Res
     }
     Ok(())
 }
-fn destination_space(path: &Path) -> Result<(String, Option<u64>), String> {
+pub(crate) fn destination_space(path: &Path) -> Result<(String, Option<u64>), String> {
     let mut ancestor = path;
     while !ancestor.exists() {
         ancestor = ancestor.parent().ok_or("目标路径没有可用的父目录")?;
@@ -393,6 +436,15 @@ impl Storage {
         source: &str,
         locked: bool,
     ) -> Result<Arc<Self>, String> {
+        Self::load_for_mode(base, executable, source, locked, false)
+    }
+    pub(crate) fn load_for_mode(
+        base: PathBuf,
+        executable: &Path,
+        source: &str,
+        locked: bool,
+        basic_mode: bool,
+    ) -> Result<Arc<Self>, String> {
         let base = if base.is_absolute() {
             base
         } else {
@@ -400,10 +452,15 @@ impl Storage {
                 .map_err(|e| e.to_string())?
                 .join(base)
         };
+        // The packaged sidecar uses "." for the application directory. Compare
+        // that directory without CurDir before choosing a fresh product layout.
+        // ParentDir remains intact and is rejected by normal path validation.
+        let base: PathBuf = base.components().collect();
         let bootstrap_path = executable
             .parent()
             .ok_or("无法确定程序目录")?
             .join("storage-paths.json");
+        let mut fresh_layout = false;
         let mut bootstrap = if bootstrap_path.exists() {
             let bytes = fs::read(&bootstrap_path).map_err(|e| e.to_string())?;
             if bytes.len() > 8 * 1024 * 1024 {
@@ -416,12 +473,15 @@ impl Storage {
             }
             value
         } else {
-            Bootstrap {
-                format_version: 1,
-                config: Config {
+            let config =
+                fresh_product_layout(&base, executable, locked).unwrap_or_else(|| Config {
                     managed_root: base.clone(),
                     overrides: BTreeMap::new(),
-                },
+                });
+            fresh_layout = key(&config.managed_root) != key(&base) || !config.overrides.is_empty();
+            Bootstrap {
+                format_version: 1,
+                config,
                 pending: None,
                 last_migration: None,
             }
@@ -435,7 +495,10 @@ impl Storage {
             bootstrap.pending = None;
         }
         bootstrap.config = validate(bootstrap.config)?;
-        if let Some(pending) = bootstrap.pending.clone() {
+        if fresh_layout && !basic_mode {
+            bootstrap_write(&bootstrap_path, &bootstrap)?;
+        }
+        if let Some(pending) = bootstrap.pending.clone().filter(|_| !basic_mode) {
             let verification = (|| -> Result<(), String> {
                 for file in &pending.files {
                     if digest(&file.destination)? != file.digest {
@@ -945,6 +1008,122 @@ pub(crate) fn default_export_parent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_product_package_keeps_application_data_and_cache_under_product_root() {
+        let fixture = fixture();
+        let app = fixture.path().join("product/app");
+        fs::create_dir_all(&app).unwrap();
+        let storage = Storage::load(
+            app.clone(),
+            &app.join("agent-resource-manager.exe"),
+            "file",
+            false,
+        )
+        .unwrap();
+        let root = app.parent().unwrap();
+        assert_eq!(
+            key(&storage.path("state").unwrap()),
+            key(&root.join("data"))
+        );
+        assert_eq!(
+            key(&storage.path("webview").unwrap()),
+            key(&root.join("cache/webview"))
+        );
+        assert_eq!(
+            key(&storage.path("temp").unwrap()),
+            key(&root.join("cache/temp"))
+        );
+        assert_eq!(
+            key(&storage.path("receipts").unwrap()),
+            key(&root.join("data/receipts"))
+        );
+        assert!(!within(&storage.path("newSkill").unwrap(), root));
+        assert!(app.join("storage-paths.json").is_file());
+        assert!(!root.join("data/manager.sqlite3").exists());
+        let reopened = Storage::load(
+            app.clone(),
+            &app.join("agent-resource-manager.exe"),
+            "file",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            key(&reopened.path("state").unwrap()),
+            key(&root.join("data"))
+        );
+    }
+
+    #[test]
+    fn existing_or_partial_legacy_database_never_triggers_fresh_layout() {
+        for name in [
+            "manager.sqlite3",
+            "manager.sqlite3-wal",
+            "manager.sqlite3-shm",
+        ] {
+            let fixture = fixture();
+            let app = fixture.path().join("app");
+            fs::create_dir_all(&app).unwrap();
+            fs::write(app.join(name), b"existing user bytes").unwrap();
+            let storage = Storage::load(
+                app.clone(),
+                &app.join("agent-resource-manager.exe"),
+                "file",
+                false,
+            )
+            .unwrap();
+            assert_eq!(key(&storage.path("state").unwrap()), key(&app));
+            assert_eq!(fs::read(app.join(name)).unwrap(), b"existing user bytes");
+            assert!(!app.join("storage-paths.json").exists());
+        }
+    }
+
+    #[test]
+    fn explicit_or_legacy_launch_paths_keep_their_selected_data_location() {
+        let fixture = fixture();
+        let app = fixture.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        let selected = fixture.path().join("selected");
+        for (base, exe, locked) in [
+            (
+                selected.clone(),
+                app.join("agent-resource-manager.exe"),
+                true,
+            ),
+            (
+                selected.clone(),
+                app.join("agent-resource-manager.exe"),
+                false,
+            ),
+            (app.clone(), app.join("skill-manager.exe"), false),
+        ] {
+            let storage = Storage::load(base.clone(), &exe, "explicit", locked).unwrap();
+            assert_eq!(key(&storage.path("state").unwrap()), key(&base));
+            assert!(!app.join("storage-paths.json").exists());
+        }
+    }
+
+    #[test]
+    fn basic_fresh_product_resolution_never_writes_bootstrap_or_database() {
+        let fixture = fixture();
+        let app = fixture.path().join("product/app");
+        fs::create_dir_all(&app).unwrap();
+        let storage = Storage::load_for_mode(
+            app.clone(),
+            &app.join("agent-resource-manager.exe"),
+            "file",
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            key(&storage.path("state").unwrap()),
+            key(&fixture.path().join("product/data"))
+        );
+        assert!(crate::model::Manager::with_storage_mode(storage, true).is_err());
+        assert!(!app.join("storage-paths.json").exists());
+        assert!(!fixture.path().join("product/data").exists());
+    }
     fn fixture() -> tempfile::TempDir {
         let parent = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -978,6 +1157,25 @@ mod tests {
         );
         assert!(!fixture.path().join("bin/storage-paths.json").exists());
         assert!(!fixture.path().join("old").exists());
+    }
+    #[test]
+    fn basic_mode_does_not_recover_or_rewrite_pending_migration() {
+        let fixture = fixture();
+        let bin = fixture.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let selected = fixture.path().join("selected");
+        let old = fixture.path().join("old");
+        let bootstrap = json!({"formatVersion":1,"config":{"managedRoot":selected,"overrides":{}},"pending":{"id":"pending","previous":{"managedRoot":old,"overrides":{}},"files":[{"source":old.join("manager.sqlite3"),"destination":selected.join("manager.sqlite3"),"bytes":1,"digest":"does-not-match"}]}});
+        let path = bin.join("storage-paths.json");
+        let bytes = serde_json::to_vec(&bootstrap).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let loaded =
+            Storage::load_for_mode(old.clone(), &bin.join("app.exe"), "test", false, true).unwrap();
+        assert_eq!(loaded.path("state").unwrap(), selected);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(loaded.inner.lock().unwrap().bootstrap.pending.is_some());
+        assert!(!selected.exists());
+        assert!(!old.exists());
     }
     #[test]
     fn output_defaults_apply_to_shared_service_without_changing_running_data_paths() {

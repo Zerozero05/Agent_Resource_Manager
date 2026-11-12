@@ -3,6 +3,8 @@ import { Search } from 'lucide-react';
 import { terminalTask, taskStatus, type ManagerTask } from './tasks';
 import { filterOperationHistory, operationHistoryDraft, type OperationHistoryDraft } from './operation-history';
 import './operation-history.css';
+import { problemGroups } from './operation-problems';
+import './diagnostics.css';
 
 export type { OperationHistoryDraft } from './operation-history';
 export type OperationHistoryProps = {
@@ -13,19 +15,21 @@ export type OperationHistoryProps = {
   onLocate: (task: ManagerTask) => void | Promise<void>;
   onCancel: (task: ManagerTask) => void | Promise<void>;
   onClear: () => void | Promise<void>;
+  sourceBySkill?: Readonly<Record<string, string>>;
 };
 
 const dateText = (value: string) => { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false }); };
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 /** The enclosing PaneFrame owns scrolling and the window owns the shared task service. */
-export function OperationHistory({ tasks, initialDraft, onDraftChange, onInspect, onLocate, onCancel, onClear }: OperationHistoryProps) {
+export function OperationHistory({ tasks, initialDraft, onDraftChange, onInspect, onLocate, onCancel, onClear, sourceBySkill }: OperationHistoryProps) {
   const [draft, setDraft] = useState(() => operationHistoryDraft(initialDraft));
   const [error, setError] = useState('');
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const activeCount = tasks.filter(task => !terminalTask(task)).length;
   const endedCount = tasks.length - activeCount;
   const filtered = filterOperationHistory(tasks, draft);
+  const repeated = problemGroups(filtered, sourceBySkill).filter(group => group.tasks.length > 1);
   const updateDraft = (patch: Partial<OperationHistoryDraft>) => { const next = { ...draft, ...patch }; setDraft(next); onDraftChange(next); };
   const perform = async (key: string, action: () => void | Promise<void>) => {
     if (pending.has(key)) return;
@@ -46,11 +50,12 @@ export function OperationHistory({ tasks, initialDraft, onDraftChange, onInspect
     {error && <div className="inline-error operation-history-error" role="alert">{error}</div>}
     <details className="operation-history-note"><summary>记录说明</summary><p className="muted small-text">记录在各窗口同步。查看结果或返回界面不会重复执行操作；关闭本页后，任务仍会继续。</p></details>
     <div className="operation-history-entries">
+      {repeated.length > 0 && <section className="operation-problems" aria-label="重复问题归并">{repeated.map((group, index) => <details key={group.key}><summary>{group.cause.label} · 同一来源或资源 {group.tasks.length} 项记录</summary><p>{group.cause.next}</p><p className="muted small-text">仅合并提示，下面保留每项真实状态与结果。成功记录不会自动关闭这里的历史问题。</p><button type="button" className="button" disabled={pending.has(`problem:${index}`)} onClick={() => void perform(`problem:${index}`, () => onInspect(group.tasks[0]))}>查看对应记录</button></details>)}</section>}
       {filtered.map(task => <article className={`operation-history-row ${task.status}`} key={task.id}>
         <div className="operation-history-row-title"><h2>{task.label}</h2><span className={`operation-history-status ${task.status}`}>{taskStatus[task.status] || task.status}</span></div>
         {(task.stage !== task.label || task.progress) && <p className="operation-history-stage">{task.stage}{task.progress && ` · ${task.progress.completed}/${task.progress.total}`}</p>}
         <p className="muted small-text operation-history-date"><time dateTime={task.createdAt}>{dateText(task.createdAt)}</time>{task.finishedAt && <span>结束于 <time dateTime={task.finishedAt}>{dateText(task.finishedAt)}</time></span>}</p>
-        {task.error && <p className="operation-history-task-error">{task.error}</p>}
+        {task.error && <p className="operation-history-task-error" title={task.error}>{task.error}</p>}
         {task.resultExpired && <p className="muted small-text">临时预览已过期，可返回对应界面重新检查。</p>}
         <div className="operation-history-actions"><button type="button" className="button" disabled={pending.has(`inspect:${task.id}`)} onClick={() => void perform(`inspect:${task.id}`, () => onInspect(task))}>查看结果</button><button type="button" className="button" disabled={pending.has(`locate:${task.id}`)} onClick={() => void perform(`locate:${task.id}`, () => onLocate(task))}>返回对应界面</button>{task.cancellable && !terminalTask(task) && <button type="button" className="button" disabled={task.cancelRequested || pending.has(`cancel:${task.id}`)} onClick={() => void perform(`cancel:${task.id}`, () => onCancel(task))}>{task.cancelRequested ? '正在取消…' : '取消任务'}</button>}</div>
       </article>)}

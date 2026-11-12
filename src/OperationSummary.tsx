@@ -33,15 +33,14 @@ export function OperationSummary({ tasks, visible = true, onShowAll, onDetails, 
   useLayoutEffect(() => {
     const button = trigger.current, popup = panel.current;
     if (!open || !visible || !button || !popup) return;
-    const shell = button.closest<HTMLElement>('.app-shell');
-    const main = shell?.querySelector<HTMLElement>(':scope > .main');
+    const pages = button.closest<HTMLElement>('.workspace-body')?.querySelector<HTMLElement>(':scope > .workspace-pages');
     const sidebar = button.closest<HTMLElement>('.sidebar');
-    if (!main || !sidebar) { close(); return; }
+    if (!pages || !sidebar) { close(); return; }
     let frame = 0;
     const measure = () => {
-      if (!button.getClientRects().length || !main.getClientRects().length) { close(); return; }
+      if (!button.getClientRects().length || !pages.getClientRects().length) { close(); return; }
       const zoom = Number(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
-      const source = button.getBoundingClientRect(), area = main.getBoundingClientRect(), side = sidebar.getBoundingClientRect();
+      const source = button.getBoundingClientRect(), area = pages.getBoundingClientRect(), side = sidebar.getBoundingClientRect();
       const bounds = { left: Math.max(area.left, side.right) / zoom, top: Math.max(0, area.top) / zoom, right: Math.min(window.innerWidth, area.right) / zoom, bottom: Math.min(window.innerHeight, area.bottom) / zoom };
       const anchor = { left: source.left / zoom, top: source.top / zoom, right: source.right / zoom, bottom: source.bottom / zoom };
       const value = operationSummaryPlacement(anchor, bounds, popup.getBoundingClientRect().height / zoom);
@@ -60,7 +59,7 @@ export function OperationSummary({ tasks, visible = true, onShowAll, onDetails, 
     };
     const outsideScroll = (event: Event) => { if (!popup.contains(event.target as Node)) schedule(); };
     const resize = new ResizeObserver(schedule);
-    for (const node of [button, popup, main, sidebar]) resize.observe(node);
+    for (const node of [button, popup, pages, sidebar]) resize.observe(node);
     const appearance = new MutationObserver(schedule);
     appearance.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'data-theme'] });
     measure();

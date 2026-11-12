@@ -1,15 +1,45 @@
 mod audit;
+#[cfg(windows)]
+mod backend_host;
+#[cfg(windows)]
+mod backend_ipc;
 mod categories;
 mod checks;
 mod clients;
+mod configuration;
 mod export_plan;
 mod external;
+mod invocation_templates;
 mod local;
 mod local_roots;
+mod maintenance;
+mod management_data;
+mod mcp;
 mod model;
 mod network;
 mod remote;
+mod resource_adapters;
+mod resource_automation;
+mod resource_capability_evidence;
+mod resource_checks;
+mod resource_files;
+mod resource_github;
+mod resource_lifecycle;
+mod resource_manifest;
+mod resource_package;
+mod resource_package_lifecycle;
+mod resource_probe;
+mod resource_relations;
+mod resource_runtime;
+mod resource_scenes;
+mod resource_source;
+mod resource_space;
+mod resource_update;
+mod resources;
+mod skill_removal;
 mod storage;
+mod system_ownership;
+mod task_outputs;
 mod tasks;
 mod transaction;
 mod workspace;
@@ -30,7 +60,84 @@ fn folder_for_skill(m: &Manager, request: &Value) -> Result<PathBuf, String> {
     Ok(folder)
 }
 
+fn reject_internal_automation(request: &Value) -> Result<(), String> {
+    if request.get("automation").is_some()
+        || request["action"]
+            .as_str()
+            .is_some_and(|action| action.starts_with("__resource_automation_"))
+    {
+        return Err("自动更新执行封套只能由内部调度产生".into());
+    }
+    Ok(())
+}
+
 fn dispatch(m: &mut Manager, request: &Value) -> Result<Value, String> {
+    reject_internal_automation(request)?;
+    m.ensure_request_allowed(request)?;
+    if request["action"] == "get_content_cache_stats" {
+        if request
+            .as_object()
+            .is_none_or(|fields| fields.keys().any(|field| field != "action"))
+        {
+            return Err("缓存诊断只接受读取请求".into());
+        }
+        return network::cache_stats();
+    }
+    if let Some(value) = resource_capability_evidence::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_update::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_checks::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_automation::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = skill_removal::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_scenes::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_source::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_relations::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_space::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = invocation_templates::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = management_data::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = maintenance::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_github::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_package::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_package_lifecycle::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_lifecycle::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_runtime::handle(m, request)? {
+        return Ok(value);
+    }
+    if let Some(mut value) = resources::handle(m, request)? {
+        resource_scenes::decorate(m, request, &mut value)?;
+        return Ok(value);
+    }
     if let Some(value) = local_roots::handle(m, request)? {
         return Ok(value);
     }
@@ -38,6 +145,7 @@ fn dispatch(m: &mut Manager, request: &Value) -> Result<Value, String> {
         "get_state" => {
             return Ok(m.snapshot());
         }
+        "get_startup_status" => return Ok(m.startup_status()),
         "refresh" | "audit_skills" => {
             m.refresh_selection(request)?;
             clients::refresh(m)?;
@@ -57,6 +165,9 @@ fn dispatch(m: &mut Manager, request: &Value) -> Result<Value, String> {
             for (name, allowed) in [
                 ("libraryMode", &["list", "details", "cards"][..]),
                 ("librarySort", &["name", "status", "checked"][..]),
+                ("uiAccent", &["violet", "blue", "teal", "rose"][..]),
+                ("uiDensity", &["compact", "comfortable"][..]),
+                ("uiMotion", &["system", "light", "none"][..]),
             ] {
                 if let Some(value) = request["settings"].get(name) {
                     if !value.as_str().is_some_and(|v| allowed.contains(&v)) {
@@ -176,6 +287,95 @@ fn dispatch(m: &mut Manager, request: &Value) -> Result<Value, String> {
     Err("Unknown action".into())
 }
 
+// Only the local Tauri window route uses this dispatcher. Agent/MCP callers use
+// dispatch and cannot grant themselves executable definitions through JSON flags.
+fn dispatch_local(m: &mut Manager, request: &Value) -> Result<Value, String> {
+    reject_internal_automation(request)?;
+    m.ensure_request_allowed(request)?;
+    if let Some(value) = resource_adapters::preview_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_adapters::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_automation::preview_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_automation::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if request["action"] == "preview_resource_recover" {
+        if request.as_object().is_none_or(|fields| {
+            fields
+                .keys()
+                .any(|key| !["action", "rootPath"].contains(&key.as_str()))
+        }) {
+            return Err("恢复预览不接受权限或命令参数".into());
+        }
+        let path = request["rootPath"]
+            .as_str()
+            .filter(|path| !path.is_empty())
+            .ok_or("请选择资源原目录")?;
+        return resource_manifest::recover(std::path::Path::new(path));
+    }
+    if request["action"] == "open_system_apps" {
+        if request
+            .as_object()
+            .is_none_or(|fields| fields.keys().any(|key| key != "action"))
+        {
+            return Err("系统卸载入口不接受自定义命令或地址".into());
+        }
+        #[cfg(windows)]
+        {
+            tauri_plugin_opener::open_url("ms-settings:appsfeatures", None::<&str>)
+                .map_err(|error| format!("无法打开 Windows 已安装的应用：{error}"))?;
+            return Ok(json!({"opened":true,"uninstalled":false}));
+        }
+        #[cfg(not(windows))]
+        return Err("此系统卸载入口仅适用于 Windows".into());
+    }
+    if let Some(value) = resource_probe::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_update::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = skill_removal::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = configuration::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_scenes::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_source::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_relations::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_github::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_package::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_package_lifecycle::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = remote::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_lifecycle::apply_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_runtime::configure(m, request)? {
+        return Ok(value);
+    }
+    dispatch(m, request)
+}
+
 #[cfg(test)]
 mod settings_tests {
     use super::*;
@@ -259,13 +459,17 @@ mod settings_tests {
         let fixture = tempfile::tempdir_in(root).unwrap();
         {
             let mut m = Manager::new(fixture.path().to_path_buf()).unwrap();
-            dispatch(&mut m, &json!({"action":"set_settings","settings":{"uiTheme":"dark","uiZoom":125,"uiFontSize":18}})).unwrap();
+            dispatch(&mut m, &json!({"action":"set_settings","settings":{"uiTheme":"dark","uiZoom":125,"uiFontSize":18,"uiAccent":"teal","uiDensity":"comfortable","uiMotion":"none"}})).unwrap();
             let before = m.state.settings.clone();
             for change in [
                 json!({"uiTheme":"unknown"}),
                 json!({"uiZoom":200}),
                 json!({"uiFontSize":9}),
                 json!({"uiZoom":100.5}),
+                json!({"uiAccent":"invalid"}),
+                json!({"uiDensity":"large"}),
+                json!({"uiMotion":true}),
+                json!({"uiTheme":"light","uiAccent":"invalid"}),
             ] {
                 assert!(
                     dispatch(&mut m, &json!({"action":"set_settings","settings":change})).is_err()
@@ -277,6 +481,9 @@ mod settings_tests {
         assert_eq!(m.state.settings["uiTheme"], "dark");
         assert_eq!(m.state.settings["uiZoom"], 125);
         assert_eq!(m.state.settings["uiFontSize"], 18);
+        assert_eq!(m.state.settings["uiAccent"], "teal");
+        assert_eq!(m.state.settings["uiDensity"], "comfortable");
+        assert_eq!(m.state.settings["uiMotion"], "none");
     }
 
     #[test]
@@ -465,7 +672,7 @@ async fn manager_request(
             return Ok(value);
         }
         workspace.inject_origin(&label, &mut request)?;
-        service.execute(request, dispatch)
+        service.execute(request, dispatch_local)
     })
     .await
     .map_err(|_| "Background operation failed".to_string())?
@@ -499,7 +706,22 @@ fn resolve_data_dir(
     let config = match std::fs::File::open(&config_path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(executable_dir.join("Skill_Manager_Data"));
+            let legacy = executable_dir.join("Skill_Manager_Data");
+            let has_legacy = [
+                "manager.sqlite3",
+                "manager.sqlite3-wal",
+                "manager.sqlite3-shm",
+            ]
+            .iter()
+            .any(|name| legacy.join(name).exists());
+            if executable
+                .file_stem()
+                .is_some_and(|name| name.eq_ignore_ascii_case("agent-resource-manager"))
+                && !has_legacy
+            {
+                return Ok(executable_dir.to_owned());
+            }
+            return Ok(legacy);
         }
         Err(error) => {
             return Err(format!("Could not read {}: {error}", config_path.display()));
@@ -598,6 +820,93 @@ mod data_directory_tests {
     }
 
     #[test]
+    fn renamed_program_uses_fresh_product_layout_but_preserves_existing_legacy_data() {
+        let root = fixture();
+        let exe = root.path().join("agent-resource-manager.exe");
+        assert_eq!(
+            resolve_data_dir(&[], None, Ok(exe.clone())).unwrap(),
+            root.path()
+        );
+        let legacy = root.path().join("Skill_Manager_Data");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("manager.sqlite3-wal"), b"existing state").unwrap();
+        assert_eq!(
+            resolve_data_dir(&[], None, Ok(exe.clone())).unwrap(),
+            legacy
+        );
+        std::fs::write(root.path().join("data-directory.txt"), "chosen-data").unwrap();
+        assert_eq!(
+            resolve_data_dir(&[], None, Ok(exe)).unwrap(),
+            root.path().join("chosen-data")
+        );
+        assert_eq!(
+            std::fs::read(legacy.join("manager.sqlite3-wal")).unwrap(),
+            b"existing state"
+        );
+    }
+
+    #[test]
+    fn packaged_sidecar_selects_the_fresh_layout_after_path_resolution() {
+        let root = fixture();
+        let app = root.path().join("product/app");
+        std::fs::create_dir_all(&app).unwrap();
+        let exe = app.join("agent-resource-manager.exe");
+        std::fs::write(app.join("data-directory.txt"), ".\n").unwrap();
+        let base = resolve_data_dir(&[], None, Ok(exe.clone())).unwrap();
+        let storage = storage::Storage::load(base, &exe, "legacySidecar", false).unwrap();
+        let product = app.parent().unwrap();
+        for (kind, relative) in [
+            ("state", "data"),
+            ("webview", "cache/webview"),
+            ("temp", "cache/temp"),
+            ("recovery", "data/recovery"),
+            ("receipts", "data/receipts"),
+            ("export", "exports"),
+        ] {
+            assert_eq!(storage.path(kind).unwrap(), product.join(relative));
+        }
+        assert!(!app.join("manager.sqlite3").exists());
+        assert!(!app.join("webview").exists());
+    }
+
+    #[test]
+    fn packaged_sidecar_preserves_existing_or_explicit_data_locations() {
+        for locked in [false, true] {
+            let root = fixture();
+            let app = root.path().join("product/app");
+            std::fs::create_dir_all(&app).unwrap();
+            let exe = app.join("agent-resource-manager.exe");
+            std::fs::write(app.join("data-directory.txt"), ".\n").unwrap();
+            if !locked {
+                std::fs::write(app.join("manager.sqlite3-wal"), b"existing state").unwrap();
+            }
+            let base = resolve_data_dir(&[], None, Ok(exe.clone())).unwrap();
+            let storage = storage::Storage::load(base, &exe, "legacySidecar", locked).unwrap();
+            assert_eq!(storage.path("state").unwrap(), app);
+            assert!(!app.join("storage-paths.json").exists());
+            if !locked {
+                assert_eq!(
+                    std::fs::read(app.join("manager.sqlite3-wal")).unwrap(),
+                    b"existing state"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packaged_sidecar_parent_traversal_remains_invalid() {
+        let root = fixture();
+        let app = root.path().join("product/app");
+        std::fs::create_dir_all(&app).unwrap();
+        let exe = app.join("agent-resource-manager.exe");
+        std::fs::write(app.join("data-directory.txt"), "../chosen\n").unwrap();
+        let base = resolve_data_dir(&[], None, Ok(exe.clone())).unwrap();
+        assert!(storage::Storage::load(base, &exe, "legacySidecar", false).is_err());
+        assert!(!app.join("storage-paths.json").exists());
+        assert!(!app.parent().unwrap().join("chosen").exists());
+    }
+
+    #[test]
     fn invalid_sidecars_fail_instead_of_silently_selecting_another_database() {
         let cases: Vec<Vec<u8>> = vec![
             Vec::new(),
@@ -636,8 +945,323 @@ mod data_directory_tests {
     }
 }
 
-pub fn run() {
+fn basic_mode_from_args(args: &[std::ffi::OsString]) -> bool {
+    args.iter().any(|arg| arg == "--basic-mode")
+}
+
+fn initialize_manager(storage: Arc<storage::Storage>, basic_mode: bool) -> Result<Manager, String> {
+    let mut manager = if basic_mode {
+        Manager::with_storage_mode(storage.clone(), true)?
+    } else {
+        Manager::with_storage(storage.clone())?
+    };
+    if !basic_mode {
+        let recovered = transaction::recover_in(&storage.path("recovery")?)?;
+        if !recovered.is_empty() {
+            manager.state.settings["recoveryMessages"] = json!(recovered);
+        }
+    }
+    Ok(manager)
+}
+
+fn startup_failure(error: &str) {
+    let message = format!("Agent 资源管理器未能启动。\n\n{error}\n\n原有数据和设置未被重建。可核对保存位置，或使用 --basic-mode 只读诊断。");
+    eprintln!("{message}");
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxW(
+                window: *mut std::ffi::c_void,
+                text: *const u16,
+                caption: *const u16,
+                kind: u32,
+            ) -> i32;
+        }
+        let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = "Agent 资源管理器 · 启动未完成"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        unsafe {
+            MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), 0x10);
+        }
+    }
+}
+
+#[cfg(test)]
+mod startup_profile;
+
+#[cfg(test)]
+mod basic_mode_tests {
+    use super::*;
+    use std::fs;
+
+    fn fixture() -> tempfile::TempDir {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("work/basic-mode-tests");
+        fs::create_dir_all(&root).unwrap();
+        tempfile::tempdir_in(root).unwrap()
+    }
+
+    #[test]
+    fn basic_mode_argument_is_explicit_and_does_not_change_data_directory_selection() {
+        let args = vec![
+            "app".into(),
+            "--basic-mode".into(),
+            "--data-dir".into(),
+            "chosen".into(),
+        ];
+        assert!(basic_mode_from_args(&args));
+        assert_eq!(
+            resolve_data_dir(&args, None, Err("unused".into())).unwrap(),
+            PathBuf::from("chosen")
+        );
+        assert!(!basic_mode_from_args(&[
+            "app".into(),
+            "--basic-mode-other".into()
+        ]));
+    }
+
+    #[test]
+    fn basic_mode_reads_old_schema_without_creating_tables_or_overwriting_settings() {
+        let dir = fixture();
+        let database = dir.path().join("manager.sqlite3");
+        let db = rusqlite::Connection::open(&database).unwrap();
+        db.execute_batch("CREATE TABLE app_state(id INTEGER PRIMARY KEY,payload TEXT NOT NULL)")
+            .unwrap();
+        let state = json!({"skills":[],"sources":[],"connections":[],"settings":{"uiTheme":"eye","uiAccent":"rose"},"checkMode":"auto"});
+        db.execute(
+            "INSERT INTO app_state(id,payload) VALUES(1,?1)",
+            [state.to_string()],
+        )
+        .unwrap();
+        drop(db);
+        let before = fs::read(&database).unwrap();
+        let manager =
+            initialize_manager(storage::Storage::isolated(dir.path().to_owned()), true).unwrap();
+        let service = tasks::TaskSystem::new(manager).unwrap();
+        let snapshot = service
+            .execute(json!({"action":"get_state"}), dispatch)
+            .unwrap();
+        assert_eq!(snapshot["settings"], state["settings"]);
+        assert_eq!(snapshot["checkMode"], "auto");
+        assert_eq!(snapshot["startup"]["basicMode"], true);
+        assert_eq!(snapshot["startup"]["resourceCatalogAvailable"], false);
+        let listed = service
+            .execute(json!({"action":"resource_list"}), dispatch)
+            .unwrap();
+        assert_eq!(listed["resources"], json!([]));
+        assert!(listed["unavailableReason"].is_string());
+        let downloads = service
+            .execute(json!({"action":"resource_downloads"}), dispatch)
+            .unwrap();
+        assert_eq!(downloads["downloads"], json!([]));
+        assert_eq!(downloads["total"], 0);
+        for request in [
+            json!({"action":"resource_invoke","id":"not-needed"}),
+            json!({"action":"preview_resource_resume","downloadId":"not-needed"}),
+            json!({"action":"set_settings","settings":{"uiTheme":"dark"}}),
+            json!({"action":"repair_client_connections"}),
+            json!({"action":"check_now","automatic":true}),
+            json!({"action":"apply_install","previewId":"not-needed"}),
+        ] {
+            assert!(service
+                .execute(request, dispatch_local)
+                .unwrap_err()
+                .contains("基本模式"));
+        }
+        service
+            .store_workspace_state(&json!({"test":"session only"}))
+            .unwrap();
+        drop(service);
+        assert_eq!(fs::read(&database).unwrap(), before);
+        let db = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn basic_mode_preserves_catalog_history_workspace_and_pending_recovery() {
+        let dir = fixture();
+        let storage = storage::Storage::isolated(dir.path().join("state"));
+        let mut manager = Manager::with_storage(storage.clone()).unwrap();
+        manager.state.settings["uiTheme"] = json!("eye");
+        manager.save().unwrap();
+        let root = dir.path().join("synthetic-resource");
+        fs::create_dir(&root).unwrap();
+        dispatch(
+            &mut manager,
+            &json!({"action":"resource_register","name":"synthetic","kind":"cli","rootPath":root}),
+        )
+        .unwrap();
+        manager
+            .store_workspace_state(&json!({"invalid":"old workspace remains untouched"}))
+            .unwrap();
+        manager.store_task_history(&[json!({"id":"old-task","action":"refresh","label":"previous task","status":"running","stage":"reading","createdAt":"2026-01-01"})]).unwrap();
+        drop(manager);
+        let recovery = storage.path("recovery").unwrap().join("pending");
+        fs::create_dir_all(&recovery).unwrap();
+        let journal =
+            json!({"root":root,"state":"applying","created_at":"2026-01-01","entries":[]})
+                .to_string();
+        fs::write(recovery.join("journal.json"), &journal).unwrap();
+        let database = storage.path("state").unwrap().join("manager.sqlite3");
+        let before = fs::read(&database).unwrap();
+        let manager = initialize_manager(storage, true).unwrap();
+        assert_eq!(manager.workspace_state().unwrap(), None);
+        let service = tasks::TaskSystem::new(manager).unwrap();
+        assert_eq!(
+            service
+                .execute(json!({"action":"resource_list"}), dispatch)
+                .unwrap()["resources"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            service
+                .execute(json!({"action":"list_tasks"}), dispatch)
+                .unwrap()["tasks"][0]["status"],
+            "interrupted"
+        );
+        assert_eq!(service.check_configuration().unwrap()["mode"], "manual");
+        drop(service);
+        assert_eq!(
+            fs::read_to_string(recovery.join("journal.json")).unwrap(),
+            journal
+        );
+        assert_eq!(fs::read(&database).unwrap(), before);
+    }
+
+    #[test]
+    fn basic_mode_missing_or_unreadable_database_never_creates_a_replacement() {
+        let dir = fixture();
+        let missing = dir.path().join("missing");
+        assert!(initialize_manager(storage::Storage::isolated(missing.clone()), true).is_err());
+        assert!(!missing.exists());
+        let corrupt = dir.path().join("manager.sqlite3");
+        fs::write(&corrupt, b"unique corrupted input").unwrap();
+        assert!(
+            initialize_manager(storage::Storage::isolated(dir.path().to_owned()), true).is_err()
+        );
+        assert_eq!(fs::read(&corrupt).unwrap(), b"unique corrupted input");
+    }
+
+    #[test]
+    fn basic_mode_rejects_nested_mutations_before_creating_tasks_or_using_local_grants() {
+        let dir = fixture();
+        let storage = storage::Storage::isolated(dir.path().to_owned());
+        let manager = Manager::with_storage(storage.clone()).unwrap();
+        manager.save().unwrap();
+        drop(manager);
+        let database = dir.path().join("manager.sqlite3");
+        let download_directory = storage.path("newSkill").unwrap();
+        let original = fs::read(&database).unwrap();
+        let service = tasks::TaskSystem::new(initialize_manager(storage, true).unwrap()).unwrap();
+        for business in [
+            json!({"action":"apply_update","previewId":"preview","backupPlanId":"plan","confirmed":true}),
+            json!({"action":"apply_resource_remove","previewId":"preview","confirmed":true}),
+            json!({"action":"apply_resource_repair","previewId":"preview","confirmed":true}),
+            json!({"action":"apply_resource_download","previewId":"preview"}),
+            json!({"action":"resource_action_set","id":"tool","definition":{}}),
+            json!({"action":"storage_default_path","kind":"newSkill"}),
+            json!({"action":"resource_list","automatic":true}),
+            json!({"action":"undo_management"}),
+            json!({"action":"redo_management","expectedEntryId":"synthetic-entry"}),
+            json!({"action":"set_maintenance","expectedRevision":0,"pause":"resume"}),
+        ] {
+            let request = json!({"action":"start_task","request":business});
+            assert!(service
+                .execute(request, dispatch_local)
+                .unwrap_err()
+                .contains("基本模式"));
+        }
+        assert!(service
+            .execute(json!({"action":"clear_task_history"}), dispatch_local)
+            .unwrap_err()
+            .contains("基本模式"));
+        assert!(service
+            .execute(json!({"action":"list_tasks"}), dispatch_local)
+            .unwrap()["tasks"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(service
+            .execute(json!({"action":"storage_get"}), dispatch_local)
+            .is_ok());
+        drop(service);
+        assert_eq!(fs::read(&database).unwrap(), original);
+        assert!(!download_directory.exists());
+    }
+}
+
+pub fn run() -> u8 {
     let args: Vec<_> = std::env::args_os().collect();
+    let basic_mode = basic_mode_from_args(&args);
+    let background = args.iter().any(|arg| arg == "--background");
+    let startup_error = |error: &str| {
+        if background || args.iter().any(|arg| arg == "--mcp") {
+            eprintln!("{error}");
+        } else {
+            startup_failure(error);
+        }
+    };
+    #[cfg(windows)]
+    let requested_data = if args.iter().any(|arg| arg == "--data-dir")
+        || std::env::var_os("SKILL_MANAGER_DATA_DIR").is_some()
+    {
+        match resolve_data_dir(
+            &args,
+            std::env::var_os("SKILL_MANAGER_DATA_DIR"),
+            std::env::current_exe().map_err(|error| error.to_string()),
+        ) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                startup_error(&error);
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(windows)]
+    if args.iter().any(|arg| arg == "--mcp") {
+        if basic_mode {
+            eprintln!("--mcp 不能与 --basic-mode 合并。请先以基本模式打开管理器，再通过 MCP 查看只读状态。");
+            return 1;
+        }
+        return match backend_host::stdio(requested_data) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        };
+    }
+    #[cfg(windows)]
+    let mut backend =
+        match backend_host::Host::claim(requested_data.as_deref(), basic_mode, background) {
+            Ok(Some(host)) => host,
+            Ok(None) => return 0,
+            Err(error) => {
+                startup_error(&error);
+                return 1;
+            }
+        };
     let data_dir = match resolve_data_dir(
         &args,
         std::env::var_os("SKILL_MANAGER_DATA_DIR"),
@@ -646,8 +1270,8 @@ pub fn run() {
     ) {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("Skill Manager could not initialize: {error}");
-            return;
+            startup_error(&error);
+            return 1;
         }
     };
     let source = if args.iter().any(|a| a == "--data-dir") {
@@ -666,31 +1290,35 @@ pub fn run() {
     let storage = match std::env::current_exe()
         .map_err(|e| e.to_string())
         .and_then(|exe| {
-            storage::Storage::load(
-                data_dir.clone(),
-                &exe,
-                source,
-                matches!(source, "commandLine" | "environment"),
-            )
+            if basic_mode {
+                storage::Storage::load_for_mode(
+                    data_dir.clone(),
+                    &exe,
+                    source,
+                    matches!(source, "commandLine" | "environment"),
+                    true,
+                )
+            } else {
+                storage::Storage::load(
+                    data_dir.clone(),
+                    &exe,
+                    source,
+                    matches!(source, "commandLine" | "environment"),
+                )
+            }
         }) {
         Ok(storage) => storage,
         Err(error) => {
-            eprintln!("Skill Manager could not initialize storage: {error}");
-            return;
+            startup_error(&error);
+            return 1;
         }
     };
-    let manager = Manager::with_storage(storage.clone()).and_then(|mut m| {
-        let recovered = transaction::recover_in(&storage.path("recovery")?)?;
-        if !recovered.is_empty() {
-            m.state.settings["recoveryMessages"] = json!(recovered);
-        }
-        Ok(m)
-    });
+    let manager = initialize_manager(storage.clone(), basic_mode);
     let service = match manager.and_then(tasks::TaskSystem::new) {
         Ok(service) => service,
         Err(e) => {
-            eprintln!("Skill Manager could not initialize: {e}");
-            return;
+            startup_error(&e);
+            return 1;
         }
     };
     let mut context = tauri::generate_context!();
@@ -727,12 +1355,20 @@ pub fn run() {
     ) {
         Ok(workspace) => workspace,
         Err(error) => {
-            eprintln!("Skill Manager could not initialize workspace: {error}");
-            return;
+            startup_error(&error);
+            return 1;
         }
     };
-    let lifecycle = workspace.clone();
-    tauri::Builder::default()
+    #[cfg(windows)]
+    if let Err(error) = backend.start(service.clone(), workspace.clone()) {
+        startup_error(&error);
+        return 1;
+    }
+    #[cfg(windows)]
+    let ready_slot = backend.ready_slot();
+    #[cfg(windows)]
+    let ipc_shutdown = backend.shutdown_handle();
+    let application = tauri::Builder::default()
         .manage(service.clone())
         .manage(workspace.clone())
         .plugin(tauri_plugin_dialog::init())
@@ -753,7 +1389,20 @@ pub fn run() {
             service.set_state_events(Arc::new(move |revision| {
                 let _ = handle.emit("state-changed", json!({"stateRevision":revision}));
             }))?;
-            workspace.restore_windows(app.handle())?;
+            let handle = app.handle().clone();
+            service.set_resource_events(Arc::new(move |payload| {
+                let _ = handle.emit("resource-runtime-updated", payload);
+            }))?;
+            #[cfg(windows)]
+            backend_host::tray(app.handle(), workspace.clone(), service.clone())?;
+            if !background {
+                workspace.restore_windows(app.handle())?;
+            }
+            workspace.schedule();
+            #[cfg(windows)]
+            {
+                *ready_slot.lock().map_err(|_| "后台启动状态不可用")? = Some(app.handle().clone());
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -780,16 +1429,27 @@ pub fn run() {
                 }
             }
         })
-        .build(context)
-        .expect("Could not build Skill Manager")
-        .run(move |_app, event| {
-            if let tauri::RunEvent::ExitRequested {
-                code: None, api, ..
-            } = event
-            {
-                if lifecycle.migration_in_progress() {
-                    api.prevent_exit();
-                }
-            }
-        });
+        .build(context);
+    let application = match application {
+        Ok(application) => application,
+        Err(error) => {
+            startup_error(&error.to_string());
+            return 1;
+        }
+    };
+    let exit_code = application.run_return(move |_app, event| {
+        #[cfg(windows)]
+        if matches!(event, tauri::RunEvent::Exit) {
+            ipc_shutdown();
+        }
+        if let tauri::RunEvent::ExitRequested {
+            code: None, api, ..
+        } = event
+        {
+            // Closing windows leaves the one backend available to its tasks
+            // and clients. Explicit quit/restart has a code and bypasses this.
+            api.prevent_exit();
+        }
+    });
+    u8::try_from(exit_code).unwrap_or(1)
 }

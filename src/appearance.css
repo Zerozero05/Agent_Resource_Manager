@@ -1,0 +1,28 @@
+/* Shared appearance tokens do not change fonts, zoom or native window decorations. */
+:root{--control-height:34px;--resource-row-size:4.5rem;--row-padding:10px;--card-space:16px;--motion-duration:0ms}
+:root[data-density=comfortable]{--control-height:38px;--resource-row-size:5.5rem;--row-padding:16px;--card-space:22px}
+:root[data-motion=light]{--motion-duration:150ms}
+.desktop-workspace .workspace-shell{border:1px solid var(--line);box-shadow:none}
+.desktop-workspace :is(.card,.library-panel,.library-card){border-radius:10px}
+.desktop-workspace :is(.button,.accent-option){min-height:var(--control-height)}
+.desktop-workspace .skill-table td{padding-block:var(--row-padding);height:var(--resource-row-size)}
+.desktop-workspace .library-card{padding:var(--card-space)}
+:root[data-density=comfortable] .desktop-workspace :is(.skill-row,.change-row){padding-block:16px}
+:root[data-density=comfortable] .desktop-workspace .nav-item{--nav-row-pad:10px}
+@container sidebar (max-height:740px){.desktop-workspace .sidebar .nav-item{--nav-row-pad:6px;min-height:max(38px,calc(var(--nav-row-line) + var(--nav-row-pad) + var(--nav-row-pad)))}:root[data-density=comfortable] .desktop-workspace .sidebar .nav-item{--nav-row-pad:6px}}
+@container sidebar (max-height:560px){:root[data-density=comfortable] .desktop-workspace .sidebar .nav-item{--nav-row-pad:8px}}
+@container sidebar (max-height:430px){:root[data-density=comfortable] .desktop-workspace .sidebar .nav-item{--nav-row-pad:5px}}
+.desktop-workspace :is(.header-actions,.form-actions,.detail-actions,.library-card-actions,.skill-table .skill-row-actions>div){gap:8px}
+.accent-options{display:flex;flex-wrap:wrap;gap:8px}
+.accent-option{display:inline-flex;align-items:center;gap:8px;min-width:116px;padding:7px 12px;border:1px solid var(--control-line);border-radius:8px;background:var(--surface);color:var(--text)}
+.accent-option:hover{background:var(--hover)}
+.accent-option.selected{background:var(--accent-light);border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.accent-option>svg{margin-left:auto;color:var(--accent)}
+.accent-dot{width:16px;height:16px;flex:none;border-radius:50%;background:var(--swatch);border:1px solid var(--control-line)}
+.appearance-help{margin-top:10px;color:var(--text-secondary);font-size:.85rem;line-height:1.7}
+.appearance-controls small{line-height:1.7}
+.desktop-workspace :is(.button,.icon-button,.nav-item,.theme-option,.accent-option,.skill-table td,.workspace-tab){transition:background-color var(--motion-duration) ease,border-color var(--motion-duration) ease,color var(--motion-duration) ease}
+:root[data-motion=none] *, :root[data-motion=none] *::before, :root[data-motion=none] *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+/* Honor the OS before saved preferences arrive, too. No entrance animation gates content. */
+@media(prefers-reduced-motion:reduce){:root:not([data-motion=light]) *, :root:not([data-motion=light]) *::before, :root:not([data-motion=light]) *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+@container workspace-pane (max-width:700px){.accent-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.accent-option{min-width:0}.appearance-controls{grid-template-columns:minmax(0,1fr)}}

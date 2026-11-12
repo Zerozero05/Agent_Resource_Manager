@@ -1,5 +1,7 @@
 //! Real blocking HTTP requests against a loopback Git object store. No service
 //! credentials, real repository writes, or real Skill folders participate.
+#[path = "rebinding_tests.rs"]
+mod rebinding_tests;
 use super::*;
 use std::{
     io::{Read, Write},
@@ -464,6 +466,67 @@ fn fixture(server: &Server) -> Fixture {
         original_runtime,
         optional,
     }
+}
+
+#[test]
+fn document_access_epoch_change_rejects_remote_bytes_but_keeps_local_reads_available() {
+    let body = b"# Synthetic private remote instructions\n";
+    let server = Server::new(&[("skills/protocol-skill/SKILL.md", body)]);
+    let _transport = server.transport();
+    let mut fixture = fixture(&server);
+    let skill = &mut fixture.manager.state.skills[0];
+    skill["sourceId"] = json!("source");
+    skill["repo"] = json!(server.repo());
+    skill["remotePath"] = json!("skills/protocol-skill");
+    skill["commit"] = json!(server.head());
+    let request = json!({"skillId":"local-id", "path":"skills/protocol-skill/SKILL.md"});
+    let generation = std::cell::Cell::new(80u64);
+    let error = get_document_with_generation(&fixture.manager, &request, || {
+        let value = generation.get();
+        generation.set(value + 1);
+        Ok(value)
+    })
+    .unwrap_err();
+    assert!(error.contains("访问凭据已变化"), "{error}");
+    assert_eq!(
+        generation.get(),
+        82,
+        "read checks both sides of the remote operation"
+    );
+    let unchanged_access =
+        get_document_with_generation(&fixture.manager, &request, || Ok(82)).unwrap();
+    assert_eq!(unchanged_access["readGeneration"], 82);
+    assert_eq!(
+        unchanged_access["markdown"],
+        String::from_utf8(body.to_vec()).unwrap()
+    );
+    assert_eq!(unchanged_access["private"], true);
+    let local_generation = std::cell::Cell::new(90u64);
+    let local = get_document_with_generation(
+        &fixture.manager,
+        &json!({"skillId":"local-id", "origin":"local"}),
+        || {
+            let value = local_generation.get();
+            local_generation.set(value + 1);
+            Ok(value)
+        },
+    )
+    .unwrap();
+    assert_eq!(local["readGeneration"], 91);
+    assert_eq!(local["source"], "本地运行文件");
+    assert!(local["commit"].is_null());
+    assert_eq!(
+        local["markdown"],
+        String::from_utf8(fixture.original_runtime).unwrap()
+    );
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .all(|request| request.method == "GET"));
+    server.assert_clean();
 }
 
 #[test]

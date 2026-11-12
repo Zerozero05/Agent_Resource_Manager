@@ -3,12 +3,13 @@ import type { useTasks } from './tasks';
 import type { WorkspacePane } from './workspace';
 
 export type SessionDraft = Record<string, unknown>;
-export type SessionBridge = { capture: () => SessionDraft; flush: () => Promise<boolean> };
+export type SessionBridge = { capture: () => SessionDraft; flush: () => Promise<boolean>; sidebar?: { expanded: boolean; toggle: () => void } };
 export type PaneFocusNavigation = { view?: string; clientId?: string; section?: string };
 export type WorkspaceSession = {
   pane: WorkspacePane;
   active: boolean;
   visible: boolean;
+  sidebarHost?: HTMLElement | null;
   owned: boolean;
   isTransferring: () => boolean;
   closing: boolean;

@@ -17,7 +17,7 @@ export type LibraryStatusGroup = 'local_only' | 'remote_only' | 'synced' | 'chan
 export type LibraryStatusFilter = 'all' | 'attention' | LibraryStatusGroup | 'remote_updated' | 'local_modified' | 'both_modified' | 'docs_updated' | 'unknown_baseline' | 'local_extra' | 'remote_missing' | 'remote_check_required' | 'error';
 export type LibraryQuery = { query?: string; sourceFilter?: LibrarySourceFilter; statusFilter?: LibraryStatusFilter; sort?: LibrarySort; categoryFilter?: string };
 export interface LibraryItem {
-  id: string; name: string; displayName?: string; description?: string; repo?: string | null;
+  id: string; name: string; displayName?: string; alias?: string; notes?: string; description?: string; repo?: string | null;
   localPath?: string | null; remotePath?: string | null; sourceId?: string | null;
   status?: string; error?: string | null; remoteMissing?: boolean; remoteCheckRequired?: boolean;
   localNotice?: string | null; untrackedFiles?: readonly string[]; runtimeWarnings?: readonly string[]; runtimeIssues?: RuntimeIssue[];
@@ -116,7 +116,7 @@ export function queryLibrary<T extends LibraryItem>(items: readonly T[], options
     if (source === 'local' && !skill.localPath || source === 'github' && !skill.sourceId || source === 'linked' && !(skill.localPath && skill.sourceId)) return false;
     if (status === 'attention' && !needsAttention(skill)) return false;
     if (status !== 'all' && status !== 'attention' && (isStatusGroup(status) ? displayStatus(skill).group !== status : displayStatus(skill).key !== status)) return false;
-    const searchable = normalize([skill.name, skill.displayName, skill.description, skill.repo, skill.localPath, skill.remotePath, skill.readOnly ? '只读' : ''].filter(Boolean).join(' '));
+    const searchable = normalize([skill.name, skill.displayName, skill.alias, skill.notes, skill.description, skill.repo, skill.localPath, skill.remotePath, skill.readOnly ? '只读' : ''].filter(Boolean).join(' '));
     return terms.every(term => searchable.includes(term));
   });
   return result.sort((a, b) => {
@@ -128,7 +128,7 @@ export function queryLibrary<T extends LibraryItem>(items: readonly T[], options
       const checked = (s: T) => { const time = Date.parse(s.lastChecked || ''); return Number.isFinite(time) ? time : 0; };
       const difference = checked(b) - checked(a); if (difference) return difference;
     }
-    return names.compare(a.displayName || a.name, b.displayName || b.name) || names.compare(a.name, b.name) || a.id.localeCompare(b.id);
+    return names.compare(a.alias || a.displayName || a.name, b.alias || b.displayName || b.name) || names.compare(a.name, b.name) || a.id.localeCompare(b.id);
   });
 }
 

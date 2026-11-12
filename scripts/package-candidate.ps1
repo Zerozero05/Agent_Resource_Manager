@@ -36,7 +36,7 @@ if ($CheckConfiguration) {
 }
 if ($env:GITHUB_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Candidate packaging requires the exact GitHub Actions source commit' }
 
-$program = Join-Path $projectRoot 'src-tauri/target/release/skill-manager.exe'
+$program = Join-Path $projectRoot 'src-tauri/target/release/agent-resource-manager.exe'
 $guide = Join-Path $projectRoot 'docs/USER_GUIDE.md'
 $notices = Join-Path $projectRoot 'docs/THIRD_PARTY_NOTICES.txt'
 $logRoot = Join-Path $projectRoot 'check-logs'
@@ -67,7 +67,7 @@ if ([IO.Directory]::Exists($OutputDirectory)) {
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null
 $checks = Join-Path $OutputDirectory 'checks'
 [IO.Directory]::CreateDirectory($checks) | Out-Null
-Copy-Item -LiteralPath $program -Destination (Join-Path $OutputDirectory 'skill-manager.exe')
+Copy-Item -LiteralPath $program -Destination (Join-Path $OutputDirectory 'agent-resource-manager.exe')
 Copy-Item -LiteralPath $guide -Destination (Join-Path $OutputDirectory 'USER_GUIDE.md')
 Copy-Item -LiteralPath $notices -Destination (Join-Path $OutputDirectory 'THIRD_PARTY_NOTICES.txt')
 [IO.File]::WriteAllText((Join-Path $OutputDirectory 'data-directory.txt'), ".`n", $utf8)
@@ -82,7 +82,7 @@ $info = [ordered]@{
     workflowRunId = $env:GITHUB_RUN_ID
     workflowRunAttempt = $env:GITHUB_RUN_ATTEMPT
     builtAtUtc = [DateTime]::UtcNow.ToString('o')
-    executableSha256 = (Get-FileHash -LiteralPath (Join-Path $OutputDirectory 'skill-manager.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+    executableSha256 = (Get-FileHash -LiteralPath (Join-Path $OutputDirectory 'agent-resource-manager.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     nativeGuiVerified = $false
     checks = $logNames
 }

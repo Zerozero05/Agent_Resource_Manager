@@ -19,6 +19,18 @@ test('cards preference reads are compatible and actual grid columns govern keybo
 });
 
 const collection: LibraryItem[] = Array.from({ length: 517 }, (_, n) => ({ id: String(n), name: `skill-${n + 1}`, description: n === 501 ? '中文翻译 PDF' : 'Synthetic local skill', localPath: `D:/fixture/${n + 1}`, status: 'local_only' }));
+test('personal alias and notes participate in search and sorting without replacing source identity', () => {
+  const items: LibraryItem[] = [
+    { id: 'original-id', name: 'source-skill', displayName: 'Original Display', alias: 'Alpha reader', notes: '用于动力系统文献核对', localPath: 'D:/synthetic/source-skill' },
+    { id: 'second', name: 'beta' },
+  ];
+  const before = structuredClone(items);
+  for (const query of ['Alpha 动力系统', 'source-skill', 'Original Display', '文献核对']) {
+    assert.deepEqual(queryLibrary(items, { query }).map(item => item.id), ['original-id']);
+  }
+  assert.deepEqual(queryLibrary(items).map(item => item.id), ['original-id', 'second']);
+  assert.deepEqual(items, before);
+});
 test('status labels and filters share error/pending precedence instead of advertising cached equality', () => {
   const items: LibraryItem[] = [
     {id:'ok',name:'ok',status:'synced',sourceId:'repo'},

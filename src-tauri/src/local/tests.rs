@@ -162,6 +162,7 @@ fn draft_uses_existing_client_display_name_without_inventing_version() {
 
 #[test]
 fn scan_is_preview_only_and_reports_unreadable_skill_without_losing_good_results() {
+    let _configuration = crate::network::test_configuration_guard();
     let fixture = fixture();
     let search = fixture.path().join("search");
     skill(&search.join("good"));

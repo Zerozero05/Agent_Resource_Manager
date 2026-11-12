@@ -167,40 +167,49 @@ fn remember(m: &mut Manager, before: &State, action: &str) {
         "restore_category_assignments" => "撤销归类",
         _ => "归类 Skill",
     };
+    let id = m.id();
     m.management_undo
-        .push(json!({"label":label,"categories":category_change,"changes":changes}));
+        .push(json!({"id":id,"label":label,"categories":category_change,"changes":changes}));
+    m.management_redo.clear();
     if m.management_undo.len() > 20 {
         m.management_undo.remove(0);
     }
 }
 
-fn undo(m: &mut Manager) -> Result<Value, String> {
-    let entry = m
-        .management_undo
-        .last()
-        .cloned()
-        .ok_or("没有可撤销的分类或收藏操作")?;
-    let mut next = m.state.clone();
+pub(crate) fn replay_state(state: &State, entry: &Value, redo: bool) -> Result<State, String> {
+    let (expected_side, target_side, expected_present, target_present, verb) = if redo {
+        ("before", "after", "beforePresent", "afterPresent", "重做")
+    } else {
+        ("after", "before", "afterPresent", "beforePresent", "撤销")
+    };
+    let mut next = state.clone();
     if !entry["categories"].is_null() {
-        if json!(categories(&next)?) != entry["categories"]["after"] {
-            return Err("分类已发生其他变化，无法安全撤销；现有记录已保留".into());
+        if json!(categories(&next)?) != entry["categories"][expected_side] {
+            return Err(format!(
+                "分类已发生其他变化，无法安全{verb}；现有记录已保留"
+            ));
         }
-        next.settings["categories"] = entry["categories"]["before"].clone();
+        next.settings["categories"] = entry["categories"][target_side].clone();
     }
-    for change in entry["changes"].as_array().ok_or("Invalid undo record")? {
+    for change in entry["changes"]
+        .as_array()
+        .ok_or("Invalid management record")?
+    {
         let skill = next
             .skills
             .iter_mut()
             .find(|skill| skill["id"] == change["skillId"])
-            .ok_or("Skill记录已变化，无法安全撤销；现有记录已保留")?;
+            .ok_or_else(|| format!("Skill记录已变化，无法安全{verb}；现有记录已保留"))?;
         let field = text(change, "field")?;
-        let expected = (change["afterPresent"] == true).then_some(&change["after"]);
+        let expected = (change[expected_present] == true).then_some(&change[expected_side]);
         if skill.get(field) != expected {
-            return Err("分类或收藏已发生其他变化，无法安全撤销；现有记录已保留".into());
+            return Err(format!(
+                "分类或收藏已发生其他变化，无法安全{verb}；现有记录已保留"
+            ));
         }
         let object = skill.as_object_mut().ok_or("Invalid Skill record")?;
-        if change["beforePresent"] == true {
-            object.insert(field.into(), change["before"].clone());
+        if change[target_present] == true {
+            object.insert(field.into(), change[target_side].clone());
         } else {
             object.remove(field);
         }
@@ -213,21 +222,57 @@ fn undo(m: &mut Manager) -> Result<Value, String> {
                 .any(|category| category["id"] == id)
         })
     }) {
-        return Err("分类中已有新的成员，无法安全撤销；请先核对归属".into());
+        return Err(format!("分类中已有新的成员，无法安全{verb}；请先核对归属"));
     }
+    Ok(next)
+}
+
+fn replay(m: &mut Manager, request: &Value, redo: bool) -> Result<Value, String> {
+    let (history, verb) = if redo {
+        (&m.management_redo, "重做")
+    } else {
+        (&m.management_undo, "撤销")
+    };
+    let mut entry = history
+        .last()
+        .cloned()
+        .ok_or_else(|| format!("没有可{verb}的分类或收藏操作"))?;
+    if redo || request.get("expectedEntryId").is_some() {
+        let expected = text(request, "expectedEntryId")?;
+        if entry["id"].as_str() != Some(expected) {
+            return Err(format!(
+                "管理操作记录已变化，请重新读取后{verb}；现有记录已保留"
+            ));
+        }
+    }
+    let next = replay_state(&m.state, &entry, redo)?;
     let previous = std::mem::replace(&mut m.state, next);
+    let previous_undo = m.management_undo.clone();
+    let previous_redo = m.management_redo.clone();
+    // A legacy in-session entry can still be undone with the old request shape.
+    if entry["id"].as_str().is_none() {
+        entry["id"] = json!(m.id());
+    }
+    if redo {
+        m.management_redo.pop();
+        m.management_undo.push(entry);
+    } else {
+        m.management_undo.pop();
+        m.management_redo.push(entry);
+    }
     if let Err(error) = m.save() {
         m.state = previous;
+        m.management_undo = previous_undo;
+        m.management_redo = previous_redo;
         return Err(error);
     }
-    m.management_undo.pop();
     Ok(m.snapshot())
 }
 
 pub fn handle(m: &mut Manager, request: &Value) -> Result<Option<Value>, String> {
     let action = request["action"].as_str().unwrap_or_default();
-    if action == "undo_management" {
-        return undo(m).map(Some);
+    if matches!(action, "undo_management" | "redo_management") {
+        return replay(m, request, action == "redo_management").map(Some);
     }
     if !matches!(
         action,
@@ -347,11 +392,15 @@ pub fn handle(m: &mut Manager, request: &Value) -> Result<Option<Value>, String>
         next.settings["categories"] = json!(list);
     }
     let previous = std::mem::replace(&mut m.state, next);
+    let previous_undo = m.management_undo.clone();
+    let previous_redo = m.management_redo.clone();
+    remember(m, &previous, action);
     if let Err(error) = m.save() {
         m.state = previous;
+        m.management_undo = previous_undo;
+        m.management_redo = previous_redo;
         return Err(error);
     }
-    remember(m, &previous, action);
     Ok(Some(m.snapshot()))
 }
 
@@ -637,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_walks_category_create_rename_order_membership_delete_and_favorite_in_reverse() {
+    fn undo_and_redo_walk_category_edits_and_favorite_with_stable_entry_ids() {
         let (_dir, mut m) = fixture();
         let mut states = vec![state(&m)];
         let a = create(&mut m, "Research");
@@ -647,6 +696,7 @@ mod tests {
         for request in [
             json!({"action":"assign_category","skillIds":["local","remote"],"categoryId":a}),
             json!({"action":"rename_category","categoryId":a,"name":"Papers"}),
+            json!({"action":"set_category_color","categoryId":a,"color":"rose"}),
             json!({"action":"reorder_categories","categoryIds":[b,a]}),
             json!({"action":"set_favorite","skillId":"local","favorite":true}),
             json!({"action":"delete_category","categoryId":a}),
@@ -654,13 +704,37 @@ mod tests {
             handle(&mut m, &request).unwrap();
             states.push(state(&m));
         }
-        states.pop();
-        for expected in states.into_iter().rev() {
-            handle(&mut m, &json!({"action":"undo_management"})).unwrap();
-            assert_eq!(state(&m), expected);
+        let ids: Vec<_> = m
+            .management_undo
+            .iter()
+            .map(|entry| entry["id"].clone())
+            .collect();
+        for expected in states[..states.len() - 1].iter().rev() {
+            let id = m.snapshot()["managementUndo"]["entryId"].clone();
+            handle(
+                &mut m,
+                &json!({"action":"undo_management","expectedEntryId":id}),
+            )
+            .unwrap();
+            assert_eq!(&state(&m), expected);
+            assert_eq!(m.snapshot()["managementRedo"]["entryId"], id);
         }
         assert_eq!(m.snapshot()["managementUndo"]["available"], false);
         assert!(handle(&mut m, &json!({"action":"undo_management"})).is_err());
+        for (expected, id) in states.iter().skip(1).zip(&ids) {
+            assert_eq!(m.snapshot()["managementRedo"]["entryId"], *id);
+            handle(
+                &mut m,
+                &json!({"action":"redo_management","expectedEntryId":id}),
+            )
+            .unwrap();
+            assert_eq!(&state(&m), expected);
+            assert_eq!(m.snapshot()["managementUndo"]["entryId"], *id);
+        }
+        assert_eq!(
+            m.snapshot()["managementRedo"],
+            json!({"available":false,"label":null,"entryId":null})
+        );
     }
 
     #[test]
@@ -712,11 +786,133 @@ mod tests {
         assert_eq!(m.management_undo.len(), 20);
         let restarted = Manager::new(dir.path().to_path_buf()).unwrap();
         assert!(restarted.management_undo.is_empty());
+        assert!(restarted.management_redo.is_empty());
         assert_eq!(restarted.state.skills[0]["favorite"], true);
         for _ in 0..20 {
             handle(&mut m, &json!({"action":"undo_management"})).unwrap();
+            assert_eq!(m.management_undo.len() + m.management_redo.len(), 20);
         }
         assert!(m.management_undo.is_empty());
+        assert_eq!(m.management_redo.len(), 20);
+        let restarted = Manager::new(dir.path().to_path_buf()).unwrap();
+        assert!(restarted.management_undo.is_empty());
+        assert!(restarted.management_redo.is_empty());
+        for _ in 0..20 {
+            let id = m.snapshot()["managementRedo"]["entryId"].clone();
+            handle(
+                &mut m,
+                &json!({"action":"redo_management","expectedEntryId":id}),
+            )
+            .unwrap();
+            assert_eq!(m.management_undo.len() + m.management_redo.len(), 20);
+        }
+        assert!(m.management_redo.is_empty());
+    }
+
+    #[test]
+    fn redo_requires_the_displayed_entry_and_preserves_missing_fields_and_unrelated_evidence() {
+        let (_dir, mut m) = fixture();
+        handle(
+            &mut m,
+            &json!({"action":"set_favorite","skillId":"local","favorite":true}),
+        )
+        .unwrap();
+        let id = m.snapshot()["managementUndo"]["entryId"].clone();
+        let before = state(&m);
+        assert!(handle(
+            &mut m,
+            &json!({"action":"undo_management","expectedEntryId":"stale"})
+        )
+        .is_err());
+        assert_eq!(state(&m), before);
+        handle(&mut m, &json!({"action":"undo_management"})).unwrap();
+        let original = state(&m);
+        let history = m.management_redo.clone();
+        for request in [
+            json!({"action":"redo_management"}),
+            json!({"action":"redo_management","expectedEntryId":null}),
+            json!({"action":"redo_management","expectedEntryId":42}),
+            json!({"action":"redo_management","expectedEntryId":""}),
+            json!({"action":"redo_management","expectedEntryId":"stale"}),
+        ] {
+            assert!(handle(&mut m, &request).is_err());
+            assert_eq!(state(&m), original);
+            assert_eq!(m.management_redo, history);
+        }
+        // A concurrent explicit null is different from the missing original field.
+        m.state.skills[0]["favorite"] = Value::Null;
+        assert!(handle(
+            &mut m,
+            &json!({"action":"redo_management","expectedEntryId":id})
+        )
+        .is_err());
+        assert_eq!(m.management_redo, history);
+        m.state.skills[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("favorite");
+        m.state.skills[0]["lastLocalCheckedAt"] = json!("new-evidence");
+        m.state.skills[0]["externalBindings"] = json!({"kept":true});
+        handle(
+            &mut m,
+            &json!({"action":"redo_management","expectedEntryId":id}),
+        )
+        .unwrap();
+        assert_eq!(m.state.skills[0]["favorite"], true);
+        assert_eq!(m.state.skills[0]["lastLocalCheckedAt"], "new-evidence");
+        assert_eq!(m.state.skills[0]["externalBindings"], json!({"kept":true}));
+        assert_eq!(
+            m.state.sources,
+            original["sources"].as_array().unwrap().clone()
+        );
+        assert_eq!(
+            m.state.connections,
+            original["connections"].as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn only_successful_changed_management_operations_clear_the_redo_branch() {
+        let (dir, mut m) = fixture();
+        let category = create(&mut m, "Research");
+        handle(
+            &mut m,
+            &json!({"action":"set_favorite","skillId":"local","favorite":true}),
+        )
+        .unwrap();
+        handle(&mut m, &json!({"action":"undo_management"})).unwrap();
+        let original = state(&m);
+        let undo = m.management_undo.clone();
+        let redo = m.management_redo.clone();
+        handle(
+            &mut m,
+            &json!({"action":"rename_category","categoryId":category,"name":"Research"}),
+        )
+        .unwrap();
+        assert_eq!(m.management_redo, redo);
+        assert!(handle(
+            &mut m,
+            &json!({"action":"rename_category","categoryId":category,"name":""})
+        )
+        .is_err());
+        let db = rusqlite::Connection::open(dir.path().join("manager.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_branch BEFORE INSERT ON app_state BEGIN SELECT RAISE(ABORT, 'synthetic branch save failure'); END;").unwrap();
+        assert!(handle(
+            &mut m,
+            &json!({"action":"rename_category","categoryId":category,"name":"Papers"})
+        )
+        .is_err());
+        assert_eq!(state(&m), original);
+        assert_eq!(m.management_undo, undo);
+        assert_eq!(m.management_redo, redo);
+        db.execute_batch("DROP TRIGGER reject_branch").unwrap();
+        handle(
+            &mut m,
+            &json!({"action":"rename_category","categoryId":category,"name":"Papers"}),
+        )
+        .unwrap();
+        assert!(m.management_redo.is_empty());
+        assert_ne!(m.management_undo.last().unwrap()["id"], redo[0]["id"]);
     }
 
     #[test]

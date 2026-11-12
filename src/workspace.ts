@@ -4,6 +4,7 @@ export type PaneKind = typeof PANE_KINDS[number];
 export type PaneNavigationState = {
   section?: string; documentPath?: string; documentVersion?: 'installed' | 'latest';
   view?: string; clientId?: string; taskId?: string; operation?: string;
+  focusRevision?: number;
   scrollTop?: number; outlineExpanded?: boolean; expandedSections?: string[]; reviewRequired?: boolean;
 };
 export type WorkspacePane = { id: string; kind: PaneKind; title?: string; skillId?: string; state: PaneNavigationState };
@@ -28,6 +29,7 @@ export function navigationState(value: unknown): PaneNavigationState {
   const raw = record(value); const state: PaneNavigationState = {};
   for (const key of ['section', 'documentPath', 'view', 'clientId', 'taskId', 'operation'] as const) { const item = text(raw[key], key === 'documentPath' ? 1024 : 200); if (item) state[key] = item; }
   if (raw.documentVersion === 'installed' || raw.documentVersion === 'latest') state.documentVersion = raw.documentVersion;
+  if (typeof raw.focusRevision === 'number' && Number.isSafeInteger(raw.focusRevision) && raw.focusRevision > 0) state.focusRevision = raw.focusRevision;
   if (typeof raw.scrollTop === 'number' && Number.isFinite(raw.scrollTop)) state.scrollTop = Math.max(0, raw.scrollTop);
   if (typeof raw.outlineExpanded === 'boolean') state.outlineExpanded = raw.outlineExpanded;
   if (typeof raw.reviewRequired === 'boolean') state.reviewRequired = raw.reviewRequired;
