@@ -239,13 +239,10 @@ pub(crate) fn discover(manager: &mut Manager, request: &Value) -> Result<Discove
             continue;
         }
         match local::draft(&path) {
-            Ok(mut skill) if skill["readOnly"] != true && skill["managed"] != true => {
-                let id = manager.id();
-                skill["id"] = json!(id);
-                crate::audit::refresh_local_audit(&mut skill, None);
-                manager.upsert_skill(skill);
+            Ok(skill) if skill["readOnly"] != true && skill["managed"] != true => {
+                let (id, imported) = local::register_draft(manager, skill)?;
                 known.insert(key);
-                result.imported += 1;
+                result.imported += usize::from(imported);
                 result.changed_ids.push(id);
             }
             Ok(_) => {}
@@ -296,7 +293,7 @@ pub(crate) fn handle(manager: &mut Manager, request: &Value) -> Result<Option<Va
             .unwrap_or_default();
         let current_errors: Vec<Value> =
             discovery.errors.iter().map(|error| json!(error)).collect();
-        let changed = discovery.imported > 0 || previous_errors != current_errors;
+        let changed = !discovery.changed_ids.is_empty() || previous_errors != current_errors;
         let summary = json!({"newLocal":discovery.imported,"newRemote":0,"associated":0,"needsAttention":0,"errors":discovery.errors.len(),"rootErrors":discovery.errors,"changed":changed,"checkedAt":now()});
         if changed {
             manager.state.check_summary = summary.clone();
@@ -388,10 +385,7 @@ pub(crate) fn handle(manager: &mut Manager, request: &Value) -> Result<Option<Va
                                 .is_ok_and(|path| path_key(&path) == key)
                         })
                     {
-                        let mut skill = local::draft(&canonical)?;
-                        skill["id"] = json!(manager.id());
-                        crate::audit::refresh_local_audit(&mut skill, None);
-                        manager.upsert_skill(skill);
+                        local::register_draft(manager, local::draft(&canonical)?)?;
                     }
                 }
             }
@@ -512,7 +506,7 @@ pub(crate) fn handle(manager: &mut Manager, request: &Value) -> Result<Option<Va
             }
             // Discovery is visible immediately; slow/offline GitHub must never
             // postpone registration of an already valid local Skill.
-            if discovery.imported > 0 {
+            if !discovery.changed_ids.is_empty() {
                 manager.save()?;
             }
             let mut value = if remote_request["discoveryOnly"] == true

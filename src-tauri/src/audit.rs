@@ -97,6 +97,7 @@ fn apply_local_audit_with_inventory(
     };
     let inventory = inventory.or(owned_inventory.as_ref());
     if let Some(inventory) = inventory {
+        local::refresh_declared_metadata(skill, Some(inventory))?;
         local::retire_obsolete_reference_bindings(skill, inventory);
     }
     let manual = preserves_manual_scope(skill);

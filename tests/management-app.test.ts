@@ -134,6 +134,151 @@ const click = async (button: Element) => act(async () => { button.dispatchEvent(
 const button = (scope: Element, label: string) => [...scope.querySelectorAll('button')].find(item => item.textContent === label)!;
 const results = (scope: Element) => [...scope.querySelectorAll('[data-skill-id]')].map(item => item.getAttribute('data-skill-id'));
 
+test('Skill management record removal is discoverable in details and keeps client connections out of the request', async () => {
+  const current = snapshot();
+  const state = { ...current, connections: [{ id: 'connection', skillId: 'alpha', client: 'codex', path: 'D:/synthetic/client/alpha', linked: true }] } as unknown as ReturnType<typeof snapshot>;
+  const f = await fixture({ state, draft: { libraryMode: 'details', selectedId: 'alpha', tab: 'source' }, read: action => {
+    if (action === 'forget') return { ...state, stateRevision: 2, skills: [state.skills[1]], connections: [] };
+    if (action === 'preview_relocate_local') return relocationPreview();
+    return {};
+  } });
+  const detail = f.pane().querySelector('.skill-detail')!;
+  assert.equal(button(detail, '移除管理记录').disabled, false, 'existing client connections do not require disconnection');
+  await click(button(detail, '更多'));
+  const menu = document.querySelector('[role="menu"]')!;
+  await click(button(menu, '重新定位本地目录…'));
+  assert.equal(document.querySelector('[role="dialog"]'), null, 'the relocation workflow leaves the main page available');
+  assert.equal(f.opened.length, 1);
+  assert.equal((f.opened[0].modal as { kind: string }).kind, 'relocate-local');
+  assert.equal(f.opened[0].draft.skillRelocationDraft, undefined, 'opening another Skill does not reuse a previous relocation draft');
+  await click(button(detail, '更多')); await click(button(document.querySelector('[role="menu"]')!, '移除管理记录…'));
+  const dialog = document.querySelector('[role="dialog"]')!;
+  assert.match(dialog.textContent!, /客户端实际连接和 GitHub 内容均保留/);
+  assert.match(dialog.textContent!, /不会自动重新导入/);
+  assert.equal(f.calls.filter(call => call.action === 'forget').length, 0);
+  await click(button(dialog, '确认移除记录'));
+  assert.deepEqual(f.calls.find(call => call.action === 'forget')?.args, { skillId: 'alpha' });
+  assert(!f.calls.some(call => ['disconnect', 'preview_disconnect', 'apply_disconnect', 'apply_skill_remove', 'delete_skill', 'export', 'relocate_local'].includes(call.action)));
+  assert.equal(JSON.stringify(f.state), f.original, 'the original snapshot is never edited in place');
+});
+
+test('Skill list offers management record removal only for one selected record without changing bulk selection', async () => {
+  const f = await fixture();
+  assert.equal(button(f.pane(), '移除管理记录'), undefined);
+  const alpha = row(f.pane(), 'alpha').querySelector('input')!, beta = row(f.pane(), 'beta').querySelector('input')!;
+  await click(alpha);
+  assert(button(f.pane(), '移除管理记录'));
+  await click(beta);
+  assert.equal(button(f.pane(), '移除管理记录'), undefined, 'batch removal is not silently introduced');
+  assert(button(f.pane(), '检查所选 (2)'));
+  await click(beta);
+  await click(button(f.pane(), '移除管理记录'));
+  const dialog = document.querySelector('[role="dialog"]')!;
+  assert.match(dialog.textContent!, /个人别名/);
+  await click(button(dialog, '取消'));
+  assert.equal((alpha as HTMLInputElement).checked, true);
+  assert.equal(f.calls.filter(call => call.action === 'forget').length, 0);
+});
+
+test('local directory errors stay concise in the Skill list while full errors and unrelated error meanings remain available', async () => {
+  const current = snapshot(), error = 'Cannot resolve path (D:/synthetic/alpha): 系统找不到指定的路径 (os error 3)';
+  const f = await fixture({ state: { ...current, skills: [{ ...current.skills[0], error }, { ...current.skills[1], error: '仓库凭据已过期' }] } });
+  const missing = row(f.pane(), 'alpha').querySelector('.status-detail')!;
+  assert.equal(missing.textContent, '本地目录不可用');
+  assert(missing.getAttribute('title')!.includes(error));
+  assert.equal(row(f.pane(), 'beta').querySelector('.status-detail')!.textContent, '仓库凭据已过期');
+});
+
+const relocationPreview = () => ({ id: 'relocation-preview', kind: 'localRelocation', skillId: 'alpha', oldPath: 'D:/synthetic/missing', path: 'D:/synthetic/new', name: 'model-research', displayName: 'Model Research', version: '0.2.0', duplicateId: 'duplicate', canApply: true, warnings: ['客户端原有失效入口仍需检查连接。'], retained: ['分类', '收藏', '别名与备注', 'GitHub关联', '安装基准'] });
+async function relocationFixture(handler: (command: string, args: Record<string, unknown>) => unknown, chooseDirectory = async () => 'D:/synthetic/new') {
+  const { SkillRelocation } = await import(new URL('../src/SkillRelocation.tsx', import.meta.url).href);
+  const calls: { command: string; args: Record<string, unknown> }[] = [], applied: unknown[] = [];
+  const root = createRoot(host); cleanup = () => root.unmount();
+  let readOnly = false;
+  const render = async () => act(async () => root.render(createElement(SkillRelocation, {
+    skillId: 'alpha', oldPath: 'D:/synthetic/missing', readOnly, chooseDirectory,
+    action: async (_label: string, command: string, args: Record<string, unknown>) => { calls.push({ command, args }); return handler(command, args); },
+    onApplied: (result: unknown) => applied.push(result), onClose: () => {}, onDraft: () => {},
+  })));
+  await render();
+  return { calls, applied, render, setReadOnly: async (value: boolean) => { readOnly = value; await render(); }, dispose: async () => { await act(async () => root.unmount()); cleanup = () => {}; }, input: () => host.querySelector<HTMLInputElement>('[aria-label="现在的 Skill 目录"]')! };
+}
+
+test('local relocation uses an operation page and transfers its path and preview without replaying a write', async () => {
+  const current = snapshot(), modal = { kind: 'relocate-local', skill: current.skills[0] };
+  const f = await fixture({ operation: true, draft: { modal } });
+  assert.equal(document.querySelector('[role="dialog"]'), null);
+  const input = f.pane().querySelector<HTMLInputElement>('[aria-label="现在的 Skill 目录"]')!;
+  assert.equal(input.value, '', 'a missing original path is not used as a directory-picker default');
+  await change(input, 'D:/synthetic/new');
+  const draft = f.bridges.get('home-0')!.capture();
+  assert.deepEqual(draft.skillRelocationDraft, { path: 'D:/synthetic/new', preview: null });
+  await f.dispose();
+  const preview = relocationPreview();
+  const next = await fixture({ operation: true, draft: { ...draft, skillRelocationDraft: { path: preview.path, preview } }, read: (action, args) => {
+    assert.equal(action, 'relocate_local'); assert.deepEqual(args, { previewId: preview.id }); return { ...current, stateRevision: 2 };
+  } });
+  assert.equal(next.pane().querySelector<HTMLInputElement>('[aria-label="现在的 Skill 目录"]')!.value, preview.path);
+  assert(next.pane().querySelector('[aria-label="本地目录重新定位预览"]'));
+  assert.equal(next.calls.filter(call => call.action === 'relocate_local').length, 0);
+  assert.deepEqual(next.bridges.get('home-0')!.capture().skillRelocationDraft, { path: preview.path, preview });
+  await click(button(next.pane(), '确认重新定位'));
+  assert(next.accepted.some(value => (value as { stateRevision?: number }).stateRevision === 2));
+  assert.equal(next.calls.filter(call => call.action === 'relocate_local').length, 1);
+});
+
+test('local relocation previews the chosen directory and confirms only its preview ID with all retention information', async () => {
+  const saved = { ...snapshot(), stateRevision: 2 };
+  const pending = deferred<typeof saved>();
+  const f = await relocationFixture(command => command === 'preview_relocate_local' ? relocationPreview() : pending.promise);
+  assert.equal(button(host, '确认重新定位').disabled, true);
+  await click(button(host, '选择目录'));
+  assert.equal(f.input().value, 'D:/synthetic/new');
+  assert.equal(f.calls.length, 0, 'choosing a directory does not mutate or inspect it');
+  await click(button(host, '预览对应关系'));
+  assert.deepEqual(f.calls, [{ command: 'preview_relocate_local', args: { skillId: 'alpha', path: 'D:/synthetic/new' } }]);
+  const preview = host.querySelector('[aria-label="本地目录重新定位预览"]')!;
+  for (const text of ['D:/synthetic/missing', 'D:/synthetic/new', 'Model Research', 'model-research', '0.2.0', '重复记录', '分类', '收藏', '别名与备注', 'GitHub关联', '安装基准', '失效入口']) assert(preview.textContent!.includes(text));
+  await act(async () => { button(host, '确认重新定位').click(); button(host, '确认重新定位').click(); });
+  assert.deepEqual(f.calls[1], { command: 'relocate_local', args: { previewId: 'relocation-preview' } });
+  assert.equal(f.calls.filter(call => call.command === 'relocate_local').length, 1);
+  await act(async () => pending.resolve(saved));
+  assert.deepEqual(f.applied, [saved]);
+});
+
+test('local relocation discards a late preview when the path changes and ignores a result after close', async () => {
+  const pending = deferred<ReturnType<typeof relocationPreview>>();
+  const f = await relocationFixture(() => pending.promise);
+  await change(f.input(), 'D:/synthetic/first');
+  await click(button(host, '预览对应关系'));
+  await change(f.input(), 'D:/synthetic/second');
+  await act(async () => pending.resolve(relocationPreview()));
+  assert.equal(host.querySelector('[aria-label="本地目录重新定位预览"]'), null);
+  assert.equal(button(host, '确认重新定位').disabled, true);
+  assert.equal(f.input().value, 'D:/synthetic/second');
+  await f.dispose();
+  const late = deferred<ReturnType<typeof relocationPreview>>();
+  const closed = await relocationFixture(() => late.promise);
+  await change(closed.input(), 'D:/synthetic/new'); await click(button(host, '预览对应关系'));
+  await closed.dispose(); await act(async () => late.resolve(relocationPreview()));
+  assert.deepEqual(closed.applied, []);
+});
+
+test('local relocation refuses a blocked preview and invalidates failed or no longer allowed confirmation', async () => {
+  let canApply = false;
+  const f = await relocationFixture(command => { if (command === 'preview_relocate_local') return { ...relocationPreview(), canApply }; throw new Error('目录已变化，请重新预览。'); });
+  await change(f.input(), 'D:/synthetic/new'); await click(button(host, '预览对应关系'));
+  assert.equal(button(host, '确认重新定位').disabled, true);
+  canApply = true; await click(button(host, '预览对应关系')); await click(button(host, '确认重新定位'));
+  assert.match(host.querySelector('[role="alert"]')!.textContent!, /目录已变化/);
+  assert.equal(button(host, '确认重新定位').disabled, true);
+  assert.equal(f.input().value, 'D:/synthetic/new');
+  await click(button(host, '预览对应关系')); await f.setReadOnly(true);
+  assert.equal(host.querySelector('[aria-label="本地目录重新定位预览"]'), null);
+  assert.equal(button(host, '确认重新定位').disabled, true);
+  assert.equal(f.calls.filter(call => call.command === 'relocate_local').length, 1);
+});
+
 test('late navigation persistence keeps the current search while explicit newer focus requests navigate', async () => {
   const f = await fixture({ read: action => {
     assert.equal(action, 'resource_list');

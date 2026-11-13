@@ -1,0 +1,12 @@
+.skill-relocation { display: grid; gap: 16px; min-width: 0; }
+.skill-relocation > p { margin: 0; }
+.skill-relocation-original { display: grid; gap: 5px; }
+.skill-relocation-original > span { color: var(--muted); font-size: .9em; }
+.skill-relocation code, .skill-relocation .info-grid dd { overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
+.skill-relocation form { display: grid; gap: 10px; }
+.skill-relocation-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.skill-relocation-status { display: flex; align-items: center; gap: 8px; }
+.skill-relocation-preview { border-top: 1px solid var(--line); padding-top: 16px; }
+.skill-relocation-preview p { margin: 12px 0 0; }
+.skill-relocation-footer { justify-content: flex-end; border-top: 1px solid var(--line); padding-top: 16px; }
+.skill-status-cell .status-detail { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -1908,6 +1908,15 @@ impl ManagerRuntime for WorkerHook {
         } else {
             merge_state(&base.state, &worker.state, &manager.state, &self.action)?
         };
+        if matches!(self.action.as_str(), "forget" | "relocate_local") {
+            manager.ensure_request_allowed(&self.request)?;
+        }
+        crate::local::validate_local_record_commit(
+            &manager,
+            &manager.state,
+            &merged,
+            &self.action,
+        )?;
         if merged == manager.state && !history_changed {
             base.state = worker.state.clone();
             return Ok(());
@@ -2113,6 +2122,18 @@ impl WorkerHook {
         }
         crate::export_plan::trim_previews(&mut manager.previews);
         crate::resource_lifecycle::trim_previews(&mut manager.previews);
+        let relocation_preview = (self.action == "preview_relocate_local")
+            .then(|| {
+                worker.previews.iter().find_map(|(id, preview)| {
+                    (preview["kind"] == "localRelocation" && !base.previews.contains_key(id))
+                        .then(|| id.clone())
+                })
+            })
+            .flatten();
+        crate::local::trim_relocation_previews(
+            &mut manager.previews,
+            relocation_preview.as_deref(),
+        );
         Ok(())
     }
 }
@@ -2511,13 +2532,21 @@ fn resources_for(manager: &Manager, request: &Value) -> Result<Vec<Resource>, St
         .as_str()
         .or_else(|| request["planId"].as_str())
         .and_then(|id| manager.previews.get(id));
-    let skill_id = request["skillId"].as_str().or_else(|| {
+    let skill_id = if action == "relocate_local" {
         preview.and_then(|p| {
-            p["public"]["skillId"]
+            p["original"]["id"]
                 .as_str()
-                .or_else(|| p["skillId"].as_str())
+                .or_else(|| p["public"]["skillId"].as_str())
         })
-    });
+    } else {
+        request["skillId"].as_str().or_else(|| {
+            preview.and_then(|p| {
+                p["public"]["skillId"]
+                    .as_str()
+                    .or_else(|| p["skillId"].as_str())
+            })
+        })
+    };
     let write = !read_request(request)
         && !action.starts_with("preview_")
         && !matches!(action, "open_local" | "open_folder" | "export");
@@ -2727,6 +2756,60 @@ fn resources_for(manager: &Manager, request: &Value) -> Result<Vec<Resource>, St
             }
         }
     }
+    if matches!(
+        action,
+        "forget" | "preview_relocate_local" | "relocate_local"
+    ) {
+        add("local:discovery".into(), write);
+        add("sources:discovery".into(), write);
+        add("resource-catalog".into(), false);
+        add("resource-relations".into(), false);
+        add("resource-scenes".into(), false);
+        add("management-data".into(), false);
+        // Forget changes client registration/ignore records. Refresh may discover
+        // an entry that had no connection record when these locks were planned.
+        if action == "forget" {
+            for client in ["codex", "claude", "cursor"] {
+                add(format!("client:{client}"), true);
+            }
+        }
+        if let Some(path) = if action == "preview_relocate_local" {
+            request["path"].as_str()
+        } else {
+            preview.and_then(|p| {
+                p["draft"]["localPath"]
+                    .as_str()
+                    .or_else(|| p["public"]["path"].as_str())
+            })
+        } {
+            add(format!("directory:{}", path_key(path)), write);
+        }
+        let duplicate = preview.and_then(|p| {
+            p["duplicate"]["id"]
+                .as_str()
+                .or_else(|| p["public"]["duplicateId"].as_str())
+        });
+        if let Some(id) = duplicate {
+            add(format!("skill:{id}"), write);
+            if let Ok(skill) = manager.skill(id) {
+                if let Some(path) = skill["localPath"].as_str() {
+                    add(format!("directory:{}", path_key(path)), write);
+                }
+            }
+        }
+        for connection in &manager.state.connections {
+            if connection["skillId"].as_str() == skill_id
+                || duplicate.is_some_and(|id| connection["skillId"] == id)
+            {
+                if let Some(client) = connection["client"].as_str() {
+                    add(format!("client:{client}"), write);
+                }
+                if let Some(path) = connection["path"].as_str() {
+                    add(format!("entry:{}", path_key(path)), write);
+                }
+            }
+        }
+    }
     if action == "resource_package_inspect" {
         if let Some(path) = request["archivePath"].as_str() {
             add(format!("archive:{}", path_key(path)), false);
@@ -2876,6 +2959,7 @@ fn resources_for(manager: &Manager, request: &Value) -> Result<Vec<Resource>, St
             | "remove_local_roots"
             | "restore_local_ignores"
             | "forget"
+            | "relocate_local"
     ) {
         add("settings:checking".into(), true);
     }
@@ -7679,5 +7763,430 @@ mod tests {
             manager.resource_runtime.snapshot(None).unwrap()["runs"],
             json!([])
         );
+    }
+
+    #[test]
+    fn local_record_changes_lock_discovery_clients_references_and_server_preview_targets() {
+        let (_dir, service) = fixture();
+        let mut manager = service.manager.lock().unwrap();
+        manager.state.skills[0]["localPath"] = json!("D:/synthetic/old");
+        manager.state.skills[1]["localPath"] = json!("D:/synthetic/new");
+        manager.state.connections = vec![
+            json!({"id":"old-entry","skillId":"one","client":"codex","path":"D:/synthetic/codex/one"}),
+            json!({"id":"duplicate-entry","skillId":"two","client":"claude","path":"D:/synthetic/claude/two"}),
+        ];
+        let original = manager.state.skills[0].clone();
+        let duplicate = manager.state.skills[1].clone();
+        manager.previews.insert(
+            "relocate".into(),
+            json!({
+                "kind":"localRelocation", "original":original, "duplicate":duplicate,
+                "draft":{"localPath":"D:/synthetic/new"},
+                "public":{"skillId":"one","path":"D:/synthetic/new","duplicateId":"two"}
+            }),
+        );
+        let forget = resources_for(&manager, &json!({"action":"forget","skillId":"one"})).unwrap();
+        let relocating = resources_for(&manager, &json!({"action":"relocate_local","previewId":"relocate","skillId":"three","path":"D:/forged"})).unwrap();
+        for locks in [&forget, &relocating] {
+            for key in [
+                "local:discovery",
+                "sources:discovery",
+                "skill:one",
+                "client:codex",
+            ] {
+                assert!(
+                    locks.iter().any(|lock| lock.key == key && lock.write),
+                    "{key}: {locks:?}"
+                );
+            }
+            for key in [
+                "resource-catalog",
+                "resource-relations",
+                "resource-scenes",
+                "management-data",
+            ] {
+                assert!(
+                    locks.iter().any(|lock| lock.key == key && !lock.write),
+                    "{key}: {locks:?}"
+                );
+            }
+            for request in [
+                json!({"action":"discover_local"}),
+                json!({"action":"add_local","paths":["D:/synthetic/new"]}),
+                json!({"action":"check_now"}),
+                json!({"action":"resource_relation_add"}),
+                json!({"action":"resource_scene_save"}),
+                json!({"action":"resource_update","id":"tool"}),
+                json!({"action":"skill_annotation_set","skillId":"one"}),
+                json!({"action":"refresh_clients"}),
+            ] {
+                assert!(
+                    conflicts(locks, &resources_for(&manager, &request).unwrap()),
+                    "{request}: {locks:?}"
+                );
+            }
+        }
+        assert!(forget
+            .iter()
+            .any(|lock| lock.key == "client:cursor" && lock.write));
+        assert!(!relocating.iter().any(|lock| lock.key == "client:cursor"));
+        assert!(relocating
+            .iter()
+            .any(|lock| lock.key == "skill:two" && lock.write));
+        for path in [
+            "D:/synthetic/old",
+            "D:/synthetic/new",
+            "D:/synthetic/claude/two",
+        ] {
+            let prefix = if path.contains("claude") {
+                "entry"
+            } else {
+                "directory"
+            };
+            assert!(relocating
+                .iter()
+                .any(|lock| lock.key == format!("{prefix}:{}", path_key(path)) && lock.write));
+        }
+        assert!(!relocating
+            .iter()
+            .any(|lock| lock.key == "skill:three" || lock.key.contains("forged")));
+        let preview = resources_for(
+            &manager,
+            &json!({"action":"preview_relocate_local","skillId":"one","path":"D:/synthetic/new"}),
+        )
+        .unwrap();
+        assert!(!conflicts(&preview, &preview));
+        assert!(conflicts(&preview, &relocating));
+        assert!(read_request(&json!({"action":"preview_relocate_local"})));
+        assert!(!read_request(&json!({"action":"relocate_local"})));
+        assert!(!read_request(&json!({"action":"forget"})));
+    }
+
+    struct LocalRecordLatchRelease(Latch);
+    impl Drop for LocalRecordLatchRelease {
+        fn drop(&mut self) {
+            release(&self.0);
+        }
+    }
+
+    fn paused_local_record_removal(
+        manager: &mut Manager,
+        request: &Value,
+    ) -> Result<Value, String> {
+        let removed = text(request, "removedId")?;
+        crate::local::guard_skill_record_removal(manager, removed)?;
+        manager.state.skills.retain(|skill| skill["id"] != removed);
+        // Model the interval after a handler's initial checks and before its
+        // state save; the real live writer must repeat reference admission.
+        hold(text(request, "hold")?)?;
+        manager.save()?;
+        Ok(manager.snapshot())
+    }
+
+    #[test]
+    fn local_record_live_writer_rechecks_new_relations_and_scene_references() {
+        for reference in ["relation", "scene"] {
+            let (_dir, service) = fixture();
+            let (gate, latch) = new_latch();
+            let _release = LocalRecordLatchRelease(latch.clone());
+            let worker_service = service.clone();
+            let worker = std::thread::spawn(move || {
+                worker_service.execute(
+                    json!({"action":"forget","skillId":"one","removedId":"one","hold":gate}),
+                    paused_local_record_removal,
+                )
+            });
+            entered(&latch);
+            {
+                let live = service.manager.lock().unwrap();
+                let endpoint = crate::resource_relations::Endpoint {
+                    kind: "skill".into(),
+                    id: "one".into(),
+                };
+                if reference == "relation" {
+                    live.relation_store(crate::resource_relations::StoreRequest::Add {
+                        dependent: endpoint,
+                        dependency: crate::resource_relations::Endpoint {
+                            kind: "skill".into(),
+                            id: "two".into(),
+                        },
+                        expected_revision: 0,
+                    })
+                    .unwrap();
+                } else {
+                    live.scene_store(crate::resource_scenes::StoreRequest::Save {
+                        id: None,
+                        expected_revision: 0,
+                        name: "New live reference".into(),
+                        members: vec![endpoint],
+                    })
+                    .unwrap();
+                }
+            }
+            let retained = service.snapshot().unwrap();
+            release(&latch);
+            let error = worker.join().unwrap().unwrap_err();
+            assert!(
+                error.contains(if reference == "relation" {
+                    "依赖或使用关系"
+                } else {
+                    "场景"
+                }),
+                "{error}"
+            );
+            assert_eq!(service.snapshot().unwrap(), retained);
+        }
+    }
+
+    #[test]
+    fn local_record_live_writer_preserves_new_duplicate_annotations_and_connections() {
+        for change in ["annotation", "connection"] {
+            let (_dir, service) = fixture();
+            {
+                let mut live = service.manager.lock().unwrap();
+                // The final merge is about to drop only the duplicate at the
+                // retained ID's target. No physical file operation is involved.
+                live.state.skills[0]["localPath"] = json!("D:/synthetic/target");
+                live.state.skills[1]["localPath"] = json!("D:/synthetic/target");
+                live.save().unwrap();
+            }
+            let (gate, latch) = new_latch();
+            let _release = LocalRecordLatchRelease(latch.clone());
+            let worker_service = service.clone();
+            let worker = std::thread::spawn(move || {
+                worker_service.execute(
+                    json!({"action":"relocate_local","removedId":"two","hold":gate}),
+                    paused_local_record_removal,
+                )
+            });
+            entered(&latch);
+            {
+                let mut live = service.manager.lock().unwrap();
+                if change == "annotation" {
+                    live.management_store(crate::management_data::StoreRequest::AnnotationSet {
+                        skill_id: "two".into(),
+                        expected_revision: 0,
+                        alias: "Keep alias".into(),
+                        notes: "Keep new note".into(),
+                    })
+                    .unwrap();
+                } else {
+                    live.state.connections.push(json!({"id":"new","skillId":"two","client":"codex","path":"D:/synthetic/entry"}));
+                    live.save().unwrap();
+                }
+            }
+            let retained = service.snapshot().unwrap();
+            let annotations = service
+                .manager
+                .lock()
+                .unwrap()
+                .management_store(crate::management_data::StoreRequest::List)
+                .unwrap();
+            release(&latch);
+            let error = worker.join().unwrap().unwrap_err();
+            assert!(
+                error.contains(if change == "annotation" {
+                    "别名或备注"
+                } else {
+                    "客户端连接"
+                }),
+                "{error}"
+            );
+            assert_eq!(service.snapshot().unwrap(), retained);
+            assert_eq!(
+                service
+                    .manager
+                    .lock()
+                    .unwrap()
+                    .management_store(crate::management_data::StoreRequest::List)
+                    .unwrap(),
+                annotations
+            );
+        }
+    }
+
+    #[test]
+    fn local_record_forget_cas_preserves_live_favorite_and_undo_history() {
+        let (_dir, service) = fixture();
+        let (gate, latch) = new_latch();
+        let _release = LocalRecordLatchRelease(latch.clone());
+        let worker_service = service.clone();
+        let worker = std::thread::spawn(move || {
+            worker_service.execute(
+                json!({"action":"forget","skillId":"one","removedId":"one","hold":gate}),
+                paused_local_record_removal,
+            )
+        });
+        entered(&latch);
+        {
+            let mut live = service.manager.lock().unwrap();
+            crate::categories::handle(
+                &mut live,
+                &json!({"action":"set_favorite","skillId":"one","favorite":true}),
+            )
+            .unwrap()
+            .unwrap();
+        }
+        let retained = service.snapshot().unwrap();
+        let history = service.manager.lock().unwrap().management_undo.clone();
+        release(&latch);
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(error.contains("记录在任务运行期间发生变化"), "{error}");
+        assert_eq!(service.snapshot().unwrap(), retained);
+        assert_eq!(service.manager.lock().unwrap().management_undo, history);
+        assert!(service.manager.lock().unwrap().skill("one").unwrap()["favorite"] == true);
+    }
+
+    #[test]
+    fn local_record_tasks_are_blocked_before_worker_launch_in_basic_mode() {
+        let (_dir, service) = fixture();
+        service.manager.lock().unwrap().basic_mode = true;
+        for action in ["forget", "relocate_local", "preview_relocate_local"] {
+            let error = service.execute(json!({"action":action,"skillId":"one","path":"D:/unused","previewId":"unused"}), |_, _| panic!("basic mode must reject before dispatch")).unwrap_err();
+            assert!(error.contains("基本模式"), "{error}");
+        }
+        assert!(service.jobs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_record_tasks_publish_relocation_preview_and_forget_without_file_changes() {
+        let (dir, service) = fixture();
+        let old = dir.path().join("before");
+        let new = dir.path().join("after");
+        std::fs::create_dir(&old).unwrap();
+        let bytes =
+            b"---\nname: relocated\ndescription: synthetic\n---\nRetain the only runtime bytes.\n";
+        std::fs::write(old.join("SKILL.md"), bytes).unwrap();
+        {
+            let mut live = service.manager.lock().unwrap();
+            let mut original = crate::local::draft(&old).unwrap();
+            original["id"] = json!("one");
+            original["favorite"] = json!(true);
+            live.upsert_skill(original);
+            live.save().unwrap();
+        }
+        std::fs::rename(&old, &new).unwrap();
+        let preview = service
+            .execute(
+                json!({"action":"preview_relocate_local","skillId":"one","path":new}),
+                crate::dispatch_local,
+            )
+            .unwrap();
+        assert_eq!(preview["kind"], "localRelocation");
+        assert_eq!(preview["canApply"], true);
+        assert!(service
+            .manager
+            .lock()
+            .unwrap()
+            .previews
+            .contains_key(preview["id"].as_str().unwrap()));
+        let moved = service
+            .execute(
+                json!({"action":"relocate_local","previewId":preview["id"]}),
+                crate::dispatch_local,
+            )
+            .unwrap();
+        let retained = moved["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|skill| skill["id"] == "one")
+            .unwrap();
+        assert_eq!(
+            path_key(retained["localPath"].as_str().unwrap()),
+            path_key(new.to_str().unwrap())
+        );
+        assert_eq!(retained["favorite"], true);
+        assert!(!service
+            .manager
+            .lock()
+            .unwrap()
+            .previews
+            .contains_key(preview["id"].as_str().unwrap()));
+        let forgotten = service
+            .execute(
+                json!({"action":"forget","skillId":"one"}),
+                crate::dispatch_local,
+            )
+            .unwrap();
+        assert!(forgotten["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|skill| skill["id"] != "one"));
+        assert!(forgotten["ignoredLocalPaths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path_key(path.as_str().unwrap()) == path_key(new.to_str().unwrap())));
+        assert_eq!(std::fs::read(new.join("SKILL.md")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn local_record_preview_publication_bounds_merged_family_and_keeps_new_same_millisecond_id() {
+        fn paused_preview(manager: &mut Manager, request: &Value) -> Result<Value, String> {
+            let id = text(request, "newPreviewId")?;
+            let public = json!({"id":id,"kind":"localRelocation","skillId":"one","canApply":true});
+            manager.previews.insert(
+                id.into(),
+                json!({"kind":"localRelocation","public":public,"createdAt":request["createdAt"]}),
+            );
+            hold(text(request, "hold")?)?;
+            Ok(public)
+        }
+        let (_dir, service) = fixture();
+        let now = chrono::Utc::now().timestamp_millis();
+        let unrelated = json!({"kind":"update","createdAt":0,"keep":"old-family"});
+        let export = json!({"kind":"export_plan","createdAt":0,"keep":"export-family"});
+        {
+            let mut live = service.manager.lock().unwrap();
+            for index in 0..32 {
+                live.previews.insert(
+                    format!("existing-{index:02}"),
+                    json!({"kind":"localRelocation","createdAt":now}),
+                );
+            }
+            live.previews.insert(
+                "expired-local".into(),
+                json!({"kind":"localRelocation","createdAt":now-30*60*1000-1}),
+            );
+            live.previews
+                .insert("undated-local".into(), json!({"kind":"localRelocation"}));
+            live.previews.insert("unrelated".into(), unrelated.clone());
+            live.previews.insert("export".into(), export.clone());
+        }
+        let (gate, latch) = new_latch();
+        let _release = LocalRecordLatchRelease(latch.clone());
+        let worker_service = service.clone();
+        let worker = std::thread::spawn(move || {
+            worker_service.execute(
+            json!({"action":"preview_relocate_local","skillId":"one","path":"D:/synthetic/target","newPreviewId":"000-new-preview","createdAt":now,"hold":gate}), paused_preview)
+        });
+        entered(&latch);
+        {
+            let mut live = service.manager.lock().unwrap();
+            for index in 0..20 {
+                live.previews.insert(
+                    format!("concurrent-{index:02}"),
+                    json!({"kind":"localRelocation","createdAt":now}),
+                );
+            }
+        }
+        release(&latch);
+        let public = worker.join().unwrap().unwrap();
+        assert_eq!(public["id"], "000-new-preview");
+        let live = service.manager.lock().unwrap();
+        assert_eq!(
+            live.previews
+                .values()
+                .filter(|preview| preview["kind"] == "localRelocation")
+                .count(),
+            32
+        );
+        assert_eq!(live.previews["000-new-preview"]["public"], public);
+        assert!(!live.previews.contains_key("expired-local"));
+        assert!(!live.previews.contains_key("undated-local"));
+        assert_eq!(live.previews["unrelated"], unrelated);
+        assert_eq!(live.previews["export"], export);
     }
 }

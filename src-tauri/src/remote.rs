@@ -127,43 +127,8 @@ fn current_hashes(skill: &Value) -> Result<BTreeMap<String, String>, String> {
     }
 }
 fn refresh_declared_local_version(skill: &mut Value) {
-    let version = (|| -> Option<String> {
-        skill["localPath"].as_str()?;
-        let root = local_root(skill).ok()?;
-        let bytes = read_local(&root, "SKILL.md").ok()?;
-        let content = std::str::from_utf8(&bytes)
-            .ok()?
-            .trim_start_matches('\u{feff}');
-        let mut lines = content.lines();
-        if lines.next().map(str::trim) != Some("---") {
-            return None;
-        }
-        let mut yaml = String::new();
-        let mut ended = false;
-        for line in lines {
-            if matches!(line.trim(), "---" | "...") {
-                ended = true;
-                break;
-            }
-            yaml.push_str(line);
-            yaml.push('\n');
-        }
-        if !ended {
-            return None;
-        }
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).ok()?;
-        let meta = serde_json::to_value(parsed).ok()?;
-        let scalar = |value: &Value| match value {
-            Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_owned()),
-            Value::Number(n) => Some(n.to_string()),
-            _ => None,
-        };
-        scalar(&meta["version"]).or_else(|| scalar(&meta["metadata"]["version"]))
-    })();
-    // Display metadata never establishes identity, installation history or synchronization.
-    if let Some(version) = version {
-        skill["version"] = json!(version);
-    }
+    // Declarations describe local files; they do not change source or baseline.
+    let _ = local::refresh_declared_metadata(skill, None);
 }
 fn subset(all: &BTreeMap<String, String>, files: &[String]) -> BTreeMap<String, String> {
     files

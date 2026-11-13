@@ -309,7 +309,6 @@ fn connect_disconnect_are_real_links_and_forget_only_removes_the_record() {
         fs::read_to_string(target.join("proof.txt")).unwrap(),
         "one physical source"
     );
-    assert!(handle(&mut m, &json!({"action":"forget","skillId":id})).is_err());
     let connection_id = m.state.connections[0]["id"].clone();
     handle(
         &mut m,
@@ -318,8 +317,23 @@ fn connect_disconnect_are_real_links_and_forget_only_removes_the_record() {
     .unwrap();
     assert!(fs::symlink_metadata(&target).is_err());
     assert!(root.join("proof.txt").is_file());
+    handle(&mut m,&json!({"action":"connect","skillId":id,"client":"codex","targetPath":target.to_string_lossy()})).unwrap();
+    let link_identity = crate::clients::file_identity(&target).unwrap();
     handle(&mut m, &json!({"action":"forget","skillId":id})).unwrap();
     assert!(m.state.skills.is_empty());
+    assert!(m.state.connections.is_empty());
+    assert_eq!(
+        crate::clients::file_identity(&target).unwrap(),
+        link_identity
+    );
+    assert_eq!(canonical(&target).unwrap(), canonical(&root).unwrap());
+    assert_eq!(
+        m.state.settings["ignoredClientConnections"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(root.join("SKILL.md").is_file());
 }
 

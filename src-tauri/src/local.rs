@@ -1,6 +1,6 @@
 //! Local runtime folders are registered in place; this module never imports a
 //! second copy. All tests use synthetic folders under the repository's work/.
-use crate::model::{now, Manager};
+use crate::model::{now, Manager, State};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -58,6 +58,91 @@ fn path_key(path: &Path) -> String {
     {
         path.to_string_lossy().into_owned()
     }
+}
+
+/// A directory identity is local evidence, never a name or an exported credential.
+/// Resolve junctions before calling this helper so identity belongs to the source.
+fn directory_identity(root: &Path) -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        crate::clients::file_identity(root)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(root).map_err(|error| error.to_string())?;
+        let created = metadata
+            .created()
+            .and_then(|time| {
+                time.duration_since(std::time::UNIX_EPOCH)
+                    .map_err(std::io::Error::other)
+            })
+            .map_err(|_| "此文件系统未提供稳定创建身份")?
+            .as_nanos();
+        Ok(format!("{}:{}:{created}", metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = root;
+        Err("当前平台无法核验本地目录身份".into())
+    }
+}
+
+fn metadata_stamp(root: &Path, hashes: &BTreeMap<String, String>) -> Value {
+    json!(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&json!({
+                "root":path_key(root),"skill":hashes.get("SKILL.md"),
+                "interface":hashes.get("agents/openai.yaml"),
+            }))
+            .expect("metadata stamps serialize")
+        )
+    ))
+}
+
+/// Refresh declarations from their actual files without inferring association,
+/// installation provenance or changing a manually selected runtime scope.
+pub(crate) fn refresh_declared_metadata(
+    skill: &mut Value,
+    inventory: Option<&BTreeMap<String, String>>,
+) -> Result<(), String> {
+    let root = local_root(skill)?;
+    skill["localIdentity"] = json!(directory_identity(&root).ok());
+    let stamp = inventory.map(|hashes| metadata_stamp(&root, hashes));
+    if stamp
+        .as_ref()
+        .is_some_and(|stamp| skill["localMetadataStamp"] == *stamp)
+    {
+        return Ok(());
+    }
+    let meta = frontmatter(&read_text(&safe_join(&root, "SKILL.md")?)?)?;
+    let interface_path = safe_join(&root, "agents/openai.yaml")?;
+    let interface: Value = if interface_path.is_file() {
+        serde_yaml::from_str(&read_text(&interface_path)?).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let name = scalar(&meta["name"]).unwrap_or_else(|| {
+        root.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    });
+    skill["name"] = json!(name.clone());
+    skill["displayName"] = json!(scalar(&meta["displayName"])
+        .or_else(|| scalar(&meta["metadata"]["displayName"]))
+        .or_else(|| scalar(&meta["metadata"]["display_name"]))
+        .or_else(|| scalar(&interface["interface"]["display_name"]))
+        .unwrap_or(name));
+    skill["description"] = json!(scalar(&meta["description"]).unwrap_or_default());
+    skill["version"] =
+        json!(scalar(&meta["version"]).or_else(|| scalar(&meta["metadata"]["version"])));
+    skill["dependencies"] = meta.get("compatibility").cloned().unwrap_or(Value::Null);
+    if let Some(stamp) = stamp {
+        skill["localMetadataStamp"] = stamp;
+    }
+    Ok(())
 }
 
 fn valid_part(part: &str) -> bool {
@@ -317,7 +402,8 @@ pub fn draft(root: &Path) -> Result<Value, String> {
         "dependencies":meta.get("compatibility").cloned().unwrap_or(Value::Null),
         "managed":original_managed || managed_path(&root),
         "sourceId":null,"remotePath":null,"repo":null,"branch":null,"commit":null,"baselineCommit":null,
-        "baselineHashes":{},"localHashes":hashes,"runtimeFiles":runtime.suggested_files,"runtimeConfirmed":false,
+        "baselineHashes":{},"localIdentity":directory_identity(&root).ok(),"localMetadataStamp":metadata_stamp(&root,&hashes),
+        "localHashes":hashes,"runtimeFiles":runtime.suggested_files,"runtimeConfirmed":false,
         "runtimeWarnings":runtime.warnings,
         "runtimeIssues":runtime.issues,
         "status":"local_only","lastChecked":now(),"lastLocalCheckedAt":now(),"error":null,"private":false
@@ -2361,9 +2447,416 @@ fn export(m: &Manager, req: &Value) -> Result<Value, String> {
     )
 }
 
+fn missing_directory(skill: &Value) -> bool {
+    skill["localPath"].as_str().is_some_and(|path| {
+        fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
+fn relocated_record(original: &Value, draft: &Value) -> Value {
+    let mut skill = original.clone();
+    let inventory = draft["localHashes"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(path, hash)| Some((path.clone(), hash.as_str()?.to_owned())))
+        .collect();
+    invalidate_runtime_audit(&mut skill, &inventory);
+    for field in [
+        "localPath",
+        "localIdentity",
+        "localMetadataStamp",
+        "name",
+        "displayName",
+        "description",
+        "version",
+        "dependencies",
+        "localHashes",
+        "readOnly",
+        "readOnlyReason",
+    ] {
+        skill[field] = draft[field].clone();
+    }
+    if original["managed"] == true {
+        skill["readOnly"] = json!(true);
+        skill["readOnlyReason"] = json!(
+            "System, application, or plugin-managed skill; inspect without changing its files"
+        );
+    }
+    skill["relocatedFrom"] = original["localPath"].clone();
+    skill["lastLocalCheckedAt"] = json!(now());
+    skill["error"] = Value::Null;
+    if skill["sourceId"].is_string() {
+        skill["remoteCheckRequired"] = json!(true);
+        skill["status"] = json!("unknown_baseline");
+    } else {
+        skill["status"] = json!("local_only");
+    }
+    crate::audit::refresh_local_audit(&mut skill, Some(&inventory));
+    skill
+}
+
+/// Only a persisted physical directory identity can repair a renamed registration.
+/// Content, display labels and directory names are deliberately not identities.
+pub(crate) fn register_draft(m: &mut Manager, mut draft: Value) -> Result<(String, bool), String> {
+    let key = path_key(Path::new(
+        draft["localPath"].as_str().ok_or("缺少本地路径")?,
+    ));
+    if let Some(existing) = m
+        .state
+        .skills
+        .iter()
+        .find(|skill| {
+            skill["localPath"].as_str().is_some_and(|path| {
+                path_key(&canonical(Path::new(path)).unwrap_or_else(|_| PathBuf::from(path))) == key
+            })
+        })
+        .cloned()
+    {
+        let id = existing["id"].as_str().ok_or("Skill 标识无效")?.to_owned();
+        // Explicit re-import may refresh declarations but does not replace the record.
+        let mut updated = relocated_record(&existing, &draft);
+        updated["relocatedFrom"] = existing["relocatedFrom"].clone();
+        m.upsert_skill(updated);
+        return Ok((id, false));
+    }
+    let previous: Vec<_> = m
+        .state
+        .skills
+        .iter()
+        .filter(|skill| {
+            draft["localIdentity"].is_string()
+                && skill["localIdentity"] == draft["localIdentity"]
+                && missing_directory(skill)
+                && skill["managed"] != true
+        })
+        .cloned()
+        .collect();
+    if previous.len() == 1 {
+        let id = previous[0]["id"]
+            .as_str()
+            .ok_or("Skill 标识无效")?
+            .to_owned();
+        m.upsert_skill(relocated_record(&previous[0], &draft));
+        return Ok((id, false));
+    }
+    let id = m.id();
+    draft["id"] = json!(id);
+    crate::audit::refresh_local_audit(&mut draft, None);
+    m.upsert_skill(draft);
+    Ok((id, true))
+}
+
+pub(crate) fn guard_skill_record_removal(m: &Manager, id: &str) -> Result<(), String> {
+    let relations = m.relation_store(crate::resource_relations::StoreRequest::List {
+        endpoint: crate::resource_relations::Endpoint {
+            kind: "skill".into(),
+            id: id.into(),
+        },
+    })?;
+    if ["dependencies", "dependents"].iter().any(|field| {
+        relations[*field]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    }) {
+        return Err(
+            "此 Skill 仍有依赖或使用关系，请先在“依赖关系”中处理后再移除管理记录；原文件保留"
+                .into(),
+        );
+    }
+    let scenes = m.scene_store(crate::resource_scenes::StoreRequest::List)?;
+    if scenes["scenes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|scene| {
+            scene["members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|member| member["kind"] == "skill" && member["id"] == id)
+        })
+    {
+        return Err("此 Skill 仍在场景中，请先移除场景中的引用后再移除管理记录；原文件保留".into());
+    }
+    Ok(())
+}
+
+fn guard_duplicate_metadata(
+    m: &Manager,
+    duplicate: &Value,
+    original: &Value,
+) -> Result<(), String> {
+    let id = duplicate["id"].as_str().ok_or("重复记录的标识无效")?;
+    guard_skill_record_removal(m, id)?;
+    if m.state
+        .connections
+        .iter()
+        .any(|connection| connection["skillId"] == id)
+    {
+        return Err(
+            "新路径的重复记录已有客户端连接，请先处理其连接管理记录后重新定位；客户端文件未改变"
+                .into(),
+        );
+    }
+    let annotations = m.management_store(crate::management_data::StoreRequest::List)?;
+    if annotations["skillAnnotations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|item| {
+            item["skillId"] == id
+                && ["alias", "notes"].iter().any(|field| {
+                    item[*field]
+                        .as_str()
+                        .is_some_and(|text| !text.trim().is_empty())
+                })
+        })
+    {
+        return Err(
+            "新路径的重复记录已有别名或备注，请先整理这些信息后重新定位；未移除任何记录".into(),
+        );
+    }
+    if duplicate["sourceId"].is_string()
+        || duplicate["installedCommit"].is_string()
+        || !duplicate["installedProvenance"].is_null()
+        || !duplicate["installation"].is_null()
+        || !duplicate["enabled"].is_null() && duplicate["enabled"] != original["enabled"]
+        || duplicate["baselineCommit"].is_string()
+        || duplicate["baselineHashes"]
+            .as_object()
+            .is_some_and(|values| !values.is_empty())
+        || duplicate["externalBindings"]
+            .as_array()
+            .is_some_and(|values| !values.is_empty())
+        || duplicate["categoryId"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+            && original["categoryId"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+            && duplicate["categoryId"] != original["categoryId"]
+        || duplicate["runtimeConfirmationKind"] == "manual"
+            && duplicate["runtimeFiles"] != original["runtimeFiles"]
+    {
+        return Err("新路径的重复记录已有不同的来源、分类、运行范围或安装信息，请先整理冲突后重新定位；原信息保留".into());
+    }
+    Ok(())
+}
+
+/// Called again by the sole live writer before publishing a record removal/path change.
+pub(crate) fn validate_local_record_commit(
+    m: &Manager,
+    before: &State,
+    after: &State,
+    action: &str,
+) -> Result<(), String> {
+    if !matches!(
+        action,
+        "forget"
+            | "relocate_local"
+            | "add_local"
+            | "add_local_roots"
+            | "discover_local"
+            | "check_now"
+    ) {
+        return Ok(());
+    }
+    for original in &before.skills {
+        let next = after
+            .skills
+            .iter()
+            .find(|skill| skill["id"] == original["id"]);
+        if next.is_none() {
+            let id = original["id"].as_str().ok_or("Skill 标识无效")?;
+            guard_skill_record_removal(m, id)?;
+            if action == "relocate_local" {
+                let retained = after
+                    .skills
+                    .iter()
+                    .find(|skill| skill["localPath"] == original["localPath"])
+                    .ok_or("重复记录的目标已变化")?;
+                guard_duplicate_metadata(m, original, retained)?;
+            }
+        } else if let Some(next) = next.filter(|next| next["localPath"] != original["localPath"]) {
+            if action != "relocate_local" && !missing_directory(original) {
+                return Err(
+                    "原目录在自动识别期间重新可用，请手动核对位置；未自动替换原记录".into(),
+                );
+            }
+            let root = local_root(next)?;
+            if next["localIdentity"] != json!(directory_identity(&root).ok()) {
+                return Err("重新定位期间目标目录身份已变化，请重新预览；原记录保留".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn preview_relocation(m: &mut Manager, request: &Value) -> Result<Value, String> {
+    let original = m.skill(required_string(request, "skillId")?)?;
+    if original["localPath"].as_str().is_none() || original["managed"] == true {
+        return Err("只能重新定位自行管理的本地 Skill".into());
+    }
+    let draft = draft(Path::new(required_string(request, "path")?))?;
+    if draft["readOnly"] == true || draft["managed"] == true {
+        return Err("不能把原记录重新定位到系统或应用托管的 Skill".into());
+    }
+    if path_key(Path::new(
+        draft["localPath"].as_str().ok_or("目标路径无效")?,
+    )) == path_key(Path::new(
+        original["localPath"].as_str().ok_or("原路径无效")?,
+    )) {
+        return Err("新位置与当前登记位置相同，请选择改名后的 Skill 目录".into());
+    }
+    let duplicates: Vec<_> = m
+        .state
+        .skills
+        .iter()
+        .filter(|skill| {
+            skill["id"] != original["id"]
+                && skill["localPath"].as_str().is_some_and(|path| {
+                    canonical(Path::new(path)).is_ok_and(|root| {
+                        path_key(&root)
+                            == path_key(Path::new(draft["localPath"].as_str().unwrap_or_default()))
+                    })
+                })
+        })
+        .cloned()
+        .collect();
+    if duplicates.len() > 1 {
+        return Err("新路径已对应多条登记，请先整理重复记录后重新定位".into());
+    }
+    let duplicate = duplicates.first().cloned().unwrap_or(Value::Null);
+    let mut warnings =
+        vec!["仅更新管理记录，不移动文件或修改客户端目录链接；已有异常入口仍需恢复".to_owned()];
+    let mut can_apply = true;
+    if duplicate.is_object() {
+        warnings.push("确认后合并所选新路径的重复登记，保留原 Skill 身份及其管理信息".into());
+        if let Err(error) = guard_duplicate_metadata(m, &duplicate, &original) {
+            warnings.push(error);
+            can_apply = false;
+        }
+    }
+    let id = m.id();
+    let public = json!({"id":id,"kind":"localRelocation","skillId":original["id"],"oldPath":original["localPath"],
+        "path":draft["localPath"],"name":draft["name"],"displayName":draft["displayName"],"version":draft["version"],
+        "duplicateId":duplicate.get("id").cloned().unwrap_or(Value::Null),"canApply":can_apply,"warnings":warnings,
+        "retained":["分类","收藏","别名与备注","GitHub关联","安装基准"]});
+    m.previews.insert(id.clone(), json!({"kind":"localRelocation","public":public,"original":original,"duplicate":duplicate,"draft":draft,"createdAt":chrono::Utc::now().timestamp_millis()}));
+    trim_relocation_previews(&mut m.previews, Some(&id));
+    Ok(public)
+}
+
+pub(crate) fn trim_relocation_previews(
+    previews: &mut std::collections::HashMap<String, Value>,
+    keep: Option<&str>,
+) {
+    let now = chrono::Utc::now().timestamp_millis();
+    previews.retain(|_, value| {
+        value["kind"] != "localRelocation"
+            || value["createdAt"]
+                .as_i64()
+                .is_some_and(|at| now.saturating_sub(at) <= 30 * 60 * 1000)
+    });
+    let mut entries: Vec<_> = previews
+        .iter()
+        .filter(|(_, value)| value["kind"] == "localRelocation")
+        .map(|(id, value)| {
+            (
+                keep == Some(id.as_str()),
+                value["createdAt"].as_i64().unwrap_or(0),
+                id.clone(),
+            )
+        })
+        .collect();
+    entries.sort();
+    let obsolete = entries.len().saturating_sub(32);
+    for (_, _, id) in entries.into_iter().take(obsolete) {
+        previews.remove(&id);
+    }
+}
+
+fn apply_relocation(m: &mut Manager, request: &Value) -> Result<Value, String> {
+    let preview_id = required_string(request, "previewId")?;
+    let preview = m
+        .previews
+        .get(preview_id)
+        .cloned()
+        .ok_or("重新定位预览已过期，请重新选择目录")?;
+    if preview["kind"] != "localRelocation"
+        || preview["public"]["canApply"] != true
+        || preview["createdAt"].as_i64().is_none_or(|at| {
+            chrono::Utc::now().timestamp_millis().saturating_sub(at) > 30 * 60 * 1000
+        })
+    {
+        return Err("重新定位预览不可应用，请重新核对目标目录".into());
+    }
+    let id = preview["original"]["id"]
+        .as_str()
+        .ok_or("原 Skill 标识无效")?;
+    let original = m.skill(id)?;
+    if original != preview["original"] {
+        return Err("原管理信息在预览后发生变化，请重新预览；未替换原记录".into());
+    }
+    let fresh = draft(Path::new(
+        preview["public"]["path"].as_str().ok_or("目标路径无效")?,
+    ))?;
+    if fresh["localIdentity"] != preview["draft"]["localIdentity"]
+        || fresh["localHashes"] != preview["draft"]["localHashes"]
+    {
+        return Err("目标目录或文件在预览后发生变化，请重新预览；原记录保留".into());
+    }
+    let duplicate = &preview["duplicate"];
+    if let Some(duplicate_id) = duplicate["id"].as_str() {
+        if m.skill(duplicate_id)? != *duplicate {
+            return Err("重复登记在预览后发生变化，请重新预览；原信息保留".into());
+        }
+        guard_duplicate_metadata(m, duplicate, &original)?;
+    } else if m.state.skills.iter().any(|skill| {
+        skill["id"] != id
+            && skill["localPath"].as_str().is_some_and(|path| {
+                canonical(Path::new(path)).is_ok_and(|root| {
+                    path_key(&root)
+                        == path_key(Path::new(fresh["localPath"].as_str().unwrap_or_default()))
+                })
+            })
+    }) {
+        return Err("目标位置已新增登记，请重新预览后合并".into());
+    }
+    let previous = m.state.clone();
+    let mut retained = relocated_record(&original, &fresh);
+    if duplicate.is_object() {
+        if !retained["categoryId"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+        {
+            retained["categoryId"] = duplicate["categoryId"].clone();
+        }
+        retained["favorite"] = json!(retained["favorite"] == true || duplicate["favorite"] == true);
+        m.state
+            .skills
+            .retain(|skill| skill["id"] != duplicate["id"]);
+    }
+    m.upsert_skill(retained);
+    let key = path_key(Path::new(fresh["localPath"].as_str().unwrap_or_default()));
+    m.state
+        .ignored_local_paths
+        .retain(|path| path_key(Path::new(path)) != key);
+    m.state.check_generation += 1;
+    if let Err(error) = m.save() {
+        m.state = previous;
+        return Err(error);
+    }
+    m.previews.remove(preview_id);
+    Ok(m.snapshot())
+}
+
 pub fn handle(m: &mut Manager, req: &Value) -> Result<Option<Value>, String> {
     match req["action"].as_str().unwrap_or("") {
         "scan_local" => Ok(Some(scan(Path::new(required_string(req, "path")?))?)),
+        "preview_relocate_local" => preview_relocation(m, req).map(Some),
+        "relocate_local" => apply_relocation(m, req).map(Some),
         "add_local" => {
             let paths = string_list(req, "paths")?;
             if paths.is_empty() {
@@ -2374,7 +2867,7 @@ pub fn handle(m: &mut Manager, req: &Value) -> Result<Option<Value>, String> {
                 .map(|p| draft(Path::new(p)))
                 .collect::<Result<_, _>>()?;
             let previous = m.state.clone();
-            for mut value in drafts {
+            for value in drafts {
                 let key = path_key(Path::new(value["localPath"].as_str().unwrap_or_default()));
                 let ignored_before = m.state.ignored_local_paths.len();
                 m.state
@@ -2383,19 +2876,7 @@ pub fn handle(m: &mut Manager, req: &Value) -> Result<Option<Value>, String> {
                 if ignored_before != m.state.ignored_local_paths.len() {
                     m.state.check_generation += 1;
                 }
-                let exists = m.state.skills.iter().any(|s| {
-                    s["localPath"]
-                        .as_str()
-                        .map(Path::new)
-                        .and_then(|p| canonical(p).ok())
-                        .map(|p| path_key(&p))
-                        == Some(key.clone())
-                });
-                if !exists {
-                    value["id"] = json!(m.id());
-                    crate::audit::refresh_local_audit(&mut value, None);
-                    m.upsert_skill(value);
-                }
+                register_draft(m, value)?;
             }
             if let Err(e) = m.save() {
                 m.state = previous;
@@ -2561,12 +3042,12 @@ pub fn handle(m: &mut Manager, req: &Value) -> Result<Option<Value>, String> {
         "forget" => {
             let id = required_string(req, "skillId")?;
             let skill = m.skill(id)?;
-            if m.state.connections.iter().any(|c| c["skillId"] == id) {
-                return Err(
-                    "Disconnect this Skill from its clients before forgetting its record".into(),
-                );
-            }
+            guard_skill_record_removal(m, id)?;
             let previous = m.state.clone();
+            if let Err(error) = crate::clients::forget_skill_records(m, id) {
+                m.state = previous;
+                return Err(error);
+            }
             if let Some(path) = skill["localPath"].as_str() {
                 let path = canonical(Path::new(path)).unwrap_or_else(|_| PathBuf::from(path));
                 let path = readable_path(&path);
@@ -2631,12 +3112,16 @@ pub fn handle(m: &mut Manager, req: &Value) -> Result<Option<Value>, String> {
                             .collect();
                         invalidate_runtime_audit(&mut skill, &current);
                         for field in [
+                            "name",
                             "description",
                             "displayName",
                             "version",
                             "readOnly",
                             "readOnlyReason",
                             "localHashes",
+                            "localIdentity",
+                            "localMetadataStamp",
+                            "dependencies",
                         ] {
                             skill[field] = value[field].clone();
                         }
@@ -2681,6 +3166,9 @@ pub fn handle(m: &mut Manager, req: &Value) -> Result<Option<Value>, String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod record_tests;
 
 #[cfg(test)]
 mod issue_tests {

@@ -708,8 +708,7 @@ fn repair_connections(manager: &mut Manager, request: &Value) -> Result<Value, S
     Ok(value)
 }
 
-fn remove_record(manager: &mut Manager, id: &str) -> Result<Value, String> {
-    let previous = manager.state.clone();
+fn stage_remove_record(manager: &mut Manager, id: &str) -> Result<(), String> {
     let connection = connection(manager, id)?;
     {
         let path = Path::new(text(&connection, "path")?);
@@ -730,6 +729,31 @@ fn remove_record(manager: &mut Manager, id: &str) -> Result<Value, String> {
         .state
         .connections
         .retain(|connection| connection["id"] != id);
+    Ok(())
+}
+
+/// Forget only client bookkeeping. The caller persists this alongside the Skill
+/// removal, so neither a filesystem link nor a partial series of saves is involved.
+pub(crate) fn forget_skill_records(manager: &mut Manager, skill_id: &str) -> Result<(), String> {
+    let ids: Vec<String> = manager
+        .state
+        .connections
+        .iter()
+        .filter(|connection| connection["skillId"] == skill_id)
+        .map(|connection| text(connection, "id").map(str::to_owned))
+        .collect::<Result<_, _>>()?;
+    for id in ids {
+        stage_remove_record(manager, &id)?;
+    }
+    Ok(())
+}
+
+fn remove_record(manager: &mut Manager, id: &str) -> Result<Value, String> {
+    let previous = manager.state.clone();
+    if let Err(error) = stage_remove_record(manager, id) {
+        manager.state = previous;
+        return Err(error);
+    }
     if let Err(e) = manager.save() {
         manager.state = previous;
         return Err(format!("无法移除客户端管理记录：{e}"));
