@@ -25,6 +25,7 @@ struct Request {
     route: Vec<String>,
     body: Value,
     fixture_auth: bool,
+    recursive: bool,
 }
 struct Repository {
     repo: String,
@@ -142,8 +143,28 @@ impl Repository {
                 )
             }
             ("GET", ["git", "trees", id]) => {
-                let tree = self.trees.get(*id).ok_or("Unknown tree")?;
-                let rows = tree.iter().map(|(path,(mode,sha))|json!({"path":path,"mode":mode,"type":"blob","sha":sha,"size":self.blobs[sha].len()})).collect::<Vec<_>>();
+                let tree = self.trees.get(*id).ok_or("Unknown tree")?.clone();
+                let mut rows = Vec::new();
+                let mut directories: BTreeMap<String, BTreeMap<String, (String, String)>> =
+                    BTreeMap::new();
+                for (path, (mode, sha)) in tree {
+                    if !request.recursive {
+                        if let Some((directory, relative)) = path.split_once('/') {
+                            directories
+                                .entry(directory.into())
+                                .or_default()
+                                .insert(relative.into(), (mode, sha));
+                            continue;
+                        }
+                    }
+                    let kind = if mode == "160000" { "commit" } else { "blob" };
+                    rows.push(json!({"path":path,"mode":mode,"type":kind,"sha":sha,"size":self.blobs.get(&sha).map(Vec::len)}));
+                }
+                for (directory, children) in directories {
+                    let sha = github::blob_hash(format!("{id}/{directory}").as_bytes());
+                    self.trees.insert(sha.clone(), children);
+                    rows.push(json!({"path":directory,"mode":"040000","type":"tree","sha":sha}));
+                }
                 Ok(json!({"sha":id,"truncated":false,"tree":rows}))
             }
             ("GET", ["git", "blobs", id]) => {
@@ -371,6 +392,9 @@ fn read_request(stream: &mut TcpStream, repo: &str) -> Result<Request, String> {
         .split_whitespace();
     let method = first.next().ok_or("Missing method")?.to_owned();
     let target = first.next().ok_or("Missing route")?;
+    let recursive = target.split_once('?').is_some_and(|(_, query)| {
+        url::form_urlencoded::parse(query.as_bytes()).any(|(key, _)| key == "recursive")
+    });
     let length = header
         .lines()
         .filter_map(|line| line.split_once(':'))
@@ -424,6 +448,7 @@ fn read_request(stream: &mut TcpStream, repo: &str) -> Result<Request, String> {
         route,
         body,
         fixture_auth,
+        recursive,
     })
 }
 
@@ -465,6 +490,245 @@ fn fixture(server: &Server) -> Fixture {
         root,
         original_runtime,
         optional,
+    }
+}
+
+#[test]
+fn documentation_uses_path_trees_without_replacing_complete_package_inventories() {
+    let catalog =
+        br#"{"skills":[{"path":"skills/protocol-skill","usage":"guides/nested/README.md"}]}"#;
+    let unrelated = vec![b'x'; 2 * 1024 * 1024];
+    let server = Server::new(&[
+        ("skill-catalog.json", catalog),
+        ("guides/nested/README.md", b"# Catalog instructions\n"),
+        ("guides/nested/image.png", b"synthetic image bytes"),
+        ("known.md", b"Stored path must not override catalog usage"),
+        ("skills/protocol-skill/SKILL.md", b"Runtime entry"),
+        ("unrelated/deep/large.bin", &unrelated),
+    ]);
+    let _transport = server.transport();
+    let mut fixture = fixture(&server);
+    let skill = &mut fixture.manager.state.skills[0];
+    skill["sourceId"] = json!("source");
+    skill["repo"] = json!(server.repo());
+    skill["remotePath"] = json!("skills/protocol-skill");
+    skill["commit"] = json!(server.head());
+    skill["documentationPath"] = json!("known.md");
+    let request = json!({"skillId":"local-id"});
+    let doc = get_document(&fixture.manager, &request).unwrap();
+    assert_eq!(doc["documentPath"], "guides/nested/README.md");
+    assert_eq!(doc["basePath"], "guides/nested");
+    assert_eq!(doc["markdown"], "# Catalog instructions\n");
+    assert_eq!(doc["private"], true);
+    assert_eq!(doc["commit"], server.head());
+    let reads = server.state.lock().unwrap().requests.len();
+    assert_eq!(
+        get_document(&fixture.manager, &request).unwrap()["markdown"],
+        doc["markdown"]
+    );
+    assert_eq!(
+        server.state.lock().unwrap().requests.len(),
+        reads,
+        "immutable path and verified blobs are shared between reads"
+    );
+    let image = get_doc_asset(&fixture.manager, &json!({"skillId":"local-id", "path":"guides/nested/image.png", "remoteCommit":doc["commit"]})).unwrap();
+    assert_eq!(
+        image["dataUrl"],
+        format!(
+            "data:image/png;base64,{}",
+            STANDARD.encode(b"synthetic image bytes")
+        )
+    );
+    {
+        let store = server.state.lock().unwrap();
+        let trees: Vec<_> = store
+            .requests
+            .iter()
+            .filter(|r| r.route.get(1).is_some_and(|part| part == "trees"))
+            .collect();
+        assert_eq!(
+            trees.len(),
+            3,
+            "only repository root and two documentation directories"
+        );
+        assert!(trees.iter().all(|request| !request.recursive));
+        let blobs: BTreeSet<_> = store
+            .requests
+            .iter()
+            .filter(|r| r.route.get(1).is_some_and(|part| part == "blobs"))
+            .map(|r| r.route[2].as_str())
+            .collect();
+        assert_eq!(
+            blobs,
+            BTreeSet::from([
+                github::blob_hash(catalog),
+                github::blob_hash(b"# Catalog instructions\n"),
+                github::blob_hash(b"synthetic image bytes")
+            ])
+            .iter()
+            .map(String::as_str)
+            .collect()
+        );
+    }
+    let complete = Snapshot::at_commit(&server.repo(), &server.head()).unwrap();
+    assert!(complete.tree.contains_key("unrelated/deep/large.bin"));
+    assert!(complete.tree.contains_key("skills/protocol-skill/SKILL.md"));
+    assert!(
+        server
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .last()
+            .unwrap()
+            .recursive
+    );
+    server.assert_clean();
+}
+
+#[test]
+fn documentation_fallbacks_and_explicit_navigation_remain_commit_pinned() {
+    let server = Server::new(&[
+        (
+            "skills/skill-catalog.json",
+            br#"{"skills":[{"path":"skills/protocol-skill","usage":"missing/README.md"}]}"#,
+        ),
+        ("manual/guide.md", b"# Original guide\n"),
+        ("manual/next.md", b"# Relative link target\n"),
+        ("skills/protocol-skill/readme.md", b"# Lowercase fallback\n"),
+        ("skills/protocol-skill/SKILL.md", b"Runtime instructions"),
+    ]);
+    let _transport = server.transport();
+    let mut fixture = fixture(&server);
+    let old = server.head();
+    let skill = &mut fixture.manager.state.skills[0];
+    skill["sourceId"] = json!("source");
+    skill["repo"] = json!(server.repo());
+    skill["remotePath"] = json!("skills/protocol-skill");
+    skill["commit"] = json!(old);
+    skill["documentationPath"] = json!("manual/guide.md");
+    let req = json!({"skillId":"local-id"});
+    let doc = get_document(&fixture.manager, &req).unwrap();
+    assert_eq!(doc["documentPath"], "manual/guide.md");
+    server.advance(Some(("manual/guide.md", b"# Updated guide\n")));
+    assert_eq!(
+        get_document(&fixture.manager, &req).unwrap()["markdown"],
+        "# Original guide\n"
+    );
+    let new_doc = get_document(
+        &fixture.manager,
+        &json!({"skillId":"local-id", "remoteCommit":server.head()}),
+    )
+    .unwrap();
+    assert_eq!(new_doc["markdown"], "# Updated guide\n");
+    let next = get_document(
+        &fixture.manager,
+        &json!({"skillId":"local-id", "remoteCommit":old, "path":"manual/next.md"}),
+    )
+    .unwrap();
+    assert_eq!(next["markdown"], "# Relative link target\n");
+    assert_eq!(next["commit"], old);
+    assert!(next["baseUrl"]
+        .as_str()
+        .unwrap()
+        .ends_with(&format!("/{old}/manual/next.md")));
+    fixture.manager.state.skills[0]["documentationPath"] = json!("missing.md");
+    assert_eq!(
+        get_document(&fixture.manager, &req).unwrap()["documentPath"],
+        "skills/protocol-skill/readme.md"
+    );
+    let error = get_document(
+        &fixture.manager,
+        &json!({"skillId":"local-id", "path":"missing.md"}),
+    )
+    .unwrap_err();
+    assert!(error.contains("File does not exist at this version"));
+    server.assert_clean();
+}
+
+#[test]
+fn documentation_optional_catalog_does_not_follow_a_blocked_unrelated_ancestor() {
+    for mode in ["120000", "160000"] {
+        let server = Server::new(&[
+            ("README.md", b"# Root instructions\n"),
+            ("skills", b"unrelated link target"),
+        ]);
+        {
+            let mut store = server.state.lock().unwrap();
+            let tree = store.commits[&store.head].tree.clone();
+            store
+                .trees
+                .get_mut(&tree)
+                .unwrap()
+                .get_mut("skills")
+                .unwrap()
+                .0 = mode.into();
+        }
+        let _transport = server.transport();
+        let mut fixture = fixture(&server);
+        let skill = &mut fixture.manager.state.skills[0];
+        skill["sourceId"] = json!("source");
+        skill["repo"] = json!(server.repo());
+        skill["remotePath"] = json!("");
+        skill["commit"] = json!(server.head());
+        let document = get_document(&fixture.manager, &json!({"skillId":"local-id"})).unwrap();
+        assert_eq!(document["documentPath"], "README.md");
+        assert_eq!(document["markdown"], "# Root instructions\n");
+        let explicit = get_document(
+            &fixture.manager,
+            &json!({"skillId":"local-id", "path":"skills/README.md"}),
+        )
+        .unwrap_err();
+        assert!(explicit.contains("links and submodules"));
+        let image = get_doc_asset(
+            &fixture.manager,
+            &json!({"skillId":"local-id", "path":"skills/image.png"}),
+        )
+        .unwrap_err();
+        assert!(image.contains("links and submodules"));
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .filter(|request| request.route.get(1).is_some_and(|part| part == "trees"))
+                .count(),
+            1
+        );
+        server.assert_clean();
+    }
+}
+
+#[test]
+fn documentation_text_and_catalog_validation_do_not_fall_back_after_invalid_content() {
+    let oversized = vec![b'x'; 1024 * 1024 + 1];
+    for (files, message) in [
+        (vec![("README.md", &[0xff][..])], "not UTF-8"),
+        (vec![("README.md", oversized.as_slice())], "1 MiB"),
+        (
+            vec![
+                ("skill-catalog.json", b"invalid json".as_slice()),
+                (
+                    "README.md",
+                    b"Valid fallback must not mask catalog errors".as_slice(),
+                ),
+            ],
+            "invalid JSON",
+        ),
+    ] {
+        let server = Server::new(&files);
+        let _transport = server.transport();
+        let mut fixture = fixture(&server);
+        let skill = &mut fixture.manager.state.skills[0];
+        skill["sourceId"] = json!("source");
+        skill["repo"] = json!(server.repo());
+        skill["remotePath"] = json!("");
+        skill["commit"] = json!(server.head());
+        let error = get_document(&fixture.manager, &json!({"skillId":"local-id"})).unwrap_err();
+        assert!(error.contains(message), "{error}");
+        server.assert_clean();
     }
 }
 

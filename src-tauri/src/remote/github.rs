@@ -365,7 +365,7 @@ impl Api {
         body: Option<&Value>,
         optional: bool,
     ) -> Result<Option<Value>, String> {
-        self.request_mode(method, segments, body, optional, false)
+        self.request_mode(method, segments, body, optional, false, true)
     }
     fn request_mode(
         &self,
@@ -374,6 +374,7 @@ impl Api {
         body: Option<&Value>,
         optional: bool,
         fresh: bool,
+        recursive_tree: bool,
     ) -> Result<Option<Value>, String> {
         #[cfg(test)]
         let override_url = test_endpoint(&self.repo);
@@ -397,6 +398,7 @@ impl Api {
         if segments.first() == Some(&"git")
             && segments.get(1) == Some(&"trees")
             && method == Method::GET
+            && recursive_tree
         {
             u.query_pairs_mut().append_pair("recursive", "1");
         }
@@ -540,8 +542,20 @@ impl Api {
             .ok_or_else(|| "Missing GitHub response".into())
     }
     fn get_fresh(&self, path: &[&str]) -> Result<Value, String> {
-        self.request_mode(Method::GET, path, None, false, true)?
+        self.request_mode(Method::GET, path, None, false, true, true)?
             .ok_or_else(|| "Missing GitHub response".into())
+    }
+    fn directory(&self, tree: &str) -> Result<Value, String> {
+        // GitHub treats any recursive parameter value as true. Omit it entirely.
+        self.request_mode(
+            Method::GET,
+            &["git", "trees", tree],
+            None,
+            false,
+            false,
+            false,
+        )?
+        .ok_or_else(|| "Missing GitHub response".into())
     }
     pub fn optional(&self, path: &[&str]) -> Result<Option<Value>, String> {
         self.request(Method::GET, path, None, true)
@@ -727,6 +741,197 @@ pub struct Entry {
 struct SnapshotBytes {
     files: BTreeMap<(String, String, u64), Vec<u8>>,
     total: usize,
+}
+
+#[derive(Clone)]
+struct DirectoryEntry {
+    kind: String,
+    file: Entry,
+}
+
+/// A documentation lookup never supplies a package inventory. Only directories
+/// along requested paths are read, at the same immutable commit as its blobs.
+pub(super) struct DocumentSnapshot {
+    pub api: Api,
+    pub commit: String,
+    pub private: bool,
+    tree_sha: String,
+    directories: RefCell<BTreeMap<String, BTreeMap<String, DirectoryEntry>>>,
+}
+impl DocumentSnapshot {
+    pub fn load(repo: &str, branch: Option<&str>) -> Result<Self, String> {
+        let api = Api::new(repo)?;
+        let meta = api.get(&[])?;
+        let branch = branch
+            .or_else(|| meta["default_branch"].as_str())
+            .ok_or("Repository has no default branch")?;
+        let object = api.get(&["commits", branch])?;
+        Self::at(
+            api,
+            sha(&object["sha"])?,
+            sha(&object["commit"]["tree"]["sha"])?,
+            meta["private"].as_bool().unwrap_or(true),
+        )
+    }
+    pub fn at_commit(repo: &str, commit: &str) -> Result<Self, String> {
+        sha(&json!(commit))?;
+        let api = Api::new(repo)?;
+        let meta = api.get(&[])?;
+        let object = api.get(&["git", "commits", commit])?;
+        Self::at(
+            api,
+            commit.into(),
+            sha(&object["tree"]["sha"])?,
+            meta["private"].as_bool().unwrap_or(true),
+        )
+    }
+    fn at(api: Api, commit: String, tree_sha: String, private: bool) -> Result<Self, String> {
+        Ok(Self {
+            api,
+            commit,
+            private,
+            tree_sha,
+            directories: RefCell::new(BTreeMap::new()),
+        })
+    }
+    fn entry(&self, path: &str, optional_catalog_ancestor: bool) -> Result<Option<Entry>, String> {
+        validate_relative(path)?;
+        let mut tree_sha = self.tree_sha.clone();
+        let mut components = path.split('/').peekable();
+        while let Some(component) = components.next() {
+            network::check_cancelled()?;
+            if !self.directories.borrow().contains_key(&tree_sha) {
+                let directory = self.api.directory(&tree_sha)?;
+                if directory["truncated"].as_bool().unwrap_or(false) {
+                    return Err("Repository tree exceeds GitHub's complete listing limit; choose a smaller repository".into());
+                }
+                let rows = directory["tree"]
+                    .as_array()
+                    .ok_or("Missing repository tree")?;
+                let retained: usize = self.directories.borrow().values().map(BTreeMap::len).sum();
+                if rows.len() > 20000usize.saturating_sub(retained) {
+                    return Err("Repository has too many entries for a Skill source".into());
+                }
+                let mut entries = BTreeMap::new();
+                for row in rows {
+                    let name = row["path"].as_str().ok_or("Invalid repository entry")?;
+                    if name.is_empty() || name.contains('/') || entries.contains_key(name) {
+                        return Err("Invalid non-recursive repository tree".into());
+                    }
+                    entries.insert(
+                        name.into(),
+                        DirectoryEntry {
+                            kind: row["type"].as_str().unwrap_or("").into(),
+                            file: Entry {
+                                sha: sha(&row["sha"])?,
+                                mode: row["mode"].as_str().unwrap_or("").into(),
+                                size: row["size"].as_u64().unwrap_or(u64::MAX),
+                                source: String::new(),
+                            },
+                        },
+                    );
+                }
+                self.directories
+                    .borrow_mut()
+                    .insert(tree_sha.clone(), entries);
+            }
+            let entry = self.directories.borrow()[&tree_sha].get(component).cloned();
+            let Some(mut entry) = entry else {
+                return Ok(None);
+            };
+            if entry.file.mode == "120000" || entry.kind == "commit" || entry.file.mode == "160000"
+            {
+                // A blocked ancestor cannot contain an optional catalog. Do not
+                // follow it or prevent unrelated documentation from loading.
+                if optional_catalog_ancestor && components.peek().is_some() {
+                    return Ok(None);
+                }
+                return Err(
+                    "Symbolic links and submodules are not allowed in documentation paths".into(),
+                );
+            }
+            if components.peek().is_some() {
+                if entry.kind != "tree" || entry.file.mode != "040000" {
+                    return Ok(None);
+                }
+                tree_sha = entry.file.sha;
+            } else if entry.kind == "blob" {
+                entry.file.source = path.into();
+                return Ok(Some(entry.file));
+            } else {
+                return Ok(None);
+            }
+        }
+        Ok(None)
+    }
+    pub fn contains(&self, path: &str) -> Result<bool, String> {
+        Ok(self.entry(path, false)?.is_some())
+    }
+    pub fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+        let entry = self
+            .entry(path, false)?
+            .ok_or_else(|| format!("File does not exist at this version: {path}"))?;
+        check_read_entry(&entry)?;
+        load_entry(&self.api, &self.commit, self.private, false, &entry)
+    }
+    pub fn catalog(&self) -> Result<Option<Value>, String> {
+        for name in ["skill-catalog.json", "skills/skill-catalog.json"] {
+            if self.entry(name, true)?.is_some() {
+                return serde_json::from_slice(&self.read(name)?)
+                    .map(Some)
+                    .map_err(|_| "The source skill-catalog.json is invalid JSON".into());
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn check_read_entry(e: &Entry) -> Result<(), String> {
+    if !["100644", "100755"].contains(&e.mode.as_str()) {
+        return Err("Symbolic links are not allowed in Skill packages".into());
+    }
+    if e.size > MAX_FILE as u64 {
+        return Err("Remote file exceeds the 4 MiB limit".into());
+    }
+    Ok(())
+}
+
+fn load_entry(
+    api: &Api,
+    commit: &str,
+    private: bool,
+    fresh: bool,
+    e: &Entry,
+) -> Result<Vec<u8>, String> {
+    let load = |_: Option<&str>| -> Result<Loaded, String> {
+        network::check_cancelled()?;
+        let bytes = if private {
+            if fresh {
+                api.blob_mode(&e.sha, true)?
+            } else {
+                api.blob(&e.sha)?
+            }
+        } else {
+            api.public_file(commit, &e.source, e.size)?
+        };
+        if bytes.len() as u64 != e.size || blob_hash(&bytes) != e.sha {
+            return Err("Remote file bytes do not match the immutable GitHub tree".into());
+        }
+        Ok(Loaded {
+            body: bytes,
+            etag: None,
+            not_modified: false,
+        })
+    };
+    if fresh {
+        Ok(load(None)?.body)
+    } else {
+        network::cached(
+            &api.cache_key(&format!("blob:{}:{}", e.sha, e.size))?,
+            CachePolicy::Immutable,
+            load,
+        )
+    }
 }
 
 pub struct Snapshot {
@@ -939,35 +1144,7 @@ impl Snapshot {
     }
     pub fn read_entry(&self, e: &Entry) -> Result<Vec<u8>, String> {
         self.read_entry_with(e, || {
-            let load = |_: Option<&str>| -> Result<Loaded, String> {
-                network::check_cancelled()?;
-                let bytes = if self.private {
-                    if self.fresh {
-                        self.api.blob_mode(&e.sha, true)?
-                    } else {
-                        self.api.blob(&e.sha)?
-                    }
-                } else {
-                    self.api.public_file(&self.commit, &e.source, e.size)?
-                };
-                if bytes.len() as u64 != e.size || blob_hash(&bytes) != e.sha {
-                    return Err("Remote file bytes do not match the immutable GitHub tree".into());
-                }
-                Ok(Loaded {
-                    body: bytes,
-                    etag: None,
-                    not_modified: false,
-                })
-            };
-            if self.fresh {
-                Ok(load(None)?.body)
-            } else {
-                network::cached(
-                    &self.api.cache_key(&format!("blob:{}:{}", e.sha, e.size))?,
-                    CachePolicy::Immutable,
-                    load,
-                )
-            }
+            load_entry(&self.api, &self.commit, self.private, self.fresh, e)
         })
     }
     fn read_entry_with(
@@ -975,12 +1152,7 @@ impl Snapshot {
         e: &Entry,
         load: impl FnOnce() -> Result<Vec<u8>, String>,
     ) -> Result<Vec<u8>, String> {
-        if !["100644", "100755"].contains(&e.mode.as_str()) {
-            return Err("Symbolic links are not allowed in Skill packages".into());
-        }
-        if e.size > MAX_FILE as u64 {
-            return Err("Remote file exceeds the 4 MiB limit".into());
-        }
+        check_read_entry(e)?;
         let key = (e.sha.clone(), e.source.clone(), e.size);
         if let Some(bytes) = self.bytes.borrow().files.get(&key) {
             return Ok(bytes.clone());
@@ -1167,6 +1339,101 @@ mod tests {
             .get_fresh(&[])
             .unwrap_err()
             .contains("服务器限流"));
+    }
+
+    #[test]
+    fn documentation_path_walk_rejects_links_submodules_and_incomplete_directory_trees() {
+        for (mode, kind, path) in [
+            ("120000", "blob", "unsafe"),
+            ("120000", "blob", "unsafe/README.md"),
+            ("160000", "commit", "unsafe"),
+            ("160000", "commit", "unsafe/README.md"),
+        ] {
+            let commit = "a".repeat(40);
+            let tree = "b".repeat(40);
+            let (endpoint, server) = scripted_http(vec![
+                (200, json!({"private":true}), None),
+                (200, json!({"tree":{"sha":tree}}), None),
+                (
+                    200,
+                    json!({"truncated":false,"tree":[{"path":"unsafe","mode":mode,"type":kind,"sha":"c".repeat(40),"size":1}]}),
+                    None,
+                ),
+            ]);
+            let repo = format!(
+                "synthetic-protocol/doc-link-{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            let _transport = test_transport(&repo, &endpoint);
+            let doc = DocumentSnapshot::at_commit(&repo, &commit).unwrap();
+            assert!(doc.read(path).unwrap_err().contains("links and submodules"));
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 3);
+            assert!(!requests[2].contains("recursive"));
+        }
+        for (response, message) in [
+            (
+                json!({"truncated":true,"tree":[]}),
+                "complete listing limit",
+            ),
+            (
+                json!({"truncated":false,"tree":[{"path":"nested/README.md","mode":"100644","type":"blob","sha":"c".repeat(40),"size":1}]}),
+                "non-recursive repository tree",
+            ),
+        ] {
+            let (endpoint, server) = scripted_http(vec![
+                (200, json!({"private":true}), None),
+                (200, json!({"tree":{"sha":"b".repeat(40)}}), None),
+                (200, response, None),
+            ]);
+            let repo = format!(
+                "synthetic-protocol/doc-tree-{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            let _transport = test_transport(&repo, &endpoint);
+            let doc = DocumentSnapshot::at_commit(&repo, &"a".repeat(40)).unwrap();
+            assert!(doc.read("README.md").unwrap_err().contains(message));
+            assert_eq!(server.join().unwrap().len(), 3);
+        }
+    }
+
+    #[test]
+    fn documentation_blobs_keep_size_hash_checks_and_never_cache_failed_reads() {
+        let content = b"original";
+        let commit = "a".repeat(40);
+        let blob = blob_hash(content);
+        let body = |bytes: &[u8]| json!({"encoding":"base64","size":bytes.len(),"content":STANDARD.encode(bytes)});
+        let (endpoint, server) = scripted_http(vec![
+            (200, json!({"private":true}), None),
+            (200, json!({"tree":{"sha":"b".repeat(40)}}), None),
+            (
+                200,
+                json!({"truncated":false,"tree":[{"path":"README.md","mode":"100644","type":"blob","sha":blob,"size":content.len()},{"path":"huge.md","mode":"100644","type":"blob","sha":"d".repeat(40),"size":MAX_FILE+1}]}),
+                None,
+            ),
+            (200, body(b"corrupt!"), None),
+            (200, body(b"short"), None),
+            (200, body(content), None),
+        ]);
+        let repo = format!(
+            "synthetic-protocol/doc-blob-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let _transport = test_transport(&repo, &endpoint);
+        let doc = DocumentSnapshot::at_commit(&repo, &commit).unwrap();
+        assert!(doc.read("../README.md").is_err());
+        assert!(doc.read("huge.md").unwrap_err().contains("4 MiB"));
+        assert!(doc
+            .read("README.md")
+            .unwrap_err()
+            .contains("immutable GitHub tree"));
+        assert!(doc
+            .read("README.md")
+            .unwrap_err()
+            .contains("immutable GitHub tree"));
+        assert_eq!(doc.read("README.md").unwrap(), content);
+        assert_eq!(doc.read("README.md").unwrap(), content);
+        assert_eq!(server.join().unwrap().len(), 6);
     }
 
     #[test]

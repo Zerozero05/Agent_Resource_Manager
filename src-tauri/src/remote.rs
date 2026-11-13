@@ -20,7 +20,7 @@ use crate::{
     transaction,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use github::{Api, Entry, Snapshot, MAX_FILE, MAX_TOTAL};
+use github::{Api, DocumentSnapshot, Entry, Snapshot, MAX_FILE, MAX_TOTAL};
 use logic::{checked_selection, hash, selected_changes};
 use serde_json::{json, Value};
 use std::{
@@ -219,25 +219,27 @@ pub(crate) fn declared_runtime(item: Option<&Value>) -> Option<Vec<String>> {
         .find_map(|v| strings(v).ok())
     })
 }
-fn documentation_path(skill: &Value, snap: &Snapshot) -> Result<String, String> {
+fn documentation_path(skill: &Value, snap: &DocumentSnapshot) -> Result<String, String> {
     // Resolve the usage path from this exact commit, including older installed versions.
-    let (_, item) = manifests(snap, remote_path(skill)?)?;
-    if let Some(path) = item.as_ref().and_then(|v| v["usage"].as_str()) {
+    let catalog = snap.catalog()?;
+    let items = catalog_items(catalog.as_ref());
+    let item = catalog_item(&items, remote_path(skill)?);
+    if let Some(path) = item.and_then(|v| v["usage"].as_str()) {
         github::validate_relative(path)?;
-        if snap.tree.contains_key(path) {
+        if snap.contains(path)? {
             return Ok(path.into());
         }
     }
     if let Some(path) = skill["documentationPath"].as_str() {
         github::validate_relative(path)?;
-        if snap.tree.contains_key(path) {
+        if snap.contains(path)? {
             return Ok(path.into());
         }
     }
     let root = remote_path(skill)?;
     for leaf in ["README.md", "readme.md", "Readme.md", "SKILL.md"] {
         let path = join(root, leaf);
-        if snap.tree.contains_key(&path) {
+        if snap.contains(&path)? {
             return Ok(path);
         }
     }
@@ -596,6 +598,35 @@ fn requested_documentation_snapshot(
         documentation_snapshot(m, &skill, req["version"].as_str().unwrap_or("latest"))
     }
 }
+fn requested_document_reader(
+    m: &Manager,
+    skill: &Value,
+    req: &Value,
+) -> Result<DocumentSnapshot, String> {
+    let skill = rebinding::reading_skill(skill, req)?;
+    if let Some(commit) = req["remoteCommit"].as_str() {
+        return DocumentSnapshot::at_commit(repo(&skill)?, commit);
+    }
+    match req["version"].as_str().unwrap_or("latest") {
+        "latest" => {
+            if let Some(commit) = skill["commit"].as_str() {
+                return DocumentSnapshot::at_commit(repo(&skill)?, commit);
+            }
+            let source = source_for(m, &skill)?;
+            if source["repo"] != skill["repo"] {
+                return Err("Skill/source association is inconsistent".into());
+            }
+            DocumentSnapshot::load(
+                repo(&skill)?,
+                skill["branch"]
+                    .as_str()
+                    .or_else(|| source["branch"].as_str()),
+            )
+        }
+        "installed" => DocumentSnapshot::at_commit(repo(&skill)?, text(&skill, "installedCommit")?),
+        _ => Err("Choose installed or latest documentation".into()),
+    }
+}
 fn get_document(m: &Manager, req: &Value) -> Result<Value, String> {
     get_document_with_generation(m, req, crate::network::read_generation)
 }
@@ -633,7 +664,7 @@ fn get_document_with_generation(
             json!({"markdown":markdown,"documentPath":path,"basePath":path.rsplit_once('/').map(|(p,_)|p).unwrap_or(""),"baseUrl":null,"source":"本地运行文件","commit":null,"localFingerprint":fingerprint,"readGeneration":generation,"checkedAt":now(),"private":false}),
         );
     }
-    let snap = requested_documentation_snapshot(m, &skill, req)?;
+    let snap = requested_document_reader(m, &skill, req)?;
     let path = match req["path"].as_str() {
         Some(p) => {
             github::validate_relative(p)?;
@@ -675,7 +706,7 @@ fn get_doc_asset(m: &Manager, req: &Value) -> Result<Value, String> {
     let raw = if local_document_requested(&skill, req) {
         read_local(&local_root(&skill)?, path)?
     } else {
-        requested_documentation_snapshot(m, &skill, req)?.read(path)?
+        requested_document_reader(m, &skill, req)?.read(path)?
     };
     let extension = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     // SVG/HTML are deliberately excluded: assets must not execute source-supplied scripts.
