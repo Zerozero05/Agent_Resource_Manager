@@ -702,6 +702,119 @@ fn documentation_optional_catalog_does_not_follow_a_blocked_unrelated_ancestor()
 }
 
 #[test]
+fn documentation_candidate_usage_symlink_ancestor_keeps_fallback() {
+    assert_documentation_candidate_fallback("usage", "120000");
+}
+
+#[test]
+fn documentation_candidate_usage_submodule_ancestor_keeps_fallback() {
+    assert_documentation_candidate_fallback("usage", "160000");
+}
+
+#[test]
+fn documentation_candidate_stored_symlink_ancestor_keeps_fallback() {
+    assert_documentation_candidate_fallback("stored", "120000");
+}
+
+#[test]
+fn documentation_candidate_stored_submodule_ancestor_keeps_fallback() {
+    assert_documentation_candidate_fallback("stored", "160000");
+}
+
+fn assert_documentation_candidate_fallback(candidate: &str, mode: &str) {
+    let catalog = if candidate == "usage" {
+        br#"{"skills":[{"path":"","usage":"blocked/README.md"}]}"#.as_slice()
+    } else {
+        br#"{"skills":[]}"#.as_slice()
+    };
+    let blocked = b"unrelated link or submodule target";
+    let server = Server::new(&[
+        ("skill-catalog.json", catalog),
+        ("README.md", b"# Root fallback\n"),
+        ("stored.md", b"# Stored fallback\n"),
+        ("blocked", blocked),
+    ]);
+    let tree = {
+        let mut store = server.state.lock().unwrap();
+        let tree = store.commits[&store.head].tree.clone();
+        store
+            .trees
+            .get_mut(&tree)
+            .unwrap()
+            .get_mut("blocked")
+            .unwrap()
+            .0 = mode.into();
+        tree
+    };
+    let _transport = server.transport();
+    let mut fixture = fixture(&server);
+    let skill = &mut fixture.manager.state.skills[0];
+    skill["sourceId"] = json!("source");
+    skill["repo"] = json!(server.repo());
+    skill["remotePath"] = json!("");
+    skill["commit"] = json!(server.head());
+    skill["documentationPath"] = json!(if candidate == "usage" {
+        "stored.md"
+    } else {
+        "blocked/README.md"
+    });
+    let old_inventory = Snapshot::at_commit(&server.repo(), &server.head()).unwrap();
+    assert!(!old_inventory.tree.contains_key("blocked/README.md"));
+    assert!(old_inventory.tree.contains_key("README.md"));
+    let document =
+        get_document(&fixture.manager, &json!({"skillId":"local-id"})).unwrap_or_else(|error| {
+            panic!("{candidate} candidate with {mode} ancestor must keep fallback: {error}")
+        });
+    let (expected_path, expected_text) = if candidate == "usage" {
+        ("stored.md", "# Stored fallback\n")
+    } else {
+        ("README.md", "# Root fallback\n")
+    };
+    assert_eq!(document["documentPath"], expected_path);
+    assert_eq!(document["markdown"], expected_text);
+    for path in ["blocked/README.md", "blocked"] {
+        let error = get_document(
+            &fixture.manager,
+            &json!({"skillId":"local-id", "path":path}),
+        )
+        .unwrap_err();
+        assert!(error.contains("links and submodules"));
+    }
+    let image = get_doc_asset(
+        &fixture.manager,
+        &json!({"skillId":"local-id", "path":"blocked/image.png"}),
+    )
+    .unwrap_err();
+    assert!(image.contains("links and submodules"));
+    assert!(get_document(
+        &fixture.manager,
+        &json!({"skillId":"local-id", "path":"blocked/../README.md"})
+    )
+    .is_err());
+    {
+        let store = server.state.lock().unwrap();
+        let trees: Vec<_> = store
+            .requests
+            .iter()
+            .filter(|request| request.route.get(1).is_some_and(|part| part == "trees"))
+            .collect();
+        assert_eq!(
+            trees.len(),
+            2,
+            "complete inventory and documentation each read only the repository root"
+        );
+        assert!(trees.iter().all(|request| request.route[2] == tree));
+        assert_eq!(trees.iter().filter(|request| request.recursive).count(), 1);
+        assert!(!store.requests.iter().any(|request| request
+            .route
+            .get(1)
+            .is_some_and(|part| part == "blobs")
+            && request.route[2] == github::blob_hash(blocked)));
+    }
+    server.assert_clean();
+}
+
+#[test]
 fn documentation_text_and_catalog_validation_do_not_fall_back_after_invalid_content() {
     let oversized = vec![b'x'; 1024 * 1024 + 1];
     for (files, message) in [

@@ -194,7 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
-| GitHub说明按路径读取（内部验证） | 2026-11-13 | 1、说明与图片仅按固定提交读取沿途目录及目标文件，完整包清单另行保留。[详情](CHANGELOG.md#documentation-path-read-20261113)<br>2、保留优先级、回退、安装来源和文件校验，修复可选catalog祖先为链接／子模块时的误阻断。[详情](CHANGELOG.md#documentation-path-read-20261113)<br>3、新增6项检查，最终文档8项、相关静态检查与独立复核通过；真实新版延迟和内存收敛待验。[详情](CHANGELOG.md#documentation-path-read-20261113) |
+| GitHub说明按路径读取（内部验证） | 2026-11-13 | 1、说明与图片仅按固定提交读取沿途目录及目标文件，完整包清单另行保留。[详情](CHANGELOG.md#documentation-path-read-20261113)<br>2、保留优先级、回退、安装来源和文件校验，修复可选catalog及说明候选经过链接／子模块祖先时的误阻断。[详情](CHANGELOG.md#documentation-path-read-20261113)<br>3、累计新增10项检查，最终文档12项、凭据边界1项及相关静态检查通过；真实新版延迟和内存收敛待验。[详情](CHANGELOG.md#documentation-path-read-20261113) |
 | 候选自检与进程测试夹具 | 2026-11-12 | 1、超时检查使用小型真实原生程序，保留原5秒整体上限、完整摘要和150毫秒超时清理。[详情](CHANGELOG.md#probe-timeout-fixture-20261112)<br>2、停止／退出前再启动无关测试进程，保留其存活断言并按自有句柄清理。[详情](CHANGELOG.md#probe-timeout-fixture-20261112)<br>3、17项候选自检及两项相关精确检查、格式和全目标Clippy通过；生产逻辑未变，完整云端结果另核对。[详情](CHANGELOG.md#probe-timeout-fixture-20261112) |
 | 工具启动准备与并发读取（内部验证） | 2026-11-12 | 1、大文件核验和环境准备移出共享锁，启动前仍原子核对最新登记、动作、取消、场景及依赖。[详情](CHANGELOG.md#resource-spawn-preparation-20261112)<br>2、非可取消任务使用启动／释放握手；MCP准备与协议阶段分别记录，保留原取消、退出及结果证据检查。[详情](CHANGELOG.md#resource-spawn-preparation-20261112)<br>3、56项不同的相关Rust检查、格式及全目标Clippy零警告通过；新候选、完整Windows检查与原生性能仍待验证。[详情](CHANGELOG.md#resource-spawn-preparation-20261112) |
 | 开发源码同步与检查修复 | 2026-11-12 | 1、405项源码同步到开发分支并逐一核对远端文件内容及模式，正式分支保持。[详情](CHANGELOG.md#source-ci-exit-20261112)<br>2、修正预期拒绝案例遗留的脚本退出状态；原12项断言和真实负向失败验证通过。[详情](CHANGELOG.md#source-ci-exit-20261112)<br>3、修正测试模块的样式导入处理，保留真实组件和生产样式，16项相关检查通过；云端完整检查继续单独核验。[详情](CHANGELOG.md#source-ci-exit-20261112) |

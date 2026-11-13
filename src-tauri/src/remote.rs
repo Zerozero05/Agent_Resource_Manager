@@ -226,20 +226,20 @@ fn documentation_path(skill: &Value, snap: &DocumentSnapshot) -> Result<String, 
     let item = catalog_item(&items, remote_path(skill)?);
     if let Some(path) = item.and_then(|v| v["usage"].as_str()) {
         github::validate_relative(path)?;
-        if snap.contains(path)? {
+        if snap.contains_candidate(path)? {
             return Ok(path.into());
         }
     }
     if let Some(path) = skill["documentationPath"].as_str() {
         github::validate_relative(path)?;
-        if snap.contains(path)? {
+        if snap.contains_candidate(path)? {
             return Ok(path.into());
         }
     }
     let root = remote_path(skill)?;
     for leaf in ["README.md", "readme.md", "Readme.md", "SKILL.md"] {
         let path = join(root, leaf);
-        if snap.contains(&path)? {
+        if snap.contains_candidate(&path)? {
             return Ok(path);
         }
     }

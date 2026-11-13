@@ -794,7 +794,7 @@ impl DocumentSnapshot {
             directories: RefCell::new(BTreeMap::new()),
         })
     }
-    fn entry(&self, path: &str, optional_catalog_ancestor: bool) -> Result<Option<Entry>, String> {
+    fn entry(&self, path: &str, candidate_probe: bool) -> Result<Option<Entry>, String> {
         validate_relative(path)?;
         let mut tree_sha = self.tree_sha.clone();
         let mut components = path.split('/').peekable();
@@ -841,9 +841,9 @@ impl DocumentSnapshot {
             };
             if entry.file.mode == "120000" || entry.kind == "commit" || entry.file.mode == "160000"
             {
-                // A blocked ancestor cannot contain an optional catalog. Do not
-                // follow it or prevent unrelated documentation from loading.
-                if optional_catalog_ancestor && components.peek().is_some() {
+                // Automatic candidates cannot exist below a blocked ancestor.
+                // Skip without traversing it; explicit reads remain errors.
+                if candidate_probe && components.peek().is_some() {
                     return Ok(None);
                 }
                 return Err(
@@ -864,8 +864,8 @@ impl DocumentSnapshot {
         }
         Ok(None)
     }
-    pub fn contains(&self, path: &str) -> Result<bool, String> {
-        Ok(self.entry(path, false)?.is_some())
+    pub fn contains_candidate(&self, path: &str) -> Result<bool, String> {
+        Ok(self.entry(path, true)?.is_some())
     }
     pub fn read(&self, path: &str) -> Result<Vec<u8>, String> {
         let entry = self
@@ -876,7 +876,7 @@ impl DocumentSnapshot {
     }
     pub fn catalog(&self) -> Result<Option<Value>, String> {
         for name in ["skill-catalog.json", "skills/skill-catalog.json"] {
-            if self.entry(name, true)?.is_some() {
+            if self.contains_candidate(name)? {
                 return serde_json::from_slice(&self.read(name)?)
                     .map(Some)
                     .map_err(|_| "The source skill-catalog.json is invalid JSON".into());
