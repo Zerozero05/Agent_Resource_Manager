@@ -3784,7 +3784,12 @@ mod association_behavior_tests {
             "baselineHashes",
             "categoryId",
         ] {
-            assert_eq!(m.state.skills[0][field], original[field], "{field}");
+            let expected = if field == "name" {
+                json!("changed-in-file")
+            } else {
+                original[field].clone()
+            };
+            assert_eq!(m.state.skills[0][field], expected, "{field}");
         }
         fs::write(
             left.join("SKILL.md"),
@@ -3806,7 +3811,12 @@ mod association_behavior_tests {
             "baselineHashes",
             "categoryId",
         ] {
-            assert_eq!(m.state.skills[0][field], original[field], "{field}");
+            let expected = if field == "name" {
+                json!("changed-in-file")
+            } else {
+                original[field].clone()
+            };
+            assert_eq!(m.state.skills[0][field], expected, "{field}");
         }
     }
     #[test]

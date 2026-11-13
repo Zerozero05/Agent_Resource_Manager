@@ -290,3 +290,72 @@ fn refresh_metadata_updates_internal_name_and_fallbacks_without_touching_managem
     assert_eq!(m.state.skills[0]["favorite"], true);
     assert_eq!(m.state.skills[0]["categoryId"], "category");
 }
+
+#[test]
+fn legacy_catalog_display_updates_on_relocation_but_unknown_custom_display_is_retained() {
+    let f = fixture();
+    let old = f.path().join("model-search");
+    let new = f.path().join("model-research");
+    create_skill(&old, "model-search");
+    create_skill(&new, "model-research");
+    fs::write(new.join("SKILL.md"), "---\nname: model-research\ndisplayName: Model Research\ndescription: synthetic\n---\nResearch.\n").unwrap();
+    let mut m = Manager::new(f.path().join("state")).unwrap();
+    let id = register(&mut m, &old);
+    m.state.skills[0]
+        .as_object_mut()
+        .unwrap()
+        .remove("localDeclaredDisplayName");
+    m.state.skills[0]["displayName"] = json!("Model Search");
+    m.state.skills[0]["catalogMetadata"] = json!({"display_name":"Model Search"});
+    m.state.skills[0]["sourceId"] = json!("existing-source");
+    m.state.skills[0]["remotePath"] = json!("model-search");
+    let plan = preview(&mut m, &id, &new);
+    handle(
+        &mut m,
+        &json!({"action":"relocate_local","previewId":plan["id"]}),
+    )
+    .unwrap();
+    assert_eq!(m.state.skills[0]["id"], id);
+    assert_eq!(m.state.skills[0]["name"], "model-research");
+    assert_eq!(m.state.skills[0]["displayName"], "Model Research");
+    assert_eq!(m.state.skills[0]["remotePath"], "model-search");
+    let mut custom = m.state.skills[0].clone();
+    custom
+        .as_object_mut()
+        .unwrap()
+        .remove("localDeclaredDisplayName");
+    custom["displayName"] = json!("My independent label");
+    refresh_declared_metadata(&mut custom, None).unwrap();
+    assert_eq!(custom["displayName"], "My independent label");
+}
+
+#[test]
+fn local_version_removal_restores_existing_fallback_and_pure_local_version_becomes_unknown() {
+    let f = fixture();
+    let root = f.path().join("versioned");
+    create_skill(&root, "versioned");
+    let mut record = draft(&root).unwrap();
+    record["version"] = json!("known-source-version");
+    create_skill(&root, "versioned");
+    refresh_declared_metadata(&mut record, None).unwrap();
+    assert_eq!(record["version"], "1.0.0");
+    assert_eq!(record["localVersionFallback"], "known-source-version");
+    fs::write(
+        root.join("SKILL.md"),
+        "---\nname: versioned\ndescription: synthetic\n---\nNo local version.\n",
+    )
+    .unwrap();
+    refresh_declared_metadata(&mut record, None).unwrap();
+    assert_eq!(record["version"], "known-source-version");
+    let mut local_only = draft(&root).unwrap();
+    create_skill(&root, "versioned");
+    refresh_declared_metadata(&mut local_only, None).unwrap();
+    assert_eq!(local_only["version"], "1.0.0");
+    fs::write(
+        root.join("SKILL.md"),
+        "---\nname: versioned\ndescription: synthetic\n---\nVersion removed.\n",
+    )
+    .unwrap();
+    refresh_declared_metadata(&mut local_only, None).unwrap();
+    assert!(local_only["version"].is_null());
+}

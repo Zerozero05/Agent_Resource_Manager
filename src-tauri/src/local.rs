@@ -101,6 +101,42 @@ fn metadata_stamp(root: &Path, hashes: &BTreeMap<String, String>) -> Value {
     ))
 }
 
+fn apply_declared_metadata(skill: &mut Value, declared: &Value) {
+    let current_display = scalar(&skill["displayName"]);
+    let previous_display = skill.get("localDeclaredDisplayName");
+    let catalog_display = scalar(&skill["catalogMetadata"]["display_name"])
+        .or_else(|| scalar(&skill["catalogMetadata"]["displayName"]));
+    let custom_display = current_display.as_ref().is_some_and(|current| {
+        if let Some(previous) = previous_display {
+            Some(current.clone()) != scalar(previous)
+        } else {
+            Some(current.clone()) != scalar(&skill["name"])
+                && Some(current.clone()) != catalog_display
+        }
+    });
+    let current_version = scalar(&skill["version"]);
+    if current_version.is_some()
+        && skill
+            .get("localDeclaredVersion")
+            .is_none_or(|previous| scalar(previous) != current_version)
+    {
+        skill["localVersionFallback"] = skill["version"].clone();
+    }
+    for field in ["name", "description", "dependencies"] {
+        skill[field] = declared[field].clone();
+    }
+    if !custom_display {
+        skill["displayName"] = declared["displayName"].clone();
+    }
+    skill["version"] = if scalar(&declared["version"]).is_some() {
+        declared["version"].clone()
+    } else {
+        skill["localVersionFallback"].clone()
+    };
+    skill["localDeclaredDisplayName"] = declared["displayName"].clone();
+    skill["localDeclaredVersion"] = declared["version"].clone();
+}
+
 /// Refresh declarations from their actual files without inferring association,
 /// installation provenance or changing a manually selected runtime scope.
 pub(crate) fn refresh_declared_metadata(
@@ -110,10 +146,11 @@ pub(crate) fn refresh_declared_metadata(
     let root = local_root(skill)?;
     skill["localIdentity"] = json!(directory_identity(&root).ok());
     let stamp = inventory.map(|hashes| metadata_stamp(&root, hashes));
-    if stamp
-        .as_ref()
-        .is_some_and(|stamp| skill["localMetadataStamp"] == *stamp)
-    {
+    if stamp.as_ref().is_some_and(|stamp| {
+        skill["localMetadataStamp"] == *stamp
+            && skill.get("localDeclaredDisplayName").is_some()
+            && skill.get("localDeclaredVersion").is_some()
+    }) {
         return Ok(());
     }
     let meta = frontmatter(&read_text(&safe_join(&root, "SKILL.md")?)?)?;
@@ -129,19 +166,20 @@ pub(crate) fn refresh_declared_metadata(
             .to_string_lossy()
             .into_owned()
     });
-    skill["name"] = json!(name.clone());
-    skill["displayName"] = json!(scalar(&meta["displayName"])
+    let display = scalar(&meta["displayName"])
         .or_else(|| scalar(&meta["metadata"]["displayName"]))
         .or_else(|| scalar(&meta["metadata"]["display_name"]))
         .or_else(|| scalar(&interface["interface"]["display_name"]))
-        .unwrap_or(name));
-    skill["description"] = json!(scalar(&meta["description"]).unwrap_or_default());
-    skill["version"] =
-        json!(scalar(&meta["version"]).or_else(|| scalar(&meta["metadata"]["version"])));
-    skill["dependencies"] = meta.get("compatibility").cloned().unwrap_or(Value::Null);
-    if let Some(stamp) = stamp {
-        skill["localMetadataStamp"] = stamp;
-    }
+        .unwrap_or_else(|| name.clone());
+    apply_declared_metadata(
+        skill,
+        &json!({
+            "name":name,"displayName":display,"description":scalar(&meta["description"]).unwrap_or_default(),
+            "version":scalar(&meta["version"]).or_else(|| scalar(&meta["metadata"]["version"])),
+            "dependencies":meta.get("compatibility").cloned().unwrap_or(Value::Null),
+        }),
+    );
+    skill["localMetadataStamp"] = stamp.unwrap_or(Value::Null);
     Ok(())
 }
 
@@ -399,6 +437,7 @@ pub fn draft(root: &Path) -> Result<Value, String> {
     Ok(json!({
         "name":name,"displayName":display,"description":scalar(&meta["description"]).unwrap_or_default(),
         "version":version,"localPath":readable_path(&root),"readOnly":reason.is_some(),"readOnlyReason":reason,
+        "localDeclaredDisplayName":display,"localDeclaredVersion":version,"localVersionFallback":null,
         "dependencies":meta.get("compatibility").cloned().unwrap_or(Value::Null),
         "managed":original_managed || managed_path(&root),
         "sourceId":null,"remotePath":null,"repo":null,"branch":null,"commit":null,"baselineCommit":null,
@@ -2462,15 +2501,11 @@ fn relocated_record(original: &Value, draft: &Value) -> Value {
         .filter_map(|(path, hash)| Some((path.clone(), hash.as_str()?.to_owned())))
         .collect();
     invalidate_runtime_audit(&mut skill, &inventory);
+    apply_declared_metadata(&mut skill, draft);
     for field in [
         "localPath",
         "localIdentity",
         "localMetadataStamp",
-        "name",
-        "displayName",
-        "description",
-        "version",
-        "dependencies",
         "localHashes",
         "readOnly",
         "readOnlyReason",
@@ -3111,17 +3146,13 @@ pub fn handle(m: &mut Manager, req: &Value) -> Result<Option<Value>, String> {
                             })
                             .collect();
                         invalidate_runtime_audit(&mut skill, &current);
+                        apply_declared_metadata(&mut skill, &value);
                         for field in [
-                            "name",
-                            "description",
-                            "displayName",
-                            "version",
                             "readOnly",
                             "readOnlyReason",
                             "localHashes",
                             "localIdentity",
                             "localMetadataStamp",
-                            "dependencies",
                         ] {
                             skill[field] = value[field].clone();
                         }
