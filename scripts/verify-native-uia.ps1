@@ -895,8 +895,13 @@ public sealed class NativeUiMeasurement : IDisposable {
   AutomationElement Unique(string name,ControlType type,string scopeName=null){
     AutomationElement result=null;
     Wait(()=>{
-      AutomationElement scope=String.IsNullOrEmpty(scopeName)?root:Named(scopeName,null,false);
-      if(scope==null)return false;
+      AutomationElement scope=root;
+      if(!String.IsNullOrEmpty(scopeName)){
+        AutomationElementCollection scopes=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,scopeName));
+        if(scopes.Count>1)throw new InvalidOperationException("Functional scope is ambiguous: "+scopeName+" (matches "+scopes.Count+").");
+        if(scopes.Count==0)return false;
+        scope=scopes[0];
+      }
       AutomationElementCollection matches=scope.FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.NameProperty,name),new PropertyCondition(AutomationElement.ControlTypeProperty,type)));
       if(matches.Count>1)throw new InvalidOperationException("Functional selector is ambiguous: "+name+" (matches "+matches.Count+").");
       if(matches.Count==0)return false;
@@ -908,11 +913,11 @@ public sealed class NativeUiMeasurement : IDisposable {
   void PresentControl(AutomationElement element){Identity(false);if(element.Current.IsOffscreen){object scroll;if(!element.TryGetCurrentPattern(ScrollItemPattern.Pattern,out scroll))throw new InvalidOperationException("Exact owned control is outside the viewport and has no semantic scroll entry.");((ScrollItemPattern)scroll).ScrollIntoView();Wait(()=>!element.Current.IsOffscreen&&element.Current.IsEnabled,"Exact owned native control did not become visible after semantic scrolling.");}}
   public void RevealNamed(string name){Identity(false);AutomationElementCollection matches=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,name));if(matches.Count!=1)throw new InvalidOperationException("Scroll target must resolve one owned native element: "+name);PresentControl(matches[0]);Paint();Identity(false);}
   public void InvokeUnique(string name,string scope){AutomationElement element=Unique(name,ControlType.Button,scope);PresentControl(element);object pattern;if(element.TryGetCurrentPattern(InvokePattern.Pattern,out pattern))((InvokePattern)pattern).Invoke();else if(element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern,out pattern)){ExpandCollapsePattern expand=(ExpandCollapsePattern)pattern;if(expand.Current.ExpandCollapseState==ExpandCollapseState.Collapsed)expand.Expand();else if(expand.Current.ExpandCollapseState==ExpandCollapseState.Expanded)expand.Collapse();else throw new InvalidOperationException("Exact owned disclosure is not in a stable expandable state.");}else if(element.TryGetCurrentPattern(TogglePattern.Pattern,out pattern)){TogglePattern toggle=(TogglePattern)pattern;if(toggle.Current.ToggleState==ToggleState.Indeterminate)throw new InvalidOperationException("Exact owned native button has an indeterminate toggle state.");toggle.Toggle();}else throw new InvalidOperationException("Exact owned native button has no supported invocation, disclosure or toggle pattern: "+name);Paint();Identity(false);}
-  public string SetField(string name,string value,bool numeric=false){
+  public string SetField(string name,string value,bool numeric=false,string scope=null){
     if(value.Length>4096)throw new InvalidOperationException("Synthetic native field value is too long.");
     double number=0;
     if(numeric&&(!double.TryParse(value,System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out number)||!double.IsFinite(number)))throw new InvalidOperationException("The exact numeric field requires a finite number.");
-    AutomationElement element=Unique(name,numeric?ControlType.Spinner:ControlType.Edit);PresentControl(element);object available;
+    AutomationElement element=Unique(name,numeric?ControlType.Spinner:ControlType.Edit,scope);PresentControl(element);object available;
     if(numeric&&element.TryGetCurrentPattern(RangeValuePattern.Pattern,out available)){
       RangeValuePattern range=(RangeValuePattern)available;
       if(range.Current.IsReadOnly)throw new InvalidOperationException("Exact numeric field is read-only.");
@@ -1512,7 +1517,7 @@ try {
                     'state' {$session.InspectNamed([string]$request.name,[string]$request.scope)}
                     'fields' {$session.FormFields()}
                     'invokeName' {$session.InvokeUnique([string]$request.name,[string]$request.scope);@{invoked=$true;functionalOnly=$true}}
-                    'setField' {@{value=$session.SetField([string]$request.name,[string]$request.value,[bool]$request.numeric);functionalOnly=$true}}
+                    'setField' {@{value=$session.SetField([string]$request.name,[string]$request.value,[bool]$request.numeric,[string]$request.scope);functionalOnly=$true}}
                     'reveal' {$session.RevealNamed([string]$request.name);@{revealed=$true;functionalOnly=$true}}
                     'selectTab' {$session.SelectTab([string]$request.name);@{selected=$true;functionalOnly=$true}}
                     'selectCombo' {

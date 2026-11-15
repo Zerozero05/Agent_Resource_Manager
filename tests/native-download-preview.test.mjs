@@ -46,7 +46,7 @@ test('native download preview requires a target within the approved download dir
   assert.equal(nativeDownloadPreviewMatches(null, specification), false);
 });
 
-test('native stage selects its exact version field alongside the optional GitHub version field', () => {
-  assert.match(beginUiaNativeStage.toString(), /app\.call\('setField', \{ name: '固定版本', value: 'v2' \}\)/);
+test('native stage selects its exact version field only inside the update panel', () => {
+  assert.match(beginUiaNativeStage.toString(), /app\.call\('setField', \{ name: '固定版本', value: 'v2', scope: '更新 Perf Update Fixture' \}\)/);
   assert.doesNotMatch(beginUiaNativeStage.toString(), /setField\(app, '固定版本'/);
 });

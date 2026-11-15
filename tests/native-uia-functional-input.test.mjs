@@ -842,6 +842,81 @@ test('owned-focus diagnosis observes one guarded focus call without accepting a 
   assert.match(identity, /input&&FocusDiagnosticOnly/);
 });
 
+test('scoped functional fields select only one exact owned panel and refuse missing or ambiguous targets', { skip: process.platform !== 'win32' }, async () => {
+  const method = sourceSection('  AutomationElement Unique(', '  void PresentControl(');
+  const temporary = await mkdtemp('D:/03_github_projects/Agent_Resource_Manager/validation/manager-data/native-field-scope-');
+  const program = `$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+public enum TreeScope { Descendants }
+public enum ControlType { Group, Edit, Spinner }
+public abstract class Condition { public abstract bool Matches(AutomationElement element); }
+public sealed class PropertyCondition:Condition {
+  readonly object property,value;
+  public PropertyCondition(object property,object value){this.property=property;this.value=value;}
+  public override bool Matches(AutomationElement element){return Object.Equals(property==AutomationElement.NameProperty?(object)element.Name:element.Type,value);}
+}
+public sealed class AndCondition:Condition {
+  readonly Condition first,second;
+  public AndCondition(Condition first,Condition second){this.first=first;this.second=second;}
+  public override bool Matches(AutomationElement element){return first.Matches(element)&&second.Matches(element);}
+}
+public sealed class AutomationElementCollection:List<AutomationElement> {}
+public sealed class AutomationElement {
+  public static readonly object NameProperty=new object(),ControlTypeProperty=new object();
+  public string Name,Key; public ControlType Type; public bool IsEnabled=true;
+  public List<AutomationElement> Children=new List<AutomationElement>();
+  public AutomationElement Current {get{return this;}}
+  public AutomationElementCollection FindAll(TreeScope scope,Condition condition){
+    var result=new AutomationElementCollection();
+    foreach(var child in Children){if(condition.Matches(child))result.Add(child);result.AddRange(child.FindAll(scope,condition));}
+    return result;
+  }
+}
+public sealed class ScopedSelector {
+  AutomationElement root=new AutomationElement();
+  void Wait(Func<bool> expected,string message){for(int index=0;index<4;index++)if(expected())return;throw new InvalidOperationException(message);}
+${method}
+  public static object Check(string scenario){
+    var selector=new ScopedSelector();
+    var outside=new AutomationElement{Name="固定版本",Type=ControlType.Edit,Key="outside"};
+    var panel=new AutomationElement{Name="更新 Perf Update Fixture",Type=ControlType.Group};
+    var target=new AutomationElement{Name="固定版本",Type=ControlType.Edit,Key="inside"};
+    selector.root.Children.Add(outside);selector.root.Children.Add(panel);panel.Children.Add(target);
+    string scope="更新 Perf Update Fixture";
+    if(scenario=="missing-scope")panel.Name="other panel";
+    if(scenario=="prefix-scope")panel.Name+=" extra";
+    if(scenario=="duplicate-scope")selector.root.Children.Add(new AutomationElement{Name=panel.Name,Type=ControlType.Group});
+    if(scenario=="duplicate-field")panel.Children.Add(new AutomationElement{Name=target.Name,Type=ControlType.Edit,Key="duplicate"});
+    if(scenario=="missing-field")target.Name="other field";
+    if(scenario=="disabled-field")target.IsEnabled=false;
+    if(scenario=="unscoped-unique"){selector.root.Children.Remove(panel);scope=null;}
+    if(scenario=="unscoped-ambiguous")scope=null;
+    try{return new{scenario,failed=false,selected=selector.Unique("固定版本",ControlType.Edit,scope).Key,error=(string)null};}
+    catch(Exception error){return new{scenario,failed=true,selected=(string)null,error=error.Message};}
+  }
+}
+'@
+@('scoped','missing-scope','prefix-scope','duplicate-scope','duplicate-field','missing-field','disabled-field','unscoped-unique','unscoped-ambiguous') | ForEach-Object {[ScopedSelector]::Check($_)} | ConvertTo-Json -Depth 5 -Compress
+`;
+  const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(program, 'utf16le').toString('base64')], {
+    encoding: 'utf8', windowsHide: true, timeout: 60000, maxBuffer: 128 * 1024,
+    env: { ...process.env, TEMP: temporary, TMP: temporary }, cwd: join(temporary, '..'),
+  });
+  assert.equal(result.error, undefined); assert.equal(result.status, 0, result.stderr);
+  const cases = new Map(JSON.parse(result.stdout).map(value => [value.scenario, value]));
+  assert.equal(cases.size, 9);
+  assert.equal(cases.get('scoped').selected, 'inside');
+  assert.equal(cases.get('unscoped-unique').selected, 'outside');
+  for (const name of ['missing-scope', 'prefix-scope', 'duplicate-scope', 'duplicate-field', 'missing-field', 'disabled-field', 'unscoped-ambiguous']) {
+    assert.equal(cases.get(name).failed, true, name); assert.equal(cases.get(name).selected, null, name);
+  }
+  assert.match(cases.get('duplicate-scope').error, /Functional scope is ambiguous/);
+  for (const name of ['duplicate-field', 'unscoped-ambiguous']) assert.match(cases.get(name).error, /Functional selector is ambiguous/, name);
+});
+
 test('actual field method prefers strict numeric ranges and never falls back after range refusal or incorrect readback', { skip: process.platform !== 'win32' }, async () => {
   const method = sourceSection('  public string SetField(', '  public void SelectTab(');
   assert.doesNotMatch(method, /SetFocus\(|SendInput\(|ClickNative\(|\bText\(|inputTick\s*=/);
@@ -890,7 +965,7 @@ public sealed class FakeNativeField {
   public bool HasRange=true,HasValue=true,RangeReadOnly,ValueReadOnly;
   public int RangeQueries,ValueQueries,RangeWrites,ValueWrites,UniqueCalls,PresentCalls;
   public string SelectedType;
-  AutomationElement Unique(string name,ControlType type){UniqueCalls++;SelectedType=type.ToString();return new AutomationElement(this);}
+  AutomationElement Unique(string name,ControlType type,string scope=null){UniqueCalls++;SelectedType=type.ToString();return new AutomationElement(this);}
   void PresentControl(AutomationElement element){PresentCalls++;}
   void Wait(Func<bool> expected){
     // Wrong provider values must still fail. This fake does not replace the

@@ -49,7 +49,7 @@ export async function beginUiaNativeStage(app, dataset, fixturePath) {
   await invoke(app, 'Perf Update Fixture'); await invoke(app, '更新运行版本');
   await setField(app, '候选版本 ZIP', fixture.nextArchive.path);
   await waitNativeTask(app, (await actionTask(app, '读取文件清单', 'resource_package_inspect')).id);
-  await app.call('setField', { name: '固定版本', value: 'v2' });
+  await app.call('setField', { name: '固定版本', value: 'v2', scope: '更新 Perf Update Fixture' });
   // A never-used destination is required; production validates its independence.
   const destination = join(fixture.candidateParent, 'native-uia-v2');
   await setField(app, '候选保存目录（必须为未使用的新目录）', destination);
