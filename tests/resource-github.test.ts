@@ -124,6 +124,21 @@ test('download confirmation binds chosen source, destination and speed; editing 
   assert.equal(host.querySelector('[aria-label="下载影响清单"]'), null); assert.equal(button('确认下载此文件'), undefined);
 });
 
+test('download speed exposes the existing 1 GiB/s bound and preserves a fractional 16 KiB/s preview', async () => {
+  const { calls, action } = setup(); await begin(action); await chooseZip();
+  const input = field('下载限速（MiB/s，0 为不限速）');
+  await change(input, '1024.000001');
+  assert.equal(input.validity.rangeOverflow, true, 'The native numeric control must reject rates above 1 GiB/s.');
+  await change(input, '1024');
+  assert.equal(input.checkValidity(), true, 'The existing maximum rate remains available.');
+  await change(input, '0.015625');
+  assert.equal(input.checkValidity(), true, 'Fractional MiB/s must remain valid without an integer step restriction.');
+  await click(button('预览下载'));
+  assert.deepEqual(calls.at(-1)?.args, { repository, releaseId: 11, assetId: 21, downloadDirectory: 'D:/synthetic/download', bytesPerSecond: 16384 });
+  assert(host.querySelector('[aria-label="下载影响清单"]'));
+  assert(!calls.some(item => item.command === 'apply_resource_download'));
+});
+
 test('download settings submit previews without requerying and IME Enter does not submit', async () => {
   const { calls, action } = setup(); await begin(action); await chooseZip();
   const input = field('下载保存目录');

@@ -4,7 +4,7 @@ Windows-first desktop manager for local and GitHub Agent Skills and independent 
 
 **开发预览：v0.3.0-dev.1，尚未公开发行。** 在现有 Skill 管理基础上增加工具登记、受管动作、安装包文件预览、分级卸载、配置导入导出、维护窗口、场景和统一快捷入口。资源保持原位，GUI 与本地 MCP 共用后台；现有功能与数据继续保留。[开发预览说明](docs/RELEASE_v0.3.0-dev.1.md)
 
-现有6c程序与用户数据保留；其100次本地文档原生交互P95为148.2598ms，原200ms目标通过，最大1061.8325ms的慢样本仍保留。真实中文输入已通过；原30分钟压力检查没有崩溃，但内存收敛未达原定标准。后续331b候选已实际读取GitHub说明和文件清单，不能将本地P95当作远端速度。[既有验证范围](CHANGELOG.md#document-preview-native-20261112)
+既有6c验收中，100次本地文档原生交互P95为148.2598ms，原200ms目标通过，最大1061.8325ms的慢样本仍保留。真实中文输入已通过；原30分钟压力检查没有崩溃，但内存收敛未达原定标准。后续候选已实际读取GitHub说明和文件清单，不能将本地P95当作远端速度；最新候选的完整性能仍须单独验收。[既有验证范围](CHANGELOG.md#document-preview-native-20261112)
 
 新候选进一步减少说明读取的前置工作：按固定提交仅读取沿途目录和目标文档，不再先列出全仓库；下载、更新和差异核对仍使用完整清单。相关协议、链接安全和回退检查通过，修复后的真实加载延迟及完整内存收敛仍待验证。[本轮修改](CHANGELOG.md#documentation-path-read-20261113)
 
@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 下载限速数值范围（开发候选） | 2026-11-15 | 1、下载数字框声明现有1024 MiB/s上界，与后台规则一致，修复原生无障碍接口将无上限控件报告为0–0的问题。[详情](CHANGELOG.md#download-rate-native-range-20261115)<br>2、保留小数速率和0表示不限速；17项直接相关行为检查及类型、生产构建通过，真实原生负载继续验收。[详情](CHANGELOG.md#download-rate-native-range-20261115) |
 | Skill改名接续与管理记录移除（开发候选） | 2026-11-13 | 1、从详情“更多”或列表单选移除管理记录，保留源文件、GitHub内容和客户端实体入口。[详情](CHANGELOG.md#skill-record-relocation-20261113)<br>2、已记录的同一目录改名后自动接续；历史重复记录可先预览再重新定位，保留原ID、分类、收藏和关联。[详情](CHANGELOG.md#skill-record-relocation-20261113)<br>3、按文件刷新内部名，保留自定义显示名和已知来源版本；导出读取不改变声明记录。同名不猜合并，冲突与既有引用保留核对。[详情](CHANGELOG.md#skill-record-relocation-20261113) |
 | GitHub说明按路径读取（内部验证） | 2026-11-13 | 1、说明与图片仅按固定提交读取沿途目录及目标文件，完整包清单另行保留。[详情](CHANGELOG.md#documentation-path-read-20261113)<br>2、保留优先级、回退、安装来源和文件校验，修复可选catalog及说明候选经过链接／子模块祖先时的误阻断。[详情](CHANGELOG.md#documentation-path-read-20261113)<br>3、累计新增10项检查，最终文档12项、凭据边界1项及相关静态检查通过；真实新版延迟和内存收敛待验。[详情](CHANGELOG.md#documentation-path-read-20261113) |
 | 候选自检与进程测试夹具 | 2026-11-12 | 1、超时检查使用小型真实原生程序，保留原5秒整体上限、完整摘要和150毫秒超时清理。[详情](CHANGELOG.md#probe-timeout-fixture-20261112)<br>2、停止／退出前再启动无关测试进程，保留其存活断言并按自有句柄清理。[详情](CHANGELOG.md#probe-timeout-fixture-20261112)<br>3、17项候选自检及两项相关精确检查、格式和全目标Clippy通过；生产逻辑未变，完整云端结果另核对。[详情](CHANGELOG.md#probe-timeout-fixture-20261112) |

@@ -115,7 +115,7 @@ export function ResourceGithub({ action, disabled = false, packageFormat = 'zip'
           {asset && <p className="muted">文件大小：{bytes(asset.size)}。{supported ? (packageFormat === 'reachWheel' ? '已选择官方通用 Python wheel；下载后核对包内记录，不直接执行。' : '当前安装流程支持 ZIP；请按项目说明核对 Windows 版本、架构和依赖。') : '当前安装流程尚不支持此文件，请选择对应来源、版本和格式的发行包。'}</p>}
           {supported && <>
             <label>下载保存目录<div className="resource-folder-input"><input value={directory} placeholder="选择本次下载使用的现有目录" onChange={event => { invalidate(); setDirectory(event.target.value); }} /><button className="button" type="button" onClick={() => void chooseDirectory()}><FolderOpen size={16} />选择目录</button></div></label>
-            <label className="resource-download-limit">下载限速（MiB/s，0 为不限速）<input type="number" min="0" step="any" value={limit} onChange={event => { invalidate(); setLimit(event.target.value); }} /></label>
+            <label className="resource-download-limit">下载限速（MiB/s，0 为不限速）<input type="number" min="0" max="1024" step="any" value={limit} onChange={event => { invalidate(); setLimit(event.target.value); }} /></label>
             {!validRate && <p role="alert">请输入大于或等于 0 的有效限速。</p>}
             <div className="resource-detail-actions"><button className="button" type="submit" disabled={!directory.trim() || !validRate}>预览下载</button></div>
           </>}
