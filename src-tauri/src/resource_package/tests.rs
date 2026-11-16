@@ -33,6 +33,9 @@ fn official_metadata_conditionally_revalidates_and_does_not_treat_404_as_cached_
                     Err(error)=>panic!("local metadata server failed: {error}"),
                 }
             };
+            stream
+                .set_nonblocking(false)
+                .expect("accepted metadata stream must use blocking I/O");
             stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let mut header=vec![];
             while !header.ends_with(b"\r\n\r\n") {

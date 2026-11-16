@@ -1,5 +1,9 @@
 # Sources and dependencies
 
+### 工具目录修复与测试连接模式 — 2026-11-17
+
+目录修复复用本项目既有适配器、预览、目录身份检查、SQLite事务及React组件，无新增依赖或复制第三方代码。测试连接模式依据微软[accept语义](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-accept)及[SO_RCVTIMEO适用范围](https://learn.microsoft.com/en-us/windows/win32/winsock/sol-socket-socket-options)核对：接收连接继承监听套接字属性，读取超时作用于阻塞读取。修复仅显式设置合成服务连接模式，保留原时限及全部业务断言；线上文档阅读不等同本轮测试已通过。
+
 ### Windows候选依赖许可核对 — 2026-11-01
 
 以当前锁文件和离线Windows normal/build Cargo树（custom-protocol）核对291项Rust依赖，以本机pnpm树核对208项已安装依赖（包括开发测试依赖）。保留历史说明，新增35个前端版本原始许可；34项来自现有包根目录，saxes 6.0.0来自[官方LICENSE](https://github.com/lddubeau/saxes/blob/v6.0.0/LICENSE)，完整文件Git blob为`187f3ba399862022f4e670b2a3a1dbc6d7e6a800`，本地重算一致，包含其上游ISC和MIT声明。

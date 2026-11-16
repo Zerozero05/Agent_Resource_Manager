@@ -1768,6 +1768,10 @@ impl ManagerRuntime for WorkerHook {
             .manager
             .lock()
             .map_err(|_| "Manager state lock failed")?;
+        if let crate::resources::StoreRequest::Relocate { original, .. } = &request {
+            manager.ensure_request_allowed(&self.request)?;
+            crate::resource_relocation::ensure_stopped(&manager, &original.id)?;
+        }
         manager.resource_store(request)
     }
     fn management_store(
@@ -2133,6 +2137,18 @@ impl WorkerHook {
         crate::local::trim_relocation_previews(
             &mut manager.previews,
             relocation_preview.as_deref(),
+        );
+        let resource_relocation = (self.action == "preview_resource_relocate")
+            .then(|| {
+                worker.previews.iter().find_map(|(id, p)| {
+                    (p["kind"] == "resourceRelocation" && !base.previews.contains_key(id))
+                        .then(|| id.clone())
+                })
+            })
+            .flatten();
+        crate::resource_relocation::trim_previews(
+            &mut manager.previews,
+            resource_relocation.as_deref(),
         );
         Ok(())
     }
@@ -2626,6 +2642,28 @@ fn resources_for(manager: &Manager, request: &Value) -> Result<Vec<Resource>, St
             ),
             write,
         );
+    }
+    if matches!(
+        action,
+        "preview_resource_relocate" | "apply_resource_relocate"
+    ) {
+        add("resource-catalog".into(), write);
+        if let Some(id) = request["id"]
+            .as_str()
+            .or_else(|| preview.and_then(|p| p["resourceId"].as_str()))
+        {
+            add(format!("resource-execution:{id}"), write);
+            let record = manager.resource_store(crate::resources::StoreRequest::Get(id.into()))?;
+            if let Some(path) = record["rootPath"].as_str() {
+                add(format!("directory:{}", path_key(path)), write);
+            }
+        }
+        if let Some(path) = request["rootPath"]
+            .as_str()
+            .or_else(|| preview.and_then(|p| p["targetPath"].as_str()))
+        {
+            add(format!("directory:{}", path_key(path)), write);
+        }
     }
     if matches!(
         action,
@@ -4758,6 +4796,63 @@ mod tests {
         assert!(!read_request(&json!({"action":"apply_resource_install"})));
         assert!(!read_request(&json!({"action":"apply_resource_remove"})));
         assert!(!read_request(&json!({"action":"apply_resource_repair"})));
+    }
+
+    #[test]
+    fn resource_relocation_locks_both_directories_and_excludes_catalog_edits_and_invocations() {
+        let (dir, service) = fixture();
+        let mut manager = service.manager.lock().unwrap();
+        let root = dir.path().join("registered-tool");
+        std::fs::create_dir_all(&root).unwrap();
+        let record = crate::resources::handle(
+            &manager,
+            &json!({"action":"resource_register","name":"Tool","kind":"cli","rootPath":root}),
+        )
+        .unwrap()
+        .unwrap()["resource"]
+            .clone();
+        let id = record["id"].as_str().unwrap();
+        let next = dir.path().join("new-tool");
+        manager.previews.insert(
+            "relocate".into(),
+            json!({"kind":"resourceRelocation","resourceId":id,"targetPath":next}),
+        );
+        let preview = resources_for(
+            &manager,
+            &json!({"action":"preview_resource_relocate","id":id,"rootPath":next}),
+        )
+        .unwrap();
+        let apply = resources_for(
+            &manager,
+            &json!({"action":"apply_resource_relocate","previewId":"relocate"}),
+        )
+        .unwrap();
+        let invoke = resources_for(
+            &manager,
+            &json!({"action":"resource_invoke","id":id,"actionId":"read"}),
+        )
+        .unwrap();
+        let other = resources_for(
+            &manager,
+            &json!({"action":"resource_invoke","id":"other","actionId":"read"}),
+        )
+        .unwrap();
+        let edit = resources_for(&manager, &json!({"action":"resource_update","id":id})).unwrap();
+        let stop =
+            resources_for(&manager, &json!({"action":"resource_stop","runId":"owned"})).unwrap();
+        assert!(conflicts(&apply, &preview));
+        assert!(conflicts(&apply, &invoke));
+        assert!(conflicts(&apply, &edit));
+        assert!(!conflicts(&apply, &other));
+        assert!(!conflicts(&apply, &stop));
+        for path in [root.as_path(), next.as_path()] {
+            assert!(apply
+                .iter()
+                .any(|r| r.write
+                    && r.key == format!("directory:{}", path_key(path.to_str().unwrap()))));
+        }
+        assert!(read_request(&json!({"action":"preview_resource_relocate"})));
+        assert!(!read_request(&json!({"action":"apply_resource_relocate"})));
     }
 
     #[test]

@@ -23,6 +23,7 @@ export function ResourceActions({ resource, action, onChanged, readOnly = false,
   const [registering, setRegistering] = useState(false);
   const [label, setLabel] = useState(''), [executable, setExecutable] = useState('');
   const [workingDirectory, setWorkingDirectory] = useState(resource.rootPath);
+  const defaultWorkingDirectory = useRef(resource.rootPath);
   const [argumentsText, setArgumentsText] = useState('');
   const [mode, setMode] = useState<'task' | 'service'>('task');
   const [cancellable, setCancellable] = useState(false);
@@ -31,6 +32,11 @@ export function ResourceActions({ resource, action, onChanged, readOnly = false,
   const stopLocks = useRef(new Set<string>());
   const actionRef = useRef(action); actionRef.current = action;
   const callForm = useRef<HTMLFormElement>(null), focusedAction = useRef('');
+  useEffect(() => {
+    const previous = defaultWorkingDirectory.current;
+    defaultWorkingDirectory.current = resource.rootPath;
+    setWorkingDirectory(current => current === previous ? resource.rootPath : current);
+  }, [resource.rootPath]);
   const templateContext = JSON.stringify([resource.id, resource.revision, selected, selectedRevision, focusRequest, readOnly]);
   const templateContextRef = useRef(templateContext); templateContextRef.current = templateContext;
   useEffect(() => {

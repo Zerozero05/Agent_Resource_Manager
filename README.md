@@ -4,7 +4,7 @@ Windows-first desktop manager for local and GitHub Agent Skills and independent 
 
 **开发预览：v0.3.0-dev.1，尚未公开发行。** 在现有 Skill 管理基础上增加工具登记、受管动作、安装包文件预览、分级卸载、配置导入导出、维护窗口、场景和统一快捷入口。资源保持原位，GUI 与本地 MCP 共用后台；现有功能与数据继续保留。[开发预览说明](docs/RELEASE_v0.3.0-dev.1.md)
 
-既有6c验收中，100次本地文档原生交互P95为148.2598ms，原200ms目标通过，最大1061.8325ms的慢样本仍保留。真实中文输入已通过；原30分钟压力检查没有崩溃，但内存收敛未达原定标准。后续候选已实际读取GitHub说明和文件清单，不能将本地P95当作远端速度；最新候选的完整性能仍须单独验收。[既有验证范围](CHANGELOG.md#document-preview-native-20261112)
+efbd候选的100次本地文档原生交互P95为141.3951ms、最大270.7571ms，原200ms P95目标通过；既有6c的1061.8325ms慢样本保留在历史记录。真实中文输入已通过。最新30分钟检查完成61次采样，没有程序异常，但内存收敛未达原定标准；不能将本地P95当作远端速度或完整性能通过。[当前验证范围](CHANGELOG.md#tool-directory-relocation-20261117)
 
 新候选进一步减少说明读取的前置工作：按固定提交仅读取沿途目录和目标文档，不再先列出全仓库；下载、更新和差异核对仍使用完整清单。相关协议、链接安全和回退检查通过，修复后的真实加载延迟及完整内存收敛仍待验证。[本轮修改](CHANGELOG.md#documentation-path-read-20261113)
 
@@ -194,6 +194,8 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 工具用途归类（路径维护） | 2026-11-17 | 1、同步本机网页、桌面自动化及启动动画的三处原生验收路径；保留并行开发成果、管理记录和动作授权，不改程序版本。[详情](CHANGELOG.md#purpose-classification-paths-20261117) |
+| 工具目录修复（开发候选） | 2026-11-17 | 1、三类既有工具预览并修复目录。[详情](CHANGELOG.md#tool-directory-relocation-20261117)<br>2、保留记录、策略及历史，重核新位置证据。[详情](CHANGELOG.md#tool-directory-relocation-20261117)<br>3、修正HTTP测试连接模式，原断言通过。[详情](CHANGELOG.md#tool-directory-relocation-20261117)<br>4、记录文档P95与后台样本边界。[详情](CHANGELOG.md#tool-directory-relocation-20261117)<br>5、保留内存收敛未通过的结论。[详情](CHANGELOG.md#tool-directory-relocation-20261117)<br>6、修复显示名与模板路径兼容问题。[详情](CHANGELOG.md#tool-directory-relocation-20261117)<br>7、完成直接回归与短时进程诊断。[详情](CHANGELOG.md#tool-directory-relocation-20261117)<br>8、明确预览Playwright参数路径与共享Node校验变化。[详情](CHANGELOG.md#tool-directory-relocation-20261117) |
 | 本机目录整理（说明及路径维护） | 2026-11-16 | 1、本机部署迁入Agent_Management，原目录入口按用户要求退役；同步本地配置及验收脚本中的精确路径，不改保护范围或程序版本。[本次完整记录](CHANGELOG.md#local-project-paths-20261116)<br>2、补齐本轮原生验收的输出、资源与通信程序路径；119项直接边界检查通过，历史构建和验收记录保持原身份，不重编程序。[详情](CHANGELOG.md#local-project-paths-20261116) |
 | 下载限速数值范围（开发候选） | 2026-11-15 | 1、下载数字框声明现有1024 MiB/s上界，与后台规则一致，修复原生无障碍接口将无上限控件报告为0–0的问题。[详情](CHANGELOG.md#download-rate-native-range-20261115)<br>2、保留小数速率和0表示不限速；17项直接相关行为检查及类型、生产构建通过，原生限速与固定文件下载已验证，完整负载继续验收。[详情](CHANGELOG.md#download-rate-native-range-20261115)<br>3、更新验收助手按候选表单精确定位同名输入，44项直接检查通过；不改变产品逻辑或性能标准。[详情](CHANGELOG.md#download-rate-native-range-20261115) |
 | Skill改名接续与管理记录移除（开发候选） | 2026-11-13 | 1、从详情“更多”或列表单选移除管理记录，保留源文件、GitHub内容和客户端实体入口。[详情](CHANGELOG.md#skill-record-relocation-20261113)<br>2、已记录的同一目录改名后自动接续；历史重复记录可先预览再重新定位，保留原ID、分类、收藏和关联。[详情](CHANGELOG.md#skill-record-relocation-20261113)<br>3、按文件刷新内部名，保留自定义显示名和已知来源版本；导出读取不改变声明记录。同名不猜合并，冲突与既有引用保留核对。[详情](CHANGELOG.md#skill-record-relocation-20261113) |

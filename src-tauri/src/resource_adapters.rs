@@ -94,18 +94,20 @@ pub(crate) struct ActionBinding {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Inspection {
-    adapter: String,
+pub(crate) struct Inspection {
+    pub(crate) adapter: String,
     name: String,
     kind: String,
-    root_path: String,
-    version: String,
+    pub(crate) root_path: String,
+    pub(crate) version: String,
     repository: Option<String>,
-    license: String,
+    pub(crate) license: String,
     binding: ActionBinding,
-    actions: Vec<Value>,
-    preserved: Vec<String>,
-    warnings: Vec<String>,
+    pub(crate) actions: Vec<Value>,
+    pub(crate) preserved: Vec<String>,
+    pub(crate) warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) runtime_change: Option<Value>,
 }
 
 fn display(path: &Path) -> String {
@@ -486,7 +488,211 @@ fn inspect(
         actions,
         preserved: preserved.into_iter().map(str::to_owned).collect(),
         warnings: warnings.into_iter().map(str::to_owned).collect(),
+        runtime_change: None,
     })
+}
+
+/// Lexical mapping is intentional: a moved original need no longer exist.
+/// Only paths strictly described by the original root may be rebound.
+fn relocation_path(path: &str, old_root: &str, new_root: &str) -> Result<String, String> {
+    use std::path::Component;
+    for raw in [path, old_root, new_root] {
+        if !Path::new(raw).is_absolute()
+            || Path::new(raw)
+                .components()
+                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        {
+            return Err("目录修复不接受相对路径或父目录跳转".into());
+        }
+    }
+    let path_key = key(Path::new(path));
+    let old_key = key(Path::new(old_root));
+    if path_key == old_key {
+        return Ok(new_root.into());
+    }
+    let prefix = format!(
+        "{}{sep}",
+        old_key.trim_end_matches(['/', '\\']),
+        sep = std::path::MAIN_SEPARATOR
+    );
+    let relative = path_key
+        .strip_prefix(&prefix)
+        .ok_or("原动作包含目录之外的绝对路径，不能自动重新定位")?;
+    // Preserve case of the registered relative name; the prefix has equal length.
+    if relative.is_empty() {
+        return Err("原动作路径无效".into());
+    }
+    Ok(display(
+        &Path::new(new_root).join(&display(Path::new(path))[prefix.len()..]),
+    ))
+}
+
+/// Re-inspect only supported layouts. No old executable is launched or
+/// resolved, and the existing command set cannot be replaced with generic actions.
+pub(crate) fn inspect_relocation(
+    record: &ResourceRecord,
+    root: &Path,
+) -> Result<Inspection, String> {
+    let dragon = record.kind == "portable"
+        && record.actions.is_empty()
+        && record.capabilities.iter().any(|c| {
+            c["id"] == "versionMetadata"
+                && c["method"] == "staticMetadata"
+                && c["entry"]
+                    .as_str()
+                    .is_some_and(|p| key(Path::new(p)) == key(Path::new(&record.root_path)))
+                && c["version"].as_str() == record.version.as_deref()
+        });
+    let first_binding = record
+        .actions
+        .first()
+        .and_then(|a| a.get("adapterBinding"))
+        .map(|b| serde_json::from_value::<ActionBinding>(b.clone()))
+        .transpose()
+        .map_err(|_| "原动作适配器绑定无法核实")?;
+    let adapter = if record.kind == "cli"
+        && first_binding.as_ref().is_some_and(|b| b.adapter == REACH)
+    {
+        REACH
+    } else if record.kind == "mcp" && first_binding.as_ref().is_some_and(|b| b.adapter == EDGE) {
+        EDGE
+    } else if dragon {
+        DRAGON
+    } else {
+        return Err("此资源没有受支持的目录修复适配器；原登记保持".into());
+    };
+    let node = if adapter == EDGE {
+        Some(
+            first_binding
+                .as_ref()
+                .and_then(|b| b.node_path.as_deref())
+                .ok_or("原 MCP 适配器缺少共享 Node 绑定")?,
+        )
+    } else {
+        None
+    };
+    let mut inspection = inspect(adapter, root, node.map(Path::new))?;
+    if record
+        .version
+        .as_ref()
+        .is_some_and(|v| v != &inspection.version)
+    {
+        return Err("新目录版本与原登记不同；目录修复不能代替版本更新".into());
+    }
+    if adapter == DRAGON {
+        return Ok(inspection);
+    }
+    if record.actions.len() != inspection.actions.len() {
+        return Err("原动作集合与固定适配器不一致".into());
+    }
+    let mut actions = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
+    let mut prior_binding: Option<ActionBinding> = None;
+    for value in &record.actions {
+        let original: ActionDefinition = serde_json::from_value(value.clone())
+            .map_err(|_| "原动作格式无法核实；未改写执行权限")?;
+        let binding = original
+            .adapter_binding
+            .as_ref()
+            .ok_or("原动作缺少专用适配器绑定，不能降级为普通入口")?;
+        if binding.adapter != adapter
+            || binding.node_path != inspection.binding.node_path
+            || key(Path::new(&binding.root_path)) != key(Path::new(&record.root_path))
+            || binding.root_identity.is_empty()
+            || prior_binding.as_ref().is_some_and(|prior| prior != binding)
+            || binding.files.len() != inspection.binding.files.len()
+            || !ids.insert(original.id.clone())
+        {
+            return Err("原适配器、根目录或动作身份不一致，不能重新定位".into());
+        }
+        prior_binding = Some(binding.clone());
+        for (old, new) in binding.files.iter().zip(&inspection.binding.files) {
+            if node.is_some_and(|node| key(Path::new(&old.path)) == key(Path::new(node))) {
+                if old != new {
+                    inspection.runtime_change = Some(
+                        json!({"path":node,"previousSha256":old.fingerprint.sha256,"currentSha256":new.fingerprint.sha256}),
+                    );
+                }
+                continue;
+            }
+            if key(Path::new(&relocation_path(
+                &old.path,
+                &record.root_path,
+                &inspection.root_path,
+            )?)) != key(Path::new(&new.path))
+            {
+                return Err("原适配器关键文件范围已改变，不能重新定位".into());
+            }
+        }
+        let proof = binding
+            .files
+            .iter()
+            .find(|file| key(Path::new(&file.path)) == key(Path::new(&original.executable)))
+            .ok_or("原动作缺少已登记的入口指纹")?;
+        if original.executable_sha256.as_deref() != Some(proof.fingerprint.sha256.as_str()) {
+            return Err("原动作入口指纹与适配器绑定不一致".into());
+        }
+        let expected: ActionDefinition = serde_json::from_value(
+            inspection
+                .actions
+                .iter()
+                .find(|a| a["id"] == original.id)
+                .ok_or("原动作不属于固定适配器")?
+                .clone(),
+        )
+        .map_err(|e| e.to_string())?;
+        let mut next = original.clone();
+        if node.is_none() {
+            next.executable = relocation_path(
+                &original.executable,
+                &record.root_path,
+                &inspection.root_path,
+            )?;
+        } else if !node
+            .is_some_and(|node| key(Path::new(node)) == key(Path::new(&original.executable)))
+        {
+            return Err("原 MCP 动作入口与共享 Node 绑定不一致".into());
+        }
+        next.working_directory = relocation_path(
+            &original.working_directory,
+            &record.root_path,
+            &inspection.root_path,
+        )?;
+        next.executable_sha256 = expected.executable_sha256.clone();
+        next.adapter_binding = Some(inspection.binding.clone());
+        if adapter == EDGE {
+            for arg in &mut next.args {
+                if let crate::resource_runtime::Argument::Literal { value } = arg {
+                    if Path::new(value).is_absolute() {
+                        *value = relocation_path(value, &record.root_path, &inspection.root_path)?;
+                    }
+                }
+            }
+        }
+        if !same_fixed_execution(&next, &expected)? {
+            return Err("原动作命令或参数与固定适配器不一致，不能通过目录修复变更权限".into());
+        }
+        // Keep the original JSON fields, defaults and policies exactly as stored.
+        let mut mapped = value.clone();
+        for field in [
+            "executable",
+            "workingDirectory",
+            "executableSha256",
+            "adapterBinding",
+        ] {
+            mapped[field] = json!(next)[field].clone();
+        }
+        if adapter == EDGE {
+            for (index, (old_arg, next_arg)) in original.args.iter().zip(&next.args).enumerate() {
+                if json!(old_arg) != json!(next_arg) {
+                    mapped["args"][index] = json!(next_arg);
+                }
+            }
+        }
+        actions.push(mapped);
+    }
+    inspection.actions = actions;
+    Ok(inspection)
 }
 
 fn action_without_policy(value: &ActionDefinition) -> Result<Value, String> {

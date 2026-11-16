@@ -42,11 +42,18 @@ pub(crate) enum StoreRequest {
         record: Box<ResourceRecord>,
         expected_revision: u64,
     },
+    Relocate {
+        original: Box<ResourceRecord>,
+        record: Box<ResourceRecord>,
+    },
 }
 
 impl StoreRequest {
     pub(crate) fn writes(&self) -> bool {
-        matches!(self, Self::Insert(_) | Self::Replace { .. })
+        matches!(
+            self,
+            Self::Insert(_) | Self::Replace { .. } | Self::Relocate { .. }
+        )
     }
 }
 
@@ -129,6 +136,23 @@ pub(crate) fn store(
         StoreRequest::Get(id) => Ok(json!(read_one(db, &id)?)),
         mutation => {
             let transaction = db.unchecked_transaction().map_err(|e| e.to_string())?;
+            let mutation = match mutation {
+                StoreRequest::Relocate { original, record } => {
+                    let before = read_one(&transaction, &original.id)?;
+                    if serde_json::to_value(&before).map_err(|e| e.to_string())?
+                        != serde_json::to_value(&original).map_err(|e| e.to_string())?
+                        || record.id != original.id
+                        || original.revision.checked_add(1) != Some(record.revision)
+                    {
+                        return Err("预览后原资源已变化，目录修复未保存".into());
+                    }
+                    StoreRequest::Replace {
+                        record,
+                        expected_revision: original.revision,
+                    }
+                }
+                other => other,
+            };
             let record = match mutation {
                 StoreRequest::Insert(record) => {
                     let duplicate: bool = transaction

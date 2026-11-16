@@ -101,6 +101,16 @@ pub(crate) fn binding(
     if !root.is_dir() {
         return Err("资源实际目录不可用".into());
     }
+    // Verification normalizes these paths (including Windows' verbatim prefix).
+    // Save, live CAS, list and prepare must hash that same definition spelling.
+    let mut definition = definition.clone();
+    definition.executable = crate::local::canonical(Path::new(&definition.executable))?
+        .to_string_lossy()
+        .into_owned();
+    definition.working_directory =
+        crate::local::canonical(Path::new(&definition.working_directory))?
+            .to_string_lossy()
+            .into_owned();
     let evidence = json!({"resourceId":record.id,"root":root.to_string_lossy(),"version":record.version,"definition":definition});
     Ok(format!(
         "{:x}",

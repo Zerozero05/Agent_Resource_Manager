@@ -33,6 +33,7 @@ Object.assign(globalThis, { window: dom.window, document: dom.window.document, H
 const { createRoot } = await import('react-dom/client');
 const { ResourcePanel } = await import(await moduleURL(new URL('../src/ResourcePanel.tsx', import.meta.url)));
 const { ResourceActions } = await import(await moduleURL(new URL('../src/ResourceActions.tsx', import.meta.url)));
+const { ResourceRelocation } = await import(await moduleURL(new URL('../src/ResourceRelocation.tsx', import.meta.url)));
 const { InstallResource, RemoveResource } = await import(await moduleURL(new URL('../src/ResourceLifecycle.tsx', import.meta.url)));
 const host = document.getElementById('root')!;
 let cleanup = () => {};
@@ -325,6 +326,313 @@ test('explicit row detail opening focuses once, refresh does not jump, and closi
 
 const definition = { id: 'read', label: '读取字幕', mode: 'task', executable: 'D:/synthetic/reader.exe', workingDirectory: 'D:/synthetic', args: [{ type: 'parameter', name: 'url' }], parameters: [{ name: 'url', label: '视频地址', kind: 'text', required: true, maxLength: 1000 }] };
 const run = { runId: 'owned-run', resourceId: 'one', actionId: 'read', pid: 1234, mode: 'task', cancellable: true, status: 'running', startedAt: '2026-10-28T00:00:00Z' };
+
+function relocationResource() {
+  const resource = item('one');
+  return { ...resource, name: '我的工具', repository: 'https://github.com/synthetic/reader', version: 'original-v1', managementScope: 'ownedFiles',
+    actions: [{ ...definition, executable: `${resource.rootPath}/Scripts/agent-reach.exe`, workingDirectory: resource.rootPath }] };
+}
+function relocationPlan(resource = relocationResource(), newRootPath = 'D:/synthetic/relocated') {
+  return { previewId: 'relocation-preview', kind: 'resourceRelocation', resourceId: resource.id, resourceRevision: resource.revision,
+    oldRootPath: resource.rootPath, newRootPath, adapter: 'agentReach', version: 'detected-v2', license: 'MIT',
+    actions: resource.actions.map(entry => ({ id: entry.id, label: entry.label, oldExecutable: entry.executable, newExecutable: entry.executable.replace(resource.rootPath, newRootPath), oldWorkingDirectory: entry.workingDirectory, newWorkingDirectory: newRootPath })),
+    preserved: ['原资源与动作身份、管理范围、策略及授权历史'], warnings: ['仅保存目录与路径，不移动文件或执行工具。'], canApply: true, filesChanged: false, executed: false, actionsAdded: 0 };
+}
+function relocationReceipt(resource = relocationResource(), plan = relocationPlan(resource)) {
+  return { resource: { ...resource, rootPath: plan.newRootPath, revision: resource.revision + 1, actions: resource.actions.map(entry => {
+    const mapping = plan.actions.find(candidate => candidate.id === entry.id)!;
+    return { ...entry, executable: mapping.newExecutable, workingDirectory: mapping.newWorkingDirectory };
+  }) }, complete: true, filesChanged: false, executed: false, actionsAdded: 0 };
+}
+
+test('directory relocation chooses and previews the existing resource before saving while preserving list identity and order', async () => {
+  const resource = relocationResource(), newRoot = 'D:/synthetic/目录迁移后/很长的工具路径/reader';
+  const plan = relocationPlan(resource, newRoot), calls: { command: string; args: any }[] = [];
+  let finish!: (value: unknown) => void;
+  const action = async (_label: string, command: string, args: any) => {
+    calls.push({ command, args });
+    if (command === 'resource_list') return { resources: [item('two'), resource] };
+    if (command === 'resource_runtime') return { runs: [] };
+    if (command === 'preview_resource_relocate') return plan;
+    assert.equal(command, 'apply_resource_relocate');
+    return new Promise(resolve => { finish = resolve; });
+  };
+  let draft: ResourcePanelDraft | undefined;
+  await act(async () => root().render(createElement(ResourcePanel, { action, onDraft: (value: ResourcePanelDraft) => { draft = value; } })));
+  await click(button(resource.name));
+  const disclosure = button('重新定位目录…');
+  assert.equal(disclosure.getAttribute('aria-expanded'), 'false');
+  assert.equal(host.querySelector('[aria-label="工具现在所在目录"]'), null);
+  assert.deepEqual(calls.map(call => call.command), ['resource_list', 'resource_runtime']);
+  await click(disclosure);
+  assert(host.textContent!.includes('当前仅支持可核对的 Agent Reach、Playwright MCP 和 DragonCodexBoot'));
+  const internals = (dom.window as any).__TAURI_INTERNALS__;
+  try {
+    (dom.window as any).__TAURI_INTERNALS__ = { invoke: async (command: string, args: any) => {
+      assert.equal(command, 'plugin:dialog|open'); assert.deepEqual(args.options, { directory: true, multiple: false, title: '选择工具现在所在的目录' }); return newRoot;
+    } };
+    await click(button('选择目录'));
+  } finally { (dom.window as any).__TAURI_INTERNALS__ = internals; }
+  assert.equal(host.querySelector<HTMLInputElement>('[aria-label="工具现在所在目录"]')!.value, newRoot);
+  await click(button('预览目录变化'));
+  assert.deepEqual(calls.at(-1), { command: 'preview_resource_relocate', args: { id: resource.id, expectedRevision: resource.revision, rootPath: newRoot } });
+  const preview = host.querySelector('[aria-label="目录重新定位预览"]')!;
+  for (const path of [resource.rootPath, newRoot, resource.actions[0].executable, plan.actions[0].newExecutable]) {
+    assert([...preview.querySelectorAll('.resource-path')].some(value => value.textContent === path), `complete preview path: ${path}`);
+  }
+  assert(preview.textContent!.includes(plan.warnings[0]));
+  assert.equal(calls.filter(call => call.command === 'apply_resource_relocate').length, 0);
+  const confirm = button('确认重新定位');
+  await act(async () => { confirm.click(); confirm.click(); });
+  assert.deepEqual(calls.filter(call => call.command === 'apply_resource_relocate'), [{ command: 'apply_resource_relocate', args: { previewId: plan.previewId } }]);
+  assert(button('正在保存目录…').disabled); assert(disclosure.disabled);
+  const receipt = relocationReceipt(resource, plan);
+  await act(async () => finish(receipt));
+  assert.deepEqual([...host.querySelectorAll('.resource-name-button span')].map(value => value.textContent), ['two', resource.name]);
+  assert.equal(host.querySelector('.resource-row.selected .resource-name-button span')!.textContent, resource.name);
+  assert.equal(draft!.selectedId, resource.id); assert.deepEqual(draft!.resourceOrder, ['two', resource.id]);
+  assert.equal(host.querySelector('.resource-detail > dl .resource-path')!.textContent, newRoot);
+  assert.equal(host.querySelector('.resource-row.selected .resource-version')!.textContent, 'original-v1');
+  assert.equal(button('确认重新定位'), undefined); assert(host.querySelector('.resource-notice')!.textContent!.includes('原管理记录已保留'));
+  assert.deepEqual(calls.map(call => call.command), ['resource_list', 'resource_runtime', 'preview_resource_relocate', 'apply_resource_relocate']);
+});
+
+test('directory relocation supports a statically identified zero-action tool without guessing from its displayed name', async () => {
+  const resource = { ...relocationResource(), kind: 'portable', name: '个人启动器', actions: [] };
+  const plan = { ...relocationPlan(resource), adapter: 'dragonCodexBoot', version: null };
+  let saved: any;
+  const action = async (_label: string, command: string) => command === 'preview_resource_relocate' ? plan : relocationReceipt(resource, plan);
+  await act(async () => root().render(createElement(ResourceRelocation, { resource, action, onChanged: (value: any) => { saved = value; } })));
+  await click(button('重新定位目录…')); await change(host.querySelector('input')!, plan.newRootPath); await click(button('预览目录变化'));
+  assert(host.querySelector('[aria-label="目录重新定位预览"]')!.textContent!.includes('DragonCodexBoot'));
+  assert(host.textContent!.includes('没有已登记动作，保留原生启动入口'));
+  await click(button('确认重新定位'));
+  assert.equal(saved.id, resource.id); assert.deepEqual(saved.actions, []);
+});
+
+function edgeRelocationFixture() {
+  const base = { ...relocationResource(), rootPath: 'D:/synthetic/Browser_Tools/Playwright-MCP' }, nodePath = 'D:/synthetic/shared-runtime/node.exe';
+  const newRoot = 'D:/synthetic/Web_Tools/Playwright-MCP', oldCli = `${base.rootPath}/node_modules/@playwright/mcp/cli.js`, newCli = `${newRoot}/node_modules/@playwright/mcp/cli.js`;
+  const resource = { ...base, kind: 'mcp', name: '团队浏览器工具', actions: ['edge-version', 'edge-help', 'edge-tabs', 'edge-snapshot'].map(id => ({
+    ...base.actions[0], id, label: id, executable: nodePath, workingDirectory: base.rootPath,
+    args: [oldCli, ...(id === 'edge-version' ? ['--version'] : id === 'edge-help' ? ['--help'] : ['--extension', '--browser', 'msedge', '--profile-dir-name', 'Default', '--output-dir', `${base.rootPath}/runtime`])].map(value => ({ type: 'literal', value })), parameters: [],
+  })) };
+  const basicPlan = relocationPlan(resource, newRoot);
+  const plan = { ...basicPlan, adapter: 'edgeControl', license: 'Apache-2.0', actions: basicPlan.actions.map((mapping, index) => ({
+    ...mapping, argumentPaths: [{ index: 0, oldPath: oldCli, newPath: newCli }, ...(resource.actions[index].args.length === 8 ? [{ index: 7, oldPath: `${base.rootPath}/runtime`, newPath: `${newRoot}/runtime` }] : [])],
+  })) };
+  const receipt = relocationReceipt(resource, plan);
+  receipt.resource.actions = receipt.resource.actions.map(entry => ({ ...entry, args: entry.args.map(argument => ({ ...argument, value: argument.value === oldCli ? newCli : argument.value === `${base.rootPath}/runtime` ? `${newRoot}/runtime` : argument.value })) }));
+  return { resource, plan, receipt, nodePath, oldCli, newCli };
+}
+
+test('Playwright MCP relocation previews all changed CLI and output paths while retaining shared Node and original actions', async () => {
+  const { resource, plan, receipt, nodePath, oldCli, newCli } = edgeRelocationFixture();
+  const calls: { command: string; args: any }[] = []; let saved: any;
+  const action = async (_label: string, command: string, args: any) => {
+    calls.push({ command, args });
+    if (command === 'preview_resource_relocate') return plan;
+    assert.equal(command, 'apply_resource_relocate'); return receipt;
+  };
+  await act(async () => root().render(createElement(ResourceRelocation, { resource, action, onChanged: (value: any) => { saved = value; } })));
+  await click(button('重新定位目录…')); await change(host.querySelector('input')!, plan.newRootPath); await click(button('预览目录变化'));
+  const preview = host.querySelector('[aria-label="目录重新定位预览"]')!;
+  assert(preview.textContent!.includes('Playwright MCP')); assert.equal(saved, undefined);
+  assert.equal([...preview.querySelectorAll('.resource-path')].filter(path => path.textContent === nodePath).length, 8);
+  for (const mapping of plan.actions) { assert.equal(mapping.oldExecutable, nodePath); assert.equal(mapping.newExecutable, nodePath); }
+  for (const [path, count] of [[oldCli, 4], [newCli, 4], [`${resource.rootPath}/runtime`, 2], [`${plan.newRootPath}/runtime`, 2]] as const) {
+    assert.equal([...preview.querySelectorAll('.resource-path')].filter(value => value.textContent === path).length, count, `complete changed parameter path: ${path}`);
+  }
+  assert(preview.textContent!.includes('原参数路径（第8项）')); assert(!preview.textContent!.includes('--browser'));
+  await click(button('确认重新定位'));
+  assert.deepEqual(calls, [{ command: 'preview_resource_relocate', args: { id: resource.id, expectedRevision: resource.revision, rootPath: plan.newRootPath } }, { command: 'apply_resource_relocate', args: { previewId: plan.previewId } }]);
+  assert.equal(saved.id, resource.id); assert.deepEqual(saved.actions.map((entry: any) => entry.id), resource.actions.map(entry => entry.id));
+  assert(saved.actions.every((entry: any) => entry.executable === nodePath && entry.workingDirectory === plan.newRootPath));
+  assert.deepEqual(saved.actions.map((entry: any) => entry.args), receipt.resource.actions.map(entry => entry.args));
+});
+
+test('Playwright MCP relocation checks changed parameter paths against both original actions and the save receipt', async () => {
+  const { resource, plan, receipt } = edgeRelocationFixture(); let previews = 0;
+  const wrongOriginal = structuredClone(plan); wrongOriginal.actions[0].argumentPaths[0].oldPath = 'D:/synthetic/unrelated/cli.js';
+  const unchangedReceipt = structuredClone(receipt); unchangedReceipt.resource.actions[0].args = resource.actions[0].args;
+  const action = async (_label: string, command: string) => command === 'preview_resource_relocate' ? (++previews === 1 ? wrongOriginal : plan) : unchangedReceipt;
+  await act(async () => root().render(createElement(ResourceRelocation, { resource, action, onChanged: () => assert.fail('mismatched argument paths must not replace the resource') })));
+  await click(button('重新定位目录…')); await change(host.querySelector('input')!, plan.newRootPath); await click(button('预览目录变化'));
+  assert(host.querySelector('[role="alert"]')!.textContent!.includes('目录预览与当前工具不一致')); assert.equal(button('确认重新定位'), undefined);
+  await click(button('预览目录变化')); await click(button('确认重新定位'));
+  assert(host.querySelector('[role="alert"]')!.textContent!.includes('保存回执不完整')); assert.equal(button('确认重新定位'), undefined);
+});
+
+function edgeRuntimeChangeFixture() {
+  const fixture = edgeRelocationFixture();
+  const runtimeChange = { path: fixture.nodePath, previousSha256: 'a'.repeat(64), currentSha256: 'b'.repeat(64) };
+  const resource = { ...fixture.resource, actions: fixture.resource.actions.map(entry => ({ ...entry, executableSha256: runtimeChange.previousSha256 })) };
+  const plan = { ...fixture.plan, runtimeChange };
+  const receipt = { ...fixture.receipt, resource: { ...fixture.receipt.resource, actions: fixture.receipt.resource.actions.map(entry => ({ ...entry, executableSha256: runtimeChange.currentSha256 })) } };
+  return { resource, plan, receipt };
+}
+
+test('Playwright MCP relocation shows a changed shared runtime file before confirming the same Node path and new hashes', async () => {
+  const { resource, plan, receipt } = edgeRuntimeChangeFixture(); let saved: any;
+  const calls: string[] = [];
+  const action = async (_label: string, command: string) => { calls.push(command); return command === 'preview_resource_relocate' ? plan : receipt; };
+  await act(async () => root().render(createElement(ResourceRelocation, { resource, action, onChanged: (value: any) => { saved = value; } })));
+  await click(button('重新定位目录…')); await change(host.querySelector('input')!, plan.newRootPath); await click(button('预览目录变化'));
+  const runtime = [...host.querySelectorAll('details')].find(detail => detail.querySelector('summary')?.textContent === '共享运行环境校验信息已变化')!;
+  assert(runtime.open); assert(runtime.textContent!.includes(plan.runtimeChange.path));
+  assert(runtime.textContent!.includes(plan.runtimeChange.previousSha256)); assert(runtime.textContent!.includes(plan.runtimeChange.currentSha256));
+  assert.equal(saved, undefined); assert.deepEqual(calls, ['preview_resource_relocate']);
+  await click(button('确认重新定位'));
+  assert.equal(saved.id, resource.id); assert.equal(saved.actions.length, 4);
+  assert(saved.actions.every((entry: any) => entry.executable === plan.runtimeChange.path && entry.executableSha256 === plan.runtimeChange.currentSha256));
+});
+
+test('Playwright MCP relocation rejects mismatched original Node proofs and a receipt with an unrefreshed hash', async () => {
+  const { resource, plan, receipt } = edgeRuntimeChangeFixture(); let previews = 0;
+  const wrongHash = { ...plan, runtimeChange: { ...plan.runtimeChange, previousSha256: 'c'.repeat(64) } };
+  const wrongPath = { ...plan, runtimeChange: { ...plan.runtimeChange, path: 'D:/synthetic/another/node.exe' } };
+  const unchangedReceipt = structuredClone(receipt); unchangedReceipt.resource.actions[0].executableSha256 = plan.runtimeChange.previousSha256;
+  const action = async (_label: string, command: string) => command === 'preview_resource_relocate' ? [wrongHash, wrongPath, plan][previews++] : unchangedReceipt;
+  await act(async () => root().render(createElement(ResourceRelocation, { resource, action, onChanged: () => assert.fail('mismatched Node proof must not replace the resource') })));
+  await click(button('重新定位目录…')); await change(host.querySelector('input')!, plan.newRootPath);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await click(button('预览目录变化'));
+    assert(host.querySelector('[role="alert"]')!.textContent!.includes('目录预览与当前工具不一致')); assert.equal(button('确认重新定位'), undefined);
+  }
+  await click(button('预览目录变化')); await click(button('确认重新定位'));
+  assert(host.querySelector('[role="alert"]')!.textContent!.includes('保存回执不完整')); assert.equal(button('确认重新定位'), undefined);
+});
+
+test('Playwright MCP relocation accepts unchanged runtime hashes when file identity or metadata changed', async () => {
+  const fixture = edgeRuntimeChangeFixture(), sameHash = fixture.plan.runtimeChange.previousSha256;
+  const plan = { ...fixture.plan, runtimeChange: { ...fixture.plan.runtimeChange, currentSha256: sameHash } };
+  const receipt = { ...fixture.receipt, resource: { ...fixture.receipt.resource, actions: fixture.receipt.resource.actions.map(entry => ({ ...entry, executableSha256: sameHash })) } };
+  let saved: any;
+  const action = async (_label: string, command: string) => command === 'preview_resource_relocate' ? plan : receipt;
+  await act(async () => root().render(createElement(ResourceRelocation, { resource: fixture.resource, action, onChanged: (value: any) => { saved = value; } })));
+  await click(button('重新定位目录…')); await change(host.querySelector('input')!, plan.newRootPath); await click(button('预览目录变化'));
+  const preview = host.querySelector('[aria-label="目录重新定位预览"]')!;
+  assert(preview.textContent!.includes('共享运行环境校验信息已变化'));
+  assert(preview.textContent!.includes('内容摘要相同，文件身份或修改信息已变化'));
+  assert.equal(saved, undefined); assert(button('确认重新定位'));
+  await click(button('确认重新定位'));
+  assert.equal(saved.id, fixture.resource.id); assert(saved.actions.every((entry: any) => entry.executableSha256 === sameHash));
+});
+
+test('directory input changes and collapsing discard confirmed or late previews without saving', async () => {
+  const resource = relocationResource(), calls: string[] = [];
+  let finish!: (value: unknown) => void;
+  const action = async (_label: string, command: string) => { calls.push(command); return new Promise(resolve => { finish = resolve; }); };
+  await act(async () => root().render(createElement(ResourceRelocation, { resource, action, onChanged: () => assert.fail('no relocation was confirmed') })));
+  const disclosure = button('重新定位目录…'); await click(disclosure);
+  const input = host.querySelector('input')!;
+  await change(input, 'D:/synthetic/first'); await click(button('预览目录变化'));
+  assert.equal(button('正在核对目录…').disabled, true); assert.equal(input.disabled, false);
+  await change(input, 'D:/synthetic/second'); await act(async () => finish(relocationPlan(resource, 'D:/synthetic/first')));
+  assert.equal(button('确认重新定位'), undefined);
+  await click(button('预览目录变化')); await act(async () => finish(relocationPlan(resource, 'D:/synthetic/second')));
+  assert(button('确认重新定位'));
+  await change(input, 'D:/synthetic/third'); assert.equal(button('确认重新定位'), undefined);
+  await click(button('预览目录变化')); await click(disclosure);
+  assert.equal(document.activeElement, disclosure);
+  await act(async () => finish(relocationPlan(resource, 'D:/synthetic/third')));
+  await click(disclosure); assert.equal(button('确认重新定位'), undefined);
+  assert.deepEqual(calls, ['preview_resource_relocate', 'preview_resource_relocate', 'preview_resource_relocate']);
+});
+
+for (const scenario of ['hidden', 'basic', 'revision', 'identity']) {
+  test(`directory relocation drops a late ${scenario} preview and never replays it when restored`, async () => {
+    const resource = relocationResource(), calls: string[] = [];
+    let finish!: (value: unknown) => void;
+    const action = async (_label: string, command: string) => { calls.push(command); return new Promise(resolve => { finish = resolve; }); };
+    const view = root(), props = { resource, action, onChanged: () => assert.fail('no relocation was confirmed') };
+    await act(async () => view.render(createElement(ResourceRelocation, props)));
+    await click(button('重新定位目录…')); await change(host.querySelector('input')!, 'D:/synthetic/new'); await click(button('预览目录变化'));
+    const changed = scenario === 'hidden' ? { visible: false } : scenario === 'basic' ? { readOnly: true } : { resource: { ...resource, ...(scenario === 'revision' ? { revision: 5 } : { id: 'another-tool' }) } };
+    await act(async () => view.render(createElement(ResourceRelocation, { ...props, ...changed })));
+    if (scenario === 'hidden' || scenario === 'basic') assert.equal(host.querySelector('[aria-label="工具目录重新定位"]'), null);
+    await act(async () => finish(relocationPlan(resource, 'D:/synthetic/new')));
+    await act(async () => view.render(createElement(ResourceRelocation, props)));
+    assert.equal(button('确认重新定位'), undefined); assert.deepEqual(calls, ['preview_resource_relocate']);
+    await click(button('预览目录变化')); await act(async () => finish(relocationPlan(resource, 'D:/synthetic/new')));
+    assert(button('确认重新定位'));
+  });
+}
+
+test('an unsupported directory reports the backend reason without replacing the resource or inventing a preview', async () => {
+  const calls: string[] = [], resource = { ...relocationResource(), name: 'Agent Reach', actions: [] };
+  const action = async (_label: string, command: string) => { calls.push(command); throw new Error('当前登记缺少可核对的原适配记录，不能重新定位。'); };
+  await act(async () => root().render(createElement(ResourceRelocation, { resource, action, onChanged: () => assert.fail('unsupported relocation must not save') })));
+  await click(button('重新定位目录…')); await change(host.querySelector('input')!, 'D:/synthetic/unsupported'); await click(button('预览目录变化'));
+  assert(host.querySelector('[role="alert"]')!.textContent!.includes('缺少可核对的原适配记录'));
+  assert.equal(host.querySelector('[aria-label="目录重新定位预览"]'), null);
+  assert.equal(button('确认重新定位'), undefined); assert.deepEqual(calls, ['preview_resource_relocate']);
+});
+
+test('directory relocation reports a failed save, consumes that preview and requires a fresh confirmation for retry', async () => {
+  const resource = relocationResource(), plan = relocationPlan(resource), calls: { command: string; args: any }[] = [];
+  let previews = 0, saved = 0;
+  const action = async (_label: string, command: string, args: any) => {
+    calls.push({ command, args });
+    if (command === 'preview_resource_relocate') return { ...plan, previewId: `preview-${++previews}` };
+    assert.equal(command, 'apply_resource_relocate');
+    if (args.previewId === 'preview-1') throw new Error('所选目录已发生变化，未保存。');
+    return relocationReceipt(resource, plan);
+  };
+  await act(async () => root().render(createElement(ResourceRelocation, { resource, action, onChanged: () => { saved++; } })));
+  await click(button('重新定位目录…')); await change(host.querySelector('input')!, plan.newRootPath); await click(button('预览目录变化')); await click(button('确认重新定位'));
+  assert.equal(saved, 0); assert.equal(button('确认重新定位'), undefined);
+  assert(host.querySelector('[role="alert"]')!.textContent!.includes('所选目录已发生变化'));
+  assert(host.querySelector('[role="alert"]')!.textContent!.includes('请重新预览后再确认'));
+  await click(button('预览目录变化')); await click(button('确认重新定位'));
+  assert.equal(saved, 1);
+  assert.deepEqual(calls.filter(call => call.command === 'apply_resource_relocate').map(call => call.args), [{ previewId: 'preview-1' }, { previewId: 'preview-2' }]);
+});
+
+test('directory relocation refuses a preview for another resource and an incomplete save receipt', async () => {
+  const resource = relocationResource(), plan = relocationPlan(resource);
+  let previews = 0;
+  const action = async (_label: string, command: string) => command === 'preview_resource_relocate'
+    ? { ...plan, resourceId: ++previews === 1 ? 'another-tool' : resource.id }
+    : { ...relocationReceipt(resource, plan), complete: false };
+  await act(async () => root().render(createElement(ResourceRelocation, { resource, action, onChanged: () => assert.fail('invalid response must not replace current resource') })));
+  await click(button('重新定位目录…')); await change(host.querySelector('input')!, plan.newRootPath); await click(button('预览目录变化'));
+  assert(host.querySelector('[role="alert"]')!.textContent!.includes('目录预览与当前工具不一致')); assert.equal(button('确认重新定位'), undefined);
+  await click(button('预览目录变化')); await click(button('确认重新定位'));
+  assert(host.querySelector('[role="alert"]')!.textContent!.includes('保存回执不完整')); assert.equal(host.querySelector('[role="status"]'), null);
+});
+
+test('a completed directory save still updates the current resource while its panel is hidden', async () => {
+  const resource = relocationResource(), plan = relocationPlan(resource);
+  let finish!: (value: unknown) => void, saved: any;
+  const action = async (_label: string, command: string) => command === 'preview_resource_relocate' ? plan : new Promise(resolve => { finish = resolve; });
+  const view = root(), props = { resource, action, onChanged: (value: any) => { saved = value; } };
+  await act(async () => view.render(createElement(ResourceRelocation, props)));
+  await click(button('重新定位目录…')); await change(host.querySelector('input')!, plan.newRootPath); await click(button('预览目录变化')); await click(button('确认重新定位'));
+  await act(async () => view.render(createElement(ResourceRelocation, { ...props, visible: false })));
+  await act(async () => finish(relocationReceipt(resource, plan)));
+  assert.equal(saved.id, resource.id); assert.equal(saved.rootPath, plan.newRootPath);
+  await act(async () => view.render(createElement(ResourceRelocation, { ...props, resource: saved })));
+  assert.equal(button('确认重新定位'), undefined);
+});
+
+test('changing the resource root refreshes only the untouched default working directory and keeps displayed runtime results', async () => {
+  const resource = relocationResource();
+  const action = async (_label: string, command: string) => {
+    if (command === 'resource_runtime') return { runs: [{ ...run, status: 'succeeded' }] };
+    assert.equal(command, 'resource_result'); return { run: { ...run, status: 'succeeded' }, stdout: 'retained result' };
+  };
+  const view = root(), props = { resource, action, onChanged: () => {} };
+  await act(async () => view.render(createElement(ResourceActions, props)));
+  await click(button('查看结果')); await click(button('登记运行入口'));
+  const field = () => [...host.querySelectorAll('.resource-action-editor label')].find(label => label.textContent === '工作目录')!.querySelector<HTMLInputElement>('input')!;
+  assert.equal(field().value, resource.rootPath);
+  await act(async () => view.render(createElement(ResourceActions, { ...props, resource: { ...resource, rootPath: 'D:/synthetic/new-root', revision: 5 } })));
+  assert.equal(field().value, 'D:/synthetic/new-root'); assert(host.querySelector('.resource-run-result')!.textContent!.includes('retained result'));
+  await change(field(), 'D:/synthetic/my-custom-working-directory');
+  await act(async () => view.render(createElement(ResourceActions, { ...props, resource: { ...resource, rootPath: 'D:/synthetic/another-root', revision: 6 } })));
+  assert.equal(field().value, 'D:/synthetic/my-custom-working-directory'); assert(host.querySelector('.resource-run-result')!.textContent!.includes('retained result'));
+});
 
 function commandFixture(resource = { ...item('one'), actions: [definition] }) {
   const calls: { command: string; args: any }[] = [];

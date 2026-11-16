@@ -30,6 +30,7 @@ mod resource_package;
 mod resource_package_lifecycle;
 mod resource_probe;
 mod resource_relations;
+mod resource_relocation;
 mod resource_runtime;
 mod resource_scenes;
 mod resource_source;
@@ -292,6 +293,12 @@ fn dispatch(m: &mut Manager, request: &Value) -> Result<Value, String> {
 fn dispatch_local(m: &mut Manager, request: &Value) -> Result<Value, String> {
     reject_internal_automation(request)?;
     m.ensure_request_allowed(request)?;
+    if let Some(value) = resource_relocation::preview_local(m, request)? {
+        return Ok(value);
+    }
+    if let Some(value) = resource_relocation::apply_local(m, request)? {
+        return Ok(value);
+    }
     if let Some(value) = resource_adapters::preview_local(m, request)? {
         return Ok(value);
     }

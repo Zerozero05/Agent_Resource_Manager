@@ -11,12 +11,14 @@ import { NativeUiaSession } from './native-uia-client.mjs';
 import { createPerformanceFixture, FIXTURE_FORMAT } from './performance-fixture.mjs';
 
 const format = 'agent-resource-manager-observer-memory-v1';
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const staticVariants = ['ipc-control', 'uia-control', 'uia-driver-collection'];
 const churnVariants = ['churn-control', 'churn-driver-collection'];
 const variants = [...staticVariants, ...churnVariants];
 const policy = Object.freeze({ queryCount: 400, intervalMs: 100, sampleEvery: 100, cycleCount: 40, cycleIntervalMs: 1000, settleMs: 5000, idleMs: 10000 });
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, flag, index, all) => flag.startsWith('--') ? [...pairs, [flag.slice(2), all[index + 1]]] : pairs, []));
+const requestedTransportSha256 = args['transport-file-sha256'];
+if (requestedTransportSha256 !== undefined && !/^[a-f0-9]{64}$/i.test(requestedTransportSha256)) throw new Error('--transport-file-sha256 requires one exact SHA256 digest.');
 const json = value => JSON.stringify(value, null, 2) + '\n';
 const digest = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 const sleep = ms => new Promise(done => setTimeout(done, Math.max(0, ms)));
@@ -64,7 +66,7 @@ async function roles(memory, managerPid) {
 }
 
 if (process.argv.includes('--help')) {
-  console.log('Prepare --phase prepare [--workload churn]. Run --phase run --prepared <observer-fixture.json> --variant ipc-control|uia-control|uia-driver-collection|churn-control|churn-driver-collection --candidate <exe> --candidate-build-info <json>. Static queries or synthetic search/filter/document/tab navigation, no system input. The explicit collection variant collects the measuring driver only. This diagnostic does not replace native performance or memory-convergence acceptance.');
+  console.log('Prepare --phase prepare [--workload churn]. Run --phase run --prepared <observer-fixture.json> --variant ipc-control|uia-control|uia-driver-collection|churn-control|churn-driver-collection --candidate <exe> --candidate-build-info <json> [--transport-file-sha256 <verified formal transport digest>]. Static queries or synthetic search/filter/document/tab navigation, no system input. The explicit collection variant collects the measuring driver only. This diagnostic does not replace native performance or memory-convergence acceptance.');
   process.exit(0);
 }
 assert.ok(['prepare', 'run'].includes(args.phase));
@@ -99,10 +101,12 @@ const executable = resolve(args.candidate || ''), buildInfoPath = resolve(args['
 const build = JSON.parse(await readFile(buildInfoPath, 'utf8'));
 assert.equal(build.buildMode, 'release'); assert.ok(build.sourceIdentity || build.sourceCommit);
 assert.equal(await digest(executable), build.executableSha256);
+const transportSha256 = requestedTransportSha256?.toLowerCase() || build.executableSha256;
 const reportPath = join(dataset.root, 'observer-result.json');
 const report = {
   format, status: 'running', diagnosticOnly: true, convergenceClaim: false, variant: args.variant, startedAt: new Date().toISOString(),
   candidate: { executable, sha256: build.executableSha256, buildInfoPath, buildInfoSha256: await digest(buildInfoPath), sourceIdentity: build.sourceIdentity || build.sourceCommit },
+  transportFileSha256: transportSha256,
   fixture: { root: dataset.root, dataFingerprint: dataset.dataFingerprint, skillCount: dataset.skillCount, toolCount: dataset.toolCount }, policy,
   systemKeyboardOrMouseInput: false, applicationGcRequested: false, samples: [], completedQueries: 0, completedCycles: 0,
   limitations: ['Read-only UIA queries and read-only IPC calls have different internal work; their cadence and call count are fixed, not their CPU cost.', 'Only the explicit collection variant requests collection in the measuring driver. Finalizer completion is asynchronous.', 'Process private bytes include allocator capacity and do not by themselves establish retained live objects or a leak.', 'No production data, external network, browser login, resource execution, installation, backup or cleanup.'],
@@ -118,7 +122,7 @@ async function sample(phase) {
   return value;
 }
 try {
-  app = await NativeUiaSession.launch({ executable, sha256: build.executableSha256, dataDir: dataset.dataDir, reportPath: join(dataset.root, 'native-driver.json'), accessibilityInput: true, driverMemoryDiagnostic: true });
+  app = await NativeUiaSession.launch({ executable, sha256: build.executableSha256, transportSha256, dataDir: dataset.dataDir, reportPath: join(dataset.root, 'native-driver.json'), accessibilityInput: true, driverMemoryDiagnostic: true });
   report.native = app.identity;
   await sleep(policy.settleMs);
   const initial = stored(dataset);
