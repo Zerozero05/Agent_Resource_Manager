@@ -9,7 +9,7 @@ import { NativeUiaSession, assertNoUserManager, runManagerPreflightCli } from '.
 function driver(closedNormally) {
   const child = new EventEmitter();
   child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough();
-  const session = new NativeUiaSession(child, 'D:/03_github_projects/Agent_Resource_Manager/validation/missing-test-driver-report.json');
+  const session = new NativeUiaSession(child, 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/missing-test-driver-report.json');
   child.stdout.write(JSON.stringify({ event: 'ready', pid: 1 }) + '\n');
   child.stdin.once('data', data => {
     const request = JSON.parse(data.toString());
@@ -39,7 +39,7 @@ test('driver termination never promotes an unverified native application exit to
 function transportDriver(stdin = new PassThrough()) {
   const child = new EventEmitter(), requests = [];
   child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = stdin;
-  const session = new NativeUiaSession(child, 'D:/03_github_projects/Agent_Resource_Manager/validation/missing-test-driver-report.json');
+  const session = new NativeUiaSession(child, 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/missing-test-driver-report.json');
   stdin.on('data', data => requests.push(JSON.parse(data.toString())));
   child.stdout.write(JSON.stringify({ event: 'ready', pid: 1 }) + '\n');
   return { session, child, requests };
@@ -224,7 +224,7 @@ function transport() {
     name: 'agent-resource-manager.exe', pid: 201, ownership: 'sameUser', role: 'mcpTransport',
     transportProof: {
       currentFileSha256: candidateSha256,
-      executable: 'D:\\03_github_projects\\Agent_Resource_Manager\\app\\agent-resource-manager.exe',
+      executable: 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\app\\agent-resource-manager.exe',
       createdFileTime: '134388700647784010', appWriteFileTime: '134388600647784010',
       parentPid: 101, hostPid: 101, hostCreatedFileTime: '134388500647784010',
       hostExecutable: 'C:\\Users\\Administrator\\AppData\\Local\\OpenAI\\Codex\\bin\\5449c1f0f26f1f98\\codex.exe',

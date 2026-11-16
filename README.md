@@ -69,7 +69,7 @@ v0.2.11 便携包的 `data-directory.txt` 为 `.`，新使用时把管理数据�
 
 ## 使用
 
-v0.3 开发预览可从运行包中的 `app\agent-resource-manager.exe` 或启动脚本打开。本机示例安装位置为 `D:\03_github_projects\Agent_Resource_Manager`，管理数据在其 `data` 子目录；已有入口继续使用同一份数据。旧正式版 v0.2.11 的程序名为 `skill-manager.exe`。
+v0.3 开发预览可从运行包中的 `app\agent-resource-manager.exe` 或启动脚本打开。本机示例安装位置为 `D:\03_github_projects\Agent_Management\Agent_Resource_Manager`，管理数据在其 `data` 子目录；已有入口继续使用同一份数据。旧正式版 v0.2.11 的程序名为 `skill-manager.exe`。
 
 可通过 `--data-dir <绝对路径>` 或 `SKILL_MANAGER_DATA_DIR` 指定数据目录。未配置路径的新预览默认使用程序所在目录，检测到已有旧版数据时沿用旧库。数据目录保存设置、来源、SQLite 状态及必要恢复材料。
 
@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 本机目录整理（说明及路径维护） | 2026-11-16 | 1、本机部署迁入Agent_Management，原目录入口按用户要求退役；同步本地配置及验收脚本中的精确路径，不改保护范围或程序版本。[本次完整记录](CHANGELOG.md#local-project-paths-20261116)<br>2、补齐本轮原生验收的输出、资源与通信程序路径；119项直接边界检查通过，历史构建和验收记录保持原身份，不重编程序。[详情](CHANGELOG.md#local-project-paths-20261116) |
 | 下载限速数值范围（开发候选） | 2026-11-15 | 1、下载数字框声明现有1024 MiB/s上界，与后台规则一致，修复原生无障碍接口将无上限控件报告为0–0的问题。[详情](CHANGELOG.md#download-rate-native-range-20261115)<br>2、保留小数速率和0表示不限速；17项直接相关行为检查及类型、生产构建通过，原生限速与固定文件下载已验证，完整负载继续验收。[详情](CHANGELOG.md#download-rate-native-range-20261115)<br>3、更新验收助手按候选表单精确定位同名输入，44项直接检查通过；不改变产品逻辑或性能标准。[详情](CHANGELOG.md#download-rate-native-range-20261115) |
 | Skill改名接续与管理记录移除（开发候选） | 2026-11-13 | 1、从详情“更多”或列表单选移除管理记录，保留源文件、GitHub内容和客户端实体入口。[详情](CHANGELOG.md#skill-record-relocation-20261113)<br>2、已记录的同一目录改名后自动接续；历史重复记录可先预览再重新定位，保留原ID、分类、收藏和关联。[详情](CHANGELOG.md#skill-record-relocation-20261113)<br>3、按文件刷新内部名，保留自定义显示名和已知来源版本；导出读取不改变声明记录。同名不猜合并，冲突与既有引用保留核对。[详情](CHANGELOG.md#skill-record-relocation-20261113) |
 | GitHub说明按路径读取（内部验证） | 2026-11-13 | 1、说明与图片仅按固定提交读取沿途目录及目标文件，完整包清单另行保留。[详情](CHANGELOG.md#documentation-path-read-20261113)<br>2、保留优先级、回退、安装来源和文件校验，修复可选catalog及说明候选经过链接／子模块祖先时的误阻断。[详情](CHANGELOG.md#documentation-path-read-20261113)<br>3、累计新增10项检查，最终文档12项、凭据边界1项及相关静态检查通过；真实新版延迟和内存收敛待验。[详情](CHANGELOG.md#documentation-path-read-20261113) |

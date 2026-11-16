@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
-const formalApp = 'D:\\03_github_projects\\Agent_Resource_Manager\\app\\agent-resource-manager.exe';
+const formalApp = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\app\\agent-resource-manager.exe';
 const codexBin = 'C:\\Users\\Administrator\\AppData\\Local\\OpenAI\\Codex\\bin\\';
 const fileTime = value => typeof value === 'string' && /^[1-9]\d{0,19}$/.test(value);
 function validPin(pin) {
@@ -57,7 +57,7 @@ export async function assertNoUserManager({ pwsh = 'pwsh.exe', transportSha256, 
   // This exception is available only to a caller already bound to a candidate.
   // No process command line is queried by the default strict preflight.
   const transportSetup = expectedSha256 ? String.raw`
-    $formalApp='D:\03_github_projects\Agent_Resource_Manager\app\agent-resource-manager.exe'
+    $formalApp='D:\03_github_projects\Agent_Management\Agent_Resource_Manager\app\agent-resource-manager.exe'
     $expectedSha256='${expectedSha256}'
     $codexBin='C:\Users\Administrator\AppData\Local\OpenAI\Codex\bin\'
     $pinnedTransportMap=@{}

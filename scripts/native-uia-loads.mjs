@@ -73,7 +73,7 @@ export function nativeDownloadPreviewMatches(preview, specification) {
 
 export async function beginUiaNativeDownload(app, dataset, specification) {
   const { repository, tag, releaseId, assetId, assetName, assetBytes, directory, bytesPerSecond = 16384 } = specification;
-  if (!within(directory, 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\resources') || !Number.isSafeInteger(bytesPerSecond) || bytesPerSecond <= 0 || typeof repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Download load must use the approved resource tree and explicit official repository/rate.');
+  if (!within(directory, 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\resources') || !Number.isSafeInteger(bytesPerSecond) || bytesPerSecond <= 0 || typeof repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Download load must use the approved resource tree and explicit official repository/rate.');
   if (!(await stat(directory)).isDirectory() || resolve(app.identity.dataDirectory).toLowerCase() !== resolve(dataset.dataDir).toLowerCase()) throw new Error('Native download load scope does not match the exact isolated dataset.');
   await goTools(app); await invoke(app, '安装发行包'); await invoke(app, 'GitHub 发行版', '发行包来源');
   await setField(app, 'GitHub 仓库或发行链接', `https://github.com/${repository}`); await setField(app, '固定版本（可选）', tag);
@@ -101,7 +101,7 @@ export async function beginUiaNativeDownload(app, dataset, specification) {
  * The caller supplies the partial fingerprint saved after a real normal quit. */
 export async function resumeUiaNativeDownload(app, dataset, specification, interrupted) {
   if (resolve(app.identity.dataDirectory).toLowerCase() !== resolve(dataset.dataDir).toLowerCase()
-    || !within(specification.directory, 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\resources')
+    || !within(specification.directory, 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\resources')
     || !within(interrupted.partialPath || '', specification.directory)
     || !within(interrupted.targetPath || '', specification.directory)
     || !(interrupted.bytes > 0 && interrupted.bytes < specification.assetBytes)

@@ -1,6 +1,6 @@
 #Requires -Version 7.2
 param(
-    [string]$Dataset = 'D:\03_github_projects\Agent_Resource_Manager\validation\manager-data\native-entrypoints-0heGph\dataset.json',
+    [string]$Dataset = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data\native-entrypoints-0heGph\dataset.json',
     [switch]$Run
 )
 $ErrorActionPreference = 'Stop'
@@ -9,7 +9,7 @@ $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $OutputEncoding = [Text.UTF8Encoding]::new($false)
 
-$fixedRoot = 'D:\03_github_projects\Agent_Resource_Manager\validation\manager-data\native-entrypoints-0heGph'
+$fixedRoot = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data\native-entrypoints-0heGph'
 if ([IO.Path]::GetFullPath($Dataset) -ine (Join-Path $fixedRoot 'dataset.json')) {
     throw 'Use only the existing isolated native-entrypoints-0heGph dataset.'
 }

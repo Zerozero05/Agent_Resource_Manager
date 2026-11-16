@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { FIXTURE_FORMAT } from './performance-fixture.mjs';
 
 export const LOAD_FIXTURE_FORMAT = 'agent-resource-manager-native-load-v1';
-export const VALIDATION_RESOURCE_PARENT = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\resources';
+export const VALIDATION_RESOURCE_PARENT = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\resources';
 const crcTable = Uint32Array.from({ length: 256 }, (_, index) => { let crc = index; for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1; return crc >>> 0; });
 function crc32(bytes) { let crc = 0xffffffff; for (const byte of bytes) crc = crcTable[(crc ^ byte) & 255] ^ (crc >>> 8); return (crc ^ 0xffffffff) >>> 0; }
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');

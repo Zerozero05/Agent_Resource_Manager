@@ -39,7 +39,7 @@ test('generated ZIPs and loopback Range metadata are valid inputs, never native 
 });
 
 test('native update load setup replaces only a fresh generated tool and preserves the exact one-hundred-tool scale', { skip: process.platform !== 'win32' }, async () => {
-  const parent = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data'; await mkdir(parent, { recursive: true });
+  const parent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data'; await mkdir(parent, { recursive: true });
   const work = await mkdtemp(join(parent, 'load-input-test-'));
   const dataset = await createPerformanceFixture(work, 'generated-catalogue', 100), fixture = await createNativeLoadFixture(undefined, { fileCount: 1, bytesPerFile: 64 });
   const attached = await attachNativeLoadResource(dataset, fixture); assert.equal(attached.totalTools, 100); assert.equal(attached.resourceId, 'perf-tool-000');

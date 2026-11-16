@@ -126,7 +126,7 @@ try {
         exit 0
     }
     $spec = [Console]::In.ReadLine() | ConvertFrom-Json
-    $validationRoot = 'D:\03_github_projects\Agent_Resource_Manager\validation\'
+    $validationRoot = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\'
     function Assert-TestPath([string]$Path) {
         $full = [IO.Path]::GetFullPath($Path)
         if (-not $full.StartsWith($validationRoot,[StringComparison]::OrdinalIgnoreCase) -or -not [IO.Directory]::Exists($full)) { throw 'Test data and temporary directories must already exist under the approved validation root.' }

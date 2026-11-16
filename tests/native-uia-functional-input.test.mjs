@@ -653,7 +653,7 @@ test('foreground preparation keeps the original baseline and does not delegate a
 
 test('actual foreground method stops on activity or identity changes and always releases a successful temporary attachment', { skip: process.platform !== 'win32' }, async () => {
   const method = sourceSection('  public object PrepareKeyboardForeground()', '  public object KeyboardFieldState(');
-  const temporary = await mkdtemp('D:/03_github_projects/Agent_Resource_Manager/validation/manager-data/native-keyboard-pure-');
+  const temporary = await mkdtemp('D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data/native-keyboard-pure-');
   // Extract the actual method. These fakes replace only the OS/provider boundary;
   // no window is opened, focused or enumerated by this compiled contract test.
   const program = `$ErrorActionPreference='Stop'
@@ -844,7 +844,7 @@ test('owned-focus diagnosis observes one guarded focus call without accepting a 
 
 test('scoped functional fields select only one exact owned panel and refuse missing or ambiguous targets', { skip: process.platform !== 'win32' }, async () => {
   const method = sourceSection('  AutomationElement Unique(', '  void PresentControl(');
-  const temporary = await mkdtemp('D:/03_github_projects/Agent_Resource_Manager/validation/manager-data/native-field-scope-');
+  const temporary = await mkdtemp('D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data/native-field-scope-');
   const program = `$ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
 Add-Type -TypeDefinition @'
@@ -920,7 +920,7 @@ ${method}
 test('actual field method prefers strict numeric ranges and never falls back after range refusal or incorrect readback', { skip: process.platform !== 'win32' }, async () => {
   const method = sourceSection('  public string SetField(', '  public void SelectTab(');
   assert.doesNotMatch(method, /SetFocus\(|SendInput\(|ClickNative\(|\bText\(|inputTick\s*=/);
-  const temporary = await mkdtemp('D:/03_github_projects/Agent_Resource_Manager/validation/manager-data/native-field-pure-');
+  const temporary = await mkdtemp('D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data/native-field-pure-');
   const program = `$ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
 Add-Type -TypeDefinition @'

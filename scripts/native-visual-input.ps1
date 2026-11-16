@@ -55,7 +55,7 @@ public sealed class NativeVisualInput : IDisposable {
   public NativeVisualInput(int pid,string creation,string executable,string directory,int[] frozenBounds) {
     if(SetThreadDpiAwarenessContext(new IntPtr(-4))==IntPtr.Zero)throw new InvalidOperationException("Per-monitor DPI observation is unavailable.");
     process=Process.GetProcessById(pid);created=creation;image=Path.GetFullPath(executable);root=Path.GetFullPath(directory);
-    if(!root.StartsWith(@"D:\03_github_projects\Agent_Resource_Manager\validation\manager-data\native-visual-",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Visual files require the exact generated validation root.");
+    if(!root.StartsWith(@"D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data\native-visual-",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Visual files require the exact generated validation root.");
     CheckProcess();inputTick=ReadInputTick();IntPtr found=IntPtr.Zero;int matches=0;
     EnumWindows((handle,unused)=>{uint owner;GetWindowThreadProcessId(handle,out owner);if(owner!=(uint)pid||!IsWindowVisible(handle))return true;var title=new StringBuilder(256);var name=new StringBuilder(256);GetWindowText(handle,title,256);GetClassName(handle,name,256);if(title.ToString()=="Agent Resource Manager"&&name.ToString()=="Tauri Window"){found=handle;matches++;}return true;},IntPtr.Zero);
     if(matches!=1||IsIconic(found))throw new InvalidOperationException("One visible, restored owned Tauri window is required.");

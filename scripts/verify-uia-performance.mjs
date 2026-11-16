@@ -67,7 +67,7 @@ const inputCondition = options['accessibility-input'] ? 'native-accessibility-in
 if (options['concurrent-observation'] && !options['accessibility-input']) throw new Error('Concurrent observation requires explicit --accessibility-input.');
 if (!['prepare', 'probe', 'startup', 'interactive', 'loads', 'stability', 'all', 'download-resume'].includes(suite)) throw new Error('Unsupported native acceptance suite.');
 if (suite === 'download-resume' && (!options['download-spec'] || options['stage-fixture'] || options['concurrent-observation'])) throw new Error('download-resume requires only one explicit --download-spec and synchronous native observation; no stage fixture.');
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 await mkdir(approved, { recursive: true });
 const output = await mkdtemp(join(approved, 'uia-performance-')), logPath = join(output, 'observations.jsonl');
 const sleep = ms => new Promise(done => setTimeout(done, Math.max(0, ms)));
@@ -292,7 +292,7 @@ async function downloadRestartContinue(info, fixture) {
   if (originalSpec.repository !== 'Panniantong/Agent-Reach' || originalSpec.tag !== 'v1.6.0'
     || originalSpec.releaseId !== 421526768 || originalSpec.assetId !== 668240314
     || originalSpec.assetName !== 'agent-reach.zip' || originalSpec.assetBytes !== 676536) throw new Error('Short continuation acceptance requires the existing pinned official asset specification.');
-  const resourceParent = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\resources';
+  const resourceParent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\resources';
   await mkdir(resourceParent, { recursive: true });
   const directory = await mkdtemp(join(resourceParent, 'native-download-resume-'));
   const specification = { ...originalSpec, directory, bytesPerSecond: 16384 };
