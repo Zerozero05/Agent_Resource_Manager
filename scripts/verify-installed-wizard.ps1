@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory)][string]$Setup,
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$SetupSha256,
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExecutableSha256,
-    [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$')][string]$Version
+    [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$')][string]$Version,
+    [switch]$VerifyFirstLaunch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -157,6 +158,107 @@ function Advance-Wizard($Page) {
     [ArmWizardControls]::Advance($Page.window, $buttons[0].handle)
 }
 
+function Wait-InstalledButton($Manager, [string]$Name) {
+    $condition = [Windows.Automation.AndCondition]::new(
+        [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $Name),
+        [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::Button))
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $Manager.Refresh()
+        if ($Manager.HasExited) { throw "The installed application exited before exposing $Name." }
+        $window = $Manager.MainWindowHandle
+        if ([ArmWizardControls]::Owned($window, $Manager.Id) -and [ArmWizardControls]::IsWindowVisible($window) -and
+            [ArmWizardControls]::Class($window) -ceq 'Tauri Window' -and [ArmWizardControls]::Caption($window) -ceq 'Agent Resource Manager') {
+            $rootElement = [Windows.Automation.AutomationElement]::FromHandle($window)
+            if ($rootElement.Current.ProcessId -ne $Manager.Id) { throw 'The installed window accessibility root does not belong to the launched application.' }
+            $buttons = $rootElement.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)
+            if ($buttons.Count -gt 1) { throw "The installed application exposes more than one $Name control." }
+            if ($buttons.Count -eq 1 -and $buttons[0].Current.IsEnabled -and -not $buttons[0].Current.IsOffscreen) {
+                $pattern = $null
+                if (-not $buttons[0].TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) { throw "The $Name control has no native Invoke pattern." }
+                return $pattern
+            }
+        }
+        Start-Sleep -Milliseconds 150
+    } while ($watch.ElapsedMilliseconds -lt 30000)
+    throw "The installed application did not expose an enabled $Name control."
+}
+
+function Read-InstalledBackend([string]$DataDirectory) {
+    $start = [Diagnostics.ProcessStartInfo]::new($installedExe)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.WorkingDirectory = $app
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.ArgumentList.Add('--mcp')
+    $start.ArgumentList.Add('--data-dir')
+    $start.ArgumentList.Add($DataDirectory)
+    $bridge = [Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $bridge.StandardOutput.ReadToEndAsync()
+        $stderr = $bridge.StandardError.ReadToEndAsync()
+        $bridge.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"arm-hosted-installed-startup","version":"1"}}}')
+        $bridge.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
+        $bridge.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"content_cache_stats","arguments":{}}}')
+        $bridge.StandardInput.Close()
+        if (-not $bridge.WaitForExit(15000) -or $bridge.ExitCode -ne 0 -or $stderr.GetAwaiter().GetResult()) { throw 'The installed read-only MCP bridge did not complete cleanly.' }
+        $replies = @($stdout.GetAwaiter().GetResult() -split '\r?\n' | Where-Object { $_ } | ConvertFrom-Json)
+        $service = $replies | Where-Object id -eq 1
+        $query = $replies | Where-Object id -eq 2
+        if ($replies.Count -ne 2 -or $service.result.serverInfo.version -cne $Version -or
+            $null -eq $query.result -or $query.result.isError -ne $false -or $query.result.content.Count -ne 1) {
+            throw 'The running installed backend did not accept the scoped read for its expected data directory.'
+        }
+        $cache = $query.result.content[0].text | ConvertFrom-Json
+        if (-not $cache.PSObject.Properties['taskRetention']) { throw 'The installed backend did not return real cache diagnostics.' }
+    } finally { $bridge.Dispose() }
+}
+
+function Verify-InstalledFirstLaunch {
+    foreach ($relative in @('data-directory.txt','storage-paths.json','data','cache','manager.sqlite3','manager.sqlite3-wal','manager.sqlite3-shm','Skill_Manager_Data')) {
+        if (Test-Path -LiteralPath (Join-Path $app $relative)) { throw "Fresh installation unexpectedly contains $relative." }
+    }
+    $start = [Diagnostics.ProcessStartInfo]::new($installedExe)
+    $start.UseShellExecute = $false
+    $start.WorkingDirectory = $app
+    [void]$start.Environment.Remove('SKILL_MANAGER_DATA_DIR')
+    $manager = [Diagnostics.Process]::Start($start)
+    try {
+        $dataDirectory = Join-Path $app 'data'
+        $report.applicationStartup = [ordered]@{ pid = $manager.Id; expectedDataDirectory = $dataDirectory; actualNoArguments = $false; normalExit = $false }
+        $row = Get-CimInstance Win32_Process -Filter "ProcessId=$($manager.Id)"
+        if ($manager.SessionId -ne $report.sessionId -or $row.ExecutablePath -ine $installedExe -or
+            $row.CommandLine.Trim() -notin @($installedExe, ('"' + $installedExe + '"'))) {
+            throw 'The installed process is not the exact no-argument application launched for this test.'
+        }
+        $report.applicationStartup.actualNoArguments = $true
+        $help = Wait-InstalledButton $manager '工作区快捷键'
+        if (@(Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue |
+            Where-Object Id -ne $manager.Id).Count) { throw 'Another manager appeared during startup.' }
+        $database = Join-Path $dataDirectory 'manager.sqlite3'
+        $webview = Join-Path $app 'cache/webview'
+        $storage = Get-Content -LiteralPath (Join-Path $app 'storage-paths.json') -Raw | ConvertFrom-Json
+        if ($storage.config.managedRoot -ine $app -or $storage.config.overrides.state -ine $dataDirectory -or
+            $storage.config.overrides.webview -ine $webview -or -not (Test-Path -LiteralPath $database -PathType Leaf) -or
+            (Test-Path -LiteralPath (Join-Path $app 'manager.sqlite3'))) {
+            throw 'First launch did not initialize the expected isolated data and cache layout.'
+        }
+        Read-InstalledBackend $dataDirectory
+        $report.applicationStartup.database = $database
+        $report.applicationStartup.configuredWebviewDirectory = $storage.config.overrides.webview
+        $report.applicationStartup.backendReadInExpectedDirectory = $true
+        $help.Invoke()
+        $quit = Wait-InstalledButton $manager '完全退出管理器'
+        $quit.Invoke()
+        if (-not $manager.WaitForExit(15000) -or $manager.ExitCode -ne 0) { throw 'The installed application did not quit normally.' }
+        $report.applicationStartup.normalExit = $true
+        $report.applicationStartup.exitCode = $manager.ExitCode
+        $report.applicationStartupVerified = $true
+    } finally { $manager.Dispose() }
+}
+
 try {
     Add-Type -TypeDefinition $wizardApi
     $process = Start-Process -FilePath $setupFile.FullName -WorkingDirectory $root -PassThru
@@ -206,6 +308,12 @@ try {
     }
     $report.guiVerified = $true
     $report.status = 'graphical-wizard-custom-install-passed'
+    if ($VerifyFirstLaunch) {
+        Add-Type -AssemblyName UIAutomationClient
+        Add-Type -AssemblyName UIAutomationTypes
+        Verify-InstalledFirstLaunch
+        $report.status = 'graphical-wizard-and-installed-first-launch-passed'
+    }
 } catch {
     $report.status = 'failed'
     $report.error = $_.Exception.Message
