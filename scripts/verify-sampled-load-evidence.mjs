@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual as same } from 'node:util';
+import { MAX_NATIVE_UPDATE_FIXTURES } from './performance-load-fixture.mjs';
 import { PERFORMANCE_POLICY as policy, backgroundLoadVerdict } from './performance-policy.mjs';
 
 const actions = { check: 'check_now', download: 'apply_resource_download', update: 'apply_resource_update_stage' };
@@ -112,7 +113,7 @@ function replay({ report, driver, events, dataset, datasetDescriptorSha256 }, ex
     && same(taskRuns, completions.map(event => taskPayload(payload(event)))),
   'A raw observation or native task completion differs from its event log.');
   const runs = new Map(taskRuns.map(run => [run.taskId, run]));
-  const maximumTasks = { check: 96, download: 1, update: 12 }[kind];
+  const maximumTasks = { check: 96, download: 1, update: MAX_NATIVE_UPDATE_FIXTURES }[kind];
   requireEvidence(runs.size === taskRuns.length && taskRuns.length <= maximumTasks
     && taskRuns.every((run, index) => completedTask(report, kind, run) && timestamp(run.startedAt) >= from
       && timestamp(run.finishedAt) <= timestamp(completions[index].observedAt) && timestamp(completions[index].observedAt) <= to),

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { win32 } from 'node:path';
 import test from 'node:test';
+import { MAX_NATIVE_UPDATE_FIXTURES } from '../scripts/performance-load-fixture.mjs';
 import { PERFORMANCE_POLICY } from '../scripts/performance-policy.mjs';
 import { consolidateSampledLoads } from '../scripts/verify-sampled-load-evidence.mjs';
 
@@ -95,6 +96,39 @@ test('original P95 and limited tolerance are separately recomputed', () => {
     const result = consolidateSampledLoads([scope('check'), scope('download', duration), scope('update')], candidate);
     assert.deepEqual([result.status, result.originalP95, result.limitedTolerance], ['failed', p95, tolerance]);
   }
+});
+
+test('update replay uses the same completed-task cap as the native sampler', () => {
+  const update = scope('update');
+  const { report, events } = update;
+  const exit = events.pop();
+  const [seed] = report.stageFixtures;
+  const [firstRun] = report.sampledLoad.taskRuns;
+  const firstFinish = Date.parse(firstRun.finishedAt);
+  const appendStage = index => {
+    const generatedScope = win32.join(firstRun.generatedScope, String(index));
+    const resourceId = 'perf-tool-' + String(index).padStart(3, '0');
+    const fixtureScopeId = 'sampled-stage-scope-' + index;
+    const taskId = 'update-native-task-' + index;
+    const startedAt = iso(firstFinish + index * 100), finishedAt = iso(firstFinish + index * 100 + 20);
+    const receipt = { ...firstRun.receipt, taskId, resourceId, fixtureScopeId,
+      destination: win32.join(generatedScope, 'candidates', 'native-uia-v2') };
+    const run = { ...firstRun, taskId, resourceId, generatedScope, startedAt, finishedAt, receipt };
+    report.stageFixtures.push({ ...seed, resourceId, fixtureScopeId, fixturePath: win32.join(generatedScope, 'load-fixture.json') });
+    report.sampledLoad.taskRuns.push(run);
+    events.splice(events.length - 1, 0, { kind: 'update', ...structuredClone(run), observedAt: iso(Date.parse(finishedAt) + 1) });
+  };
+  exit.observedAt = iso(firstFinish + (MAX_NATIVE_UPDATE_FIXTURES + 1) * 100);
+  events.push(exit);
+  for (let index = 1; index < MAX_NATIVE_UPDATE_FIXTURES; index++) appendStage(index);
+  const reports = [scope('check'), scope('download'), update];
+  const atCap = consolidateSampledLoads(reports, candidate);
+  assert.equal(atCap.status, 'passed');
+  assert.equal(atCap.workloads.update.completedTasks, MAX_NATIVE_UPDATE_FIXTURES);
+  appendStage(MAX_NATIVE_UPDATE_FIXTURES);
+  const beyondCap = consolidateSampledLoads(reports, candidate);
+  assert.equal(beyondCap.status, 'incomplete');
+  assert.match(beyondCap.reasons[0], /completion receipts/);
 });
 
 test('sample shortages and absent or incomparable evidence stay incomplete', () => {
