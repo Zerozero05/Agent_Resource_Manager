@@ -1,0 +1,175 @@
+name: Diagnose retained versus reopened Skill details on one hosted Windows machine
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  CANDIDATE_RUN_ID: '44380557746'
+  CANDIDATE_SOURCE: 3f703b18e92bd765678027404741f7844a9bd94e
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_3f703b18e92bd765678027404741f7844a9bd94e
+  CANDIDATE_ARTIFACT_ID: '14465615399'
+  CANDIDATE_SHA256: f8e240df74644942c929cc8d0ad699e1369c7a51cedab662620e8152c4ab41af
+jobs:
+  measure:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-detail-isolation-3f703b1' }}
+    runs-on: windows-latest
+    timeout-minutes: 27
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify hosted runner and exact candidate provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no existing manager in the isolated runner.' }
+          if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Exact candidate artifact ID and independent EXE SHA-256 must be pinned before download.'
+          }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
+              $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push' -or
+              $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+          $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID) { throw 'The exact Windows candidate artifact is missing.' }
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }
+          $exe = Join-Path $candidate 'agent-resource-manager.exe'
+          $source = Join-Path $candidate 'BUILD_INFO.json'
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:CANDIDATE_SHA256 -or $info.executableSha256 -cne $digest -or
+              $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or
+              $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
+              $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the pinned executable.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+          Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
+      - name: Run both isolated detail scenarios on a single machine
+        timeout-minutes: 23
+        run: |
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          if (Test-Path -LiteralPath $root) { throw 'Expected a fresh native measurement directory.' }
+          $audit = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-detail-isolation-evidence')
+          $sessions = @()
+          foreach ($variant in @('retain-document','reopen-document')) {
+            $target = New-Item -ItemType Directory -Path (Join-Path $audit.FullName $variant)
+            $record = [ordered]@{ variant=$variant; diagnosticOnly=$true; exitCode=$null; closedNormally=$false; error=$null }
+            try {
+              if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) {
+                throw 'A manager process still exists. No new session was started.'
+              }
+              $before = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+              $PSNativeCommandUseErrorActionPreference = $false
+              & node scripts/verify-uia-performance.mjs --suite detail-isolation --detail-variant $variant --accessibility-input --candidate (Join-Path $candidate 'agent-resource-manager.exe') --candidate-build-info (Join-Path $candidate 'BUILD_INFO.native-validation.json')
+              $record.exitCode = $LASTEXITCODE
+              $new = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notin $before })
+              if ($new.Count -ne 1) { throw 'Expected one new native diagnostic directory.' }
+              foreach ($name in @('report.json','observations.jsonl','policy-before-run.json','candidate-mixed-1000-100-driver.json','mixed-native-fixture/dataset.json')) {
+                $source = Join-Path $new[0].FullName $name
+                if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $target.FullName }
+              }
+              $report = Get-Content -LiteralPath (Join-Path $target.FullName 'report.json') -Raw | ConvertFrom-Json
+              $driver = Get-Content -LiteralPath (Join-Path $target.FullName 'candidate-mixed-1000-100-driver.json') -Raw | ConvertFrom-Json
+              $events = Get-Content -LiteralPath (Join-Path $target.FullName 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
+              $exits = @($events | Where-Object { $_.kind -ceq 'native-normal-exit' -and $_.closedNormally -eq $true })
+              $record.closedNormally = $exits.Count -eq 1 -and $driver.closedNormally -eq $true -and
+                $exits[0].pid -eq $driver.pid -and $exits[0].creationFileTime -ceq $driver.creationFileTime
+              $tabCount = if ($variant -ceq 'retain-document') { 1 } else { 0 }
+              $branchPhase = if ($tabCount -eq 1) { 'retain-document-return-home' } else { 'close-document' }
+              $phases = @('cycle-start','search-skill','clear-skill-search','filter-github','filter-all','search-document',
+                'open-document','switch-home','switch-document',$branchPhase,'clear-document-search')
+              $cycleEvents = @($events | Where-Object kind -CEQ 'detail-isolation-cycle')
+              $stageEvents = @($events | Where-Object kind -CEQ 'detail-isolation-stage')
+              $idleEvents = @($events | Where-Object kind -CEQ 'detail-isolation-final-idle')
+              $diagnostic = $report.detailIsolation
+              $descriptor = Get-FileHash -LiteralPath (Join-Path $target.FullName 'dataset.json') -Algorithm SHA256
+              $dataDir = Join-Path $new[0].FullName 'mixed-native-fixture\data'
+              if ($record.exitCode -ne 0 -or -not $record.closedNormally -or
+                  $report.status -cne 'diagnostic-detail-isolation-collected' -or $report.suite -cne 'detail-isolation' -or
+                  $report.harnessChangedDuringRun -ne $false -or $report.nativeErrors.Count -ne 0 -or $report.error -or
+                  $report.candidate.sha256 -cne $env:CANDIDATE_SHA256 -or $report.candidate.source -cne $env:CANDIDATE_SOURCE -or
+                  $driver.readinessMode -cne 'strict-skill-list' -or $driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or
+                  $driver.dataDirectory -ne $dataDir -or $report.dataset.dataDir -ne $dataDir -or
+                  $driver.datasetDescriptorSha256 -cne $descriptor.Hash.ToLowerInvariant() -or
+                  $report.dataset.syntheticOnly -ne $true -or $report.dataset.skillCount -ne 1000 -or $report.dataset.toolCount -ne 100 -or
+                  $diagnostic.variant -cne $variant -or $diagnostic.diagnosticOnly -ne $true -or
+                  $diagnostic.performanceAcceptanceClaimed -ne $false -or $diagnostic.stabilityAcceptanceClaimed -ne $false -or
+                  $diagnostic.cycles -ne 12 -or $diagnostic.intervalMs -ne 15000 -or
+                  $diagnostic.warmupCycles -ne 5 -or $diagnostic.preparationIdleMs -ne 120000 -or
+                  $diagnostic.cyclesObserved.Count -ne 12 -or $cycleEvents.Count -ne 12 -or
+                  $stageEvents.Count -ne 132 -or $idleEvents.Count -ne 4 -or
+                  $diagnostic.visibleTaskChanges -ne 0 -or $diagnostic.finalIdle.Count -ne 4 -or
+                  ($diagnostic.finalIdle.scheduledOffsetMs -join ',') -cne '0,10000,20000,30000' -or
+                  ($idleEvents.scheduledOffsetMs -join ',') -cne '0,10000,20000,30000' -or
+                  $diagnostic.finalRoles.status -cne 'observed' -or $diagnostic.finalRoles.unmatched.Count -ne 0) {
+                throw 'The isolated diagnostic did not verify the full timed phases, unchanged task list, role identities and normal exit.'
+              }
+              for ($index = 1; $index -le 12; $index++) {
+                $cycle = $diagnostic.cyclesObserved[$index - 1]
+                $cycleEvent = $cycleEvents[$index - 1]
+                $stageRows = @($stageEvents | Where-Object cycle -EQ $index)
+                if ($cycle.cycle -ne $index -or $cycleEvent.cycle -ne $index -or
+                    $cycle.scheduledOffsetMs -ne ($index * 15000) -or
+                    $cycleEvent.scheduledOffsetMs -ne $cycle.scheduledOffsetMs -or
+                    $cycle.startingDetailTabCount -ne $tabCount -or $cycle.endingDetailTabCount -ne $tabCount -or
+                    ($cycle.stages.phase -join ',') -cne ($phases -join ',') -or
+                    ($stageRows.phase -join ',') -cne ($phases -join ',') -or
+                    @($stageRows | Where-Object { $_.memory.processes.Count -lt 3 }).Count -ne 0) {
+                  throw 'A fixed diagnostic cycle, tab disposition or per-action memory sample was missing.'
+                }
+              }
+              $record['process'] = [ordered]@{pid=$driver.pid; creationFileTime=$driver.creationFileTime; windowHandle=$driver.windowHandle}
+              $record['startupMs'] = $driver.startupMs
+              $record['fixtureFingerprint'] = $report.dataset.dataFingerprint
+              $record['dataDirectory'] = $report.dataset.dataDir
+              $record['host'] = $report.machine.hostname
+              $record['protocol'] = [ordered]@{warmupCycles=$diagnostic.warmupCycles; preparationIdleMs=$diagnostic.preparationIdleMs;
+                intervalMs=$diagnostic.intervalMs; cycles=$diagnostic.cycles; finalIdleOffsetsMs=$diagnostic.finalIdleOffsetsMs}
+              $record['durationMs'] = $diagnostic.cyclesObserved[-1].finishedElapsedMs
+              $record['stageSamples'] = $stageEvents.Count
+              $record['finalIdleSamples'] = $idleEvents.Count
+              $record['visibleTaskChanges'] = $diagnostic.visibleTaskChanges
+              $record['roles'] = $diagnostic.finalRoles.roles
+              $record['webviewVersions'] = @($diagnostic.finalRoles.roles | Where-Object runtimeProductVersion |
+                Select-Object -ExpandProperty runtimeProductVersion -Unique | Sort-Object)
+              if ($record.webviewVersions.Count -ne 1) { throw 'Expected one verified WebView2 client version in this session.' }
+            } catch {
+              $record.error = $_.Exception.Message
+            }
+            $sessions += $record
+            [ordered]@{diagnosticOnly=$true; stabilityAcceptanceClaimed=$false; performanceAcceptanceClaimed=$false; candidateSha256=$env:CANDIDATE_SHA256; sessions=$sessions} |
+              ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $audit.FullName 'detail-isolation-summary.json') -Encoding utf8NoBOM
+            $record | ConvertTo-Json -Depth 8 -Compress
+          }
+          $control,$reopened = $sessions
+          if ($control.error -or $reopened.error -or $control.host -cne $reopened.host -or
+              $control.fixtureFingerprint -cne $reopened.fixtureFingerprint -or $control.dataDirectory -eq $reopened.dataDirectory -or
+              $control.webviewVersions[0] -cne $reopened.webviewVersions[0] -or
+              ($control.process.pid -eq $reopened.process.pid -and $control.process.creationFileTime -ceq $reopened.process.creationFileTime) -or
+              ($control.protocol | ConvertTo-Json -Compress) -cne ($reopened.protocol | ConvertTo-Json -Compress)) {
+            throw 'A comparable pair was not established. See the diagnostic summary and its original reports.'
+          }
+          exit 0
+      - name: Upload only synthetic detail diagnostic evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        with:
+          name: Agent_Resource_Manager_native_detail_isolation_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-detail-isolation-evidence/
+          if-no-files-found: warn
+          retention-days: 14

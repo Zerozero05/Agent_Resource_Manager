@@ -63,11 +63,19 @@ if (options.help) {
   console.log('Optional --sample-overlap true with --suite loads and one explicit --load-kind collects 100 verified samples per category with a 12-minute measurement budget. Check uses serial local checks. Download uses one pinned official asset at 1 KiB/s in one fresh isolated directory (approximately eleven minutes). Update accepts two to twelve separately prepared --stage-fixture paths and stages them serially without switching originals. Reports insufficient overlap separately.');
   console.log('Optional --interaction-kind document is restricted to --suite interactive without load selection or specifications. It resumes only the original document category with the same unmeasured preparation, one hundred measured inputs and thresholds. Success is document-only partial evidence, not a complete interactive or all-suite pass. Omit it for the original four-category run.');
   console.log('Short --suite download-resume --download-spec <existing pinned official spec> creates one fresh approved download directory, starts one native download, normally quits with partial bytes, reopens the same isolated data and explicitly continues via its native history. It runs no interaction/stability loop and makes no performance claim. The existing --accessibility-input, --popup-select true and --await-foreground true setup options are available.');
+  console.log('Hosted-only --suite detail-isolation --detail-variant retain-document|reopen-document --accessibility-input records a short synthetic diagnostic, independent of native performance acceptance.');
   console.log('Optional --existing-stdio-proof <json> forwards only an explicitly frozen arm-pinned-existing-stdio-v1 manifest matching the candidate SHA to the unchanged ownership preflight; it does not permit a running GUI/backend.');
   process.exit(0);
 }
 const requestedTransportSha256 = transportDigest(options['transport-file-sha256']);
 const suite = options.suite || 'all';
+const detailVariant = options['detail-variant'];
+if (suite === 'detail-isolation') {
+  const allowed = ['suite', 'detail-variant', 'accessibility-input', 'candidate', 'candidate-build-info'];
+  if (process.platform !== 'win32' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows' ||
+      !['retain-document', 'reopen-document'].includes(detailVariant) || options['accessibility-input'] !== true ||
+      Object.keys(options).some(key => !allowed.includes(key))) throw new Error('Detail isolation requires the fixed hosted Windows accessibility diagnostic options.');
+} else if (detailVariant !== undefined) throw new Error('--detail-variant requires --suite detail-isolation.');
 const interactionKind = validateInteractionSelection(options, suite);
 const loadKind = validateLoadSelection(options, suite);
 const sampleOverlap = validateOverlapSampling(options, suite, loadKind, stageFixturePaths, downloadSpecCount);
@@ -90,7 +98,7 @@ const popupSelection = options['popup-select'] === 'true';
 if (popupSelection && (!['loads', 'download-resume'].includes(suite) || !options['accessibility-input'] || foregroundSelection || closedSelection)) throw new Error('--popup-select requires the accessibility-only loads or download-resume suite without either other select mode.');
 const inputCondition = options['accessibility-input'] ? 'native-accessibility-input-to-painted-result' : 'native-ui-input-to-painted-result';
 if (options['concurrent-observation'] && !options['accessibility-input']) throw new Error('Concurrent observation requires explicit --accessibility-input.');
-if (!['prepare', 'probe', 'startup', 'interactive', 'loads', 'stability', 'all', 'download-resume'].includes(suite)) throw new Error('Unsupported native acceptance suite.');
+if (!['prepare', 'probe', 'startup', 'interactive', 'loads', 'stability', 'all', 'download-resume', 'detail-isolation'].includes(suite)) throw new Error('Unsupported native acceptance suite.');
 if (suite === 'download-resume' && (!options['download-spec'] || options['stage-fixture'] || options['concurrent-observation'])) throw new Error('download-resume requires only one explicit --download-spec and synchronous native observation; no stage fixture.');
 const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const approvedResourceParent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\resources';
@@ -113,6 +121,12 @@ report.foregroundAwaitRequested = awaitForeground;
 report.measurement.foregroundCondition = 'Measured interactions require matching launched PID and captured/main/foreground HWND before and after input, plus true native foregroundBefore/foregroundAfter flags. Nonmeasured setup and stability cycles keep their existing context.';
 report.measurement.stabilityPreparationIdleMs = 120000;
 report.functionalSelections = [];
+if (suite === 'detail-isolation') {
+  report.detailIsolationPolicy = { diagnosticOnly: true, stabilityAcceptanceClaimed: false, performanceAcceptanceClaimed: false, variant: detailVariant,
+    cycles: 12, intervalMs: 15000, warmupCycles: policy.warmupCycles, preparationIdleMs: report.measurement.stabilityPreparationIdleMs,
+    finalIdleOffsetsMs: [0, 10000, 20000, 30000] };
+  report.limitations.push('The short detail diagnostic retains the exact expected accessibility observations. The retain arm selects the existing pane while the reopen arm closes it and creates it on the next cycle. Their end-of-cycle accessibility work differs. Private bytes and working set are process metrics; they do not establish live objects, a leak or convergence.');
+}
 if (interactionKind) {
   report.interactionSelection = { scope: 'partial-limited', kind: interactionKind, omittedKinds: ['search', 'filter', 'tab'], requiredSamples: policy.localSamplesPerCategory, fullInteractiveAcceptanceClaimed: false };
   report.limitations.push('This explicit document-only continuation retains the original unmeasured preparation and document loop. It does not rerun or claim the omitted categories, background loads, startup or stability; existing results are not automatically merged into a complete interactive or all-suite pass.');
@@ -131,7 +145,7 @@ if (options['concurrent-observation']) {
   report.measurement.interaction = 'clock before starting one MTA native accessibility input; main thread observes the exact initially-false result, two DwmFlush calls and reconfirmation; successful input return is independently required before proceeding';
   report.limitations.push('Concurrent accessibility observation is diagnostic only; uiReadyMs, inputCallReturnedMs and inputReturnedAfterReadyMs remain separate and do not replace synchronous acceptance evidence.');
 }
-await writeFile(join(output, 'policy-before-run.json'), JSON.stringify({ policy, harness, measurement: report.measurement, interactionSelection: report.interactionSelection, loadSelection: report.loadSelection, startedAt: new Date().toISOString() }, null, 2));
+await writeFile(join(output, 'policy-before-run.json'), JSON.stringify({ policy, harness, measurement: report.measurement, interactionSelection: report.interactionSelection, loadSelection: report.loadSelection, detailIsolationPolicy: report.detailIsolationPolicy, startedAt: new Date().toISOString() }, null, 2));
 
 async function executableInfo(path, buildInfoPath) {
   if (typeof path !== 'string' || typeof buildInfoPath !== 'string') throw new Error('Pass the native release executable and its exact build-info JSON.');
@@ -427,6 +441,177 @@ async function stabilityRun(app) {
   return { warmupCycles: policy.warmupCycles, idleCalibration: idle, bounds, samples, verdict: stabilityVerdict(samples, bounds, policy.warmupCycles) };
 }
 
+async function observeFinalStabilityRoles(app, sample) {
+  const before = new Date().toISOString();
+  const processes = sample.ownedProcesses.map(({ pid, creationFileTime }) => ({ pid, creationFileTime }));
+  const spec = Buffer.from(JSON.stringify({
+    pid: app.identity.pid, creationFileTime: app.identity.creationFileTime, executable: app.info.path, processes,
+  })).toString('base64');
+  const code = String.raw`
+$ErrorActionPreference='Stop'
+function Emit($value) { [Console]::WriteLine(($value | ConvertTo-Json -Depth 6 -Compress)) }
+$probe=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${spec}')) | ConvertFrom-Json
+function Is-OriginalManager {
+  $owner=Get-Process -Id $probe.pid -ErrorAction SilentlyContinue
+  return ($owner -and $owner.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() -ceq $probe.creationFileTime -and
+    [string]::Equals($owner.MainModule.FileName,$probe.executable,[StringComparison]::OrdinalIgnoreCase))
+}
+if (-not (Is-OriginalManager)) { Emit @{status='manager-not-running-or-changed';roles=@()}; return }
+$expected=@{}
+foreach ($item in $probe.processes) { $expected[[int]$item.pid]=[string]$item.creationFileTime }
+$filter=($expected.Keys | ForEach-Object { 'ProcessId='+$_ }) -join ' OR '
+$rows=@(Get-CimInstance Win32_Process -Filter $filter -Property ProcessId,ParentProcessId,CreationDate,Name,ExecutablePath,CommandLine)
+$roles=@(foreach ($row in $rows) {
+  $key=[int]$row.ProcessId
+  if (-not $expected.ContainsKey($key) -or -not $row.CreationDate -or -not $row.ExecutablePath) { continue }
+  $process=Get-Process -Id $key -ErrorAction SilentlyContinue
+  if (-not $process) { continue }
+  try {
+    $created=$process.StartTime.ToUniversalTime().ToFileTimeUtc()
+    $cimCreated=$row.CreationDate.ToUniversalTime().ToFileTimeUtc()
+    if ($created.ToString() -cne $expected[$key] -or [Math]::Abs($created-$cimCreated) -ge 10000 -or
+      -not [string]::Equals($process.MainModule.FileName,$row.ExecutablePath,[StringComparison]::OrdinalIgnoreCase)) { continue }
+    $role='unknown'
+    $version=$null
+    if ($key -eq $probe.pid) { $role='manager' }
+    elseif ($row.Name -ieq 'msedgewebview2.exe') {
+      $version=$process.MainModule.FileVersionInfo.ProductVersion
+      if ($row.CommandLine -match '(?:^|\s)"?--type=([a-z-]+)"?(?:\s|$)') { $role='webview-'+$Matches[1] }
+      elseif ($row.CommandLine -and $row.CommandLine -notmatch '(?:^|\s)"?--type\b') { $role='webview-browser' }
+    }
+    @{pid=$key;creationFileTime=$created.ToString();parentPid=[int]$row.ParentProcessId;role=$role;runtimeProductVersion=$version}
+  } catch { continue }
+})
+if (-not (Is-OriginalManager)) { Emit @{status='manager-exited-during-observation';roles=@()}; return }
+Emit @{status='observed';roles=$roles}
+`;
+  const observation = { phase: 'after-final-sample-before-normal-exit', finalSampleObservedAt: sample.observedAt, startedAt: before };
+  try {
+    const [{ execFile }, { promisify }] = await Promise.all([import('node:child_process'), import('node:util')]);
+    const { stdout } = await promisify(execFile)('pwsh.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(code, 'utf16le').toString('base64')], { windowsHide: true, timeout: 10000, maxBuffer: 64 * 1024 });
+    const result = JSON.parse(stdout.trim());
+    if (!Array.isArray(result?.roles) || result.roles.some(row => !processes.some(process =>
+      process.pid === row.pid && process.creationFileTime === row.creationFileTime))) {
+      throw new Error('Role observation does not match the final sample identities.');
+    }
+    Object.assign(observation, result);
+  } catch (error) {
+    Object.assign(observation, { status: 'unavailable', roles: [], errorCode: error.code || error.name });
+  }
+  observation.unmatched = processes.filter(process => !observation.roles.some(row =>
+    row.pid === process.pid && row.creationFileTime === process.creationFileTime));
+  observation.finishedAt = new Date().toISOString();
+  return observation;
+}
+
+async function detailIsolationCycle(app, index, retain, after) {
+  const step = async (phase, operation, fields = {}) => {
+    const observation = await app.call(operation, fields);
+    if (after) await after(phase, observation);
+  };
+  await step('search-skill', 'search', { index: index % 1000 });
+  await step('clear-skill-search', 'clear');
+  await step('filter-github', 'filter', { github: true });
+  await step('filter-all', 'filter', { github: false });
+  await step('search-document', 'search', { index: 0 });
+  await step('open-document', 'openDocument', { index: 0 });
+  await step('switch-home', 'tab', { home: true });
+  await step('switch-document', 'tab', { home: false });
+  if (retain) await step('retain-document-return-home', 'tab', { home: true });
+  else await step('close-document', 'closeDocument', { index: 0 });
+  await step('clear-document-search', 'clear');
+}
+
+async function detailIsolationRun(app, settings) {
+  const { variant, cycles, intervalMs, warmupCycles, preparationIdleMs, finalIdleOffsetsMs } = settings;
+  const retain = variant === 'retain-document';
+  const diagnostic = report.detailIsolation = {
+    ...settings, cyclesObserved: [], finalIdle: [], visibleTaskChanges: 0,
+  };
+  const initialTasks = (await app.call('tasks')).tasks;
+  if (initialTasks.some(task => ['queued', 'running'].includes(task.status))) {
+    throw new Error('Detail isolation began with an active task.');
+  }
+  const taskIdentity = tasks => tasks.map(({ id, action, status }) => JSON.stringify([id, action, status])).sort();
+  const baselineTasks = JSON.stringify(taskIdentity(initialTasks));
+  diagnostic.initialVisibleTasks = taskIdentity(initialTasks).map(value => JSON.parse(value));
+  const assertVisibleTasks = async () => {
+    const tasks = (await app.call('tasks')).tasks;
+    if (JSON.stringify(taskIdentity(tasks)) !== baselineTasks) {
+      diagnostic.visibleTaskChanges++;
+      throw new Error('The navigation-only diagnostic changed the visible task list.');
+    }
+  };
+  const assertDetailTab = async expected => {
+    const observed = await app.call('state', { name: 'Perf Skill 0000', scope: '工作区标签' });
+    const rows = (Array.isArray(observed) ? observed : observed ? [observed] : [])
+      .filter(row => row.type === 'ControlType.TabItem');
+    if (rows.length !== expected || rows.some(row => !row.enabled || row.selected)) {
+      throw new Error('The exact document tab did not remain hidden, or did not close, at the cycle boundary.');
+    }
+    return rows.length;
+  };
+  await assertDetailTab(0);
+  for (let index = 0; index < warmupCycles; index++) {
+    await detailIsolationCycle(app, index, retain);
+    await assertDetailTab(retain ? 1 : 0);
+  }
+  await sleep(preparationIdleMs);
+  diagnostic.baseline = await idleSample(app, 0);
+  await assertVisibleTasks();
+  await emit('detail-isolation-baseline', { variant, ...diagnostic.baseline });
+
+  const start = performance.now();
+  for (let index = 1; index <= cycles; index++) {
+    const scheduledOffsetMs = index * intervalMs;
+    await sleep(start + scheduledOffsetMs - performance.now());
+    const cycleRecord = { cycle: index, scheduledOffsetMs, startedElapsedMs: performance.now() - start,
+      startingDetailTabCount: await assertDetailTab(retain ? 1 : 0), stages: [] };
+    diagnostic.cyclesObserved.push(cycleRecord);
+    const after = async (phase, observation) => {
+      const memory = await app.call('memory');
+      const stage = { phase, elapsedMs: performance.now() - start, memory,
+        ...(observation?.durationMs === undefined ? {} : { nativeObservation: observation }) };
+      cycleRecord.stages.push(stage);
+      await emit('detail-isolation-stage', { variant, cycle: index, ...stage });
+    };
+    await after('cycle-start');
+    await detailIsolationCycle(app, index - 1 + warmupCycles, retain, after);
+    cycleRecord.endingDetailTabCount = await assertDetailTab(retain ? 1 : 0);
+    await assertVisibleTasks();
+    cycleRecord.finishedElapsedMs = performance.now() - start;
+    await emit('detail-isolation-cycle', { variant, cycle: index, scheduledOffsetMs,
+      startedElapsedMs: cycleRecord.startedElapsedMs, finishedElapsedMs: cycleRecord.finishedElapsedMs,
+      startingDetailTabCount: cycleRecord.startingDetailTabCount, endingDetailTabCount: cycleRecord.endingDetailTabCount });
+    if (index < cycles && performance.now() - start >= (index + 1) * intervalMs) {
+      throw new Error('Detail isolation overran the next fixed slot; no catch-up action was sent.');
+    }
+  }
+
+  const idleStart = performance.now();
+  for (const scheduledOffsetMs of finalIdleOffsetsMs) {
+    await sleep(idleStart + scheduledOffsetMs - performance.now());
+    const sample = await idleSample(app, 0);
+    sample.scheduledOffsetMs = scheduledOffsetMs;
+    sample.elapsedMs = performance.now() - idleStart;
+    diagnostic.finalIdle.push(sample);
+    await emit('detail-isolation-final-idle', { variant, ...sample });
+  }
+  await assertVisibleTasks();
+  const final = diagnostic.finalIdle.at(-1);
+  diagnostic.finalRoles = await observeFinalStabilityRoles(app, final);
+  const groups = [diagnostic.baseline.ownedProcesses,
+    ...diagnostic.cyclesObserved.flatMap(cycle => cycle.stages.map(stage => stage.memory.processes)),
+    ...diagnostic.finalIdle.map(sample => sample.ownedProcesses)];
+  const requiredRoles = ['manager', 'webview-browser', 'webview-renderer'];
+  const hasStableRole = role => diagnostic.finalRoles.roles.some(process => process.role === role && groups.every(group =>
+    group.some(row => row.pid === process.pid && row.creationFileTime === process.creationFileTime)));
+  if (diagnostic.finalRoles.status !== 'observed' || diagnostic.finalRoles.unmatched.length || !requiredRoles.every(hasStableRole)) {
+    throw new Error('Final role observation did not bind the same manager, WebView browser and renderer across the diagnostic.');
+  }
+}
+
 function exactOfficialDownload(specification) {
   return Object.entries(officialDownload).every(([key, value]) => specification?.[key] === value);
 }
@@ -592,7 +777,7 @@ try {
       }
       report.startup.verdict = { cold: startupComparison(report.startup.baseline.cold, report.startup.candidate.cold), warm: startupComparison(report.startup.baseline.warm, report.startup.candidate.warm) };
     }
-    if (['probe', 'interactive', 'loads', 'stability', 'all'].includes(suite)) {
+    if (['probe', 'interactive', 'loads', 'stability', 'all', 'detail-isolation'].includes(suite)) {
       let app;
       try {
         app = await launch(report.candidate, mixed, 'candidate-mixed-1000-100');
@@ -612,6 +797,7 @@ try {
           else await sampledLoads(app, loadKind, index => sampledStage(app, mixed, stageSeeds[index]), stageSeeds.length);
         }
         if (['stability', 'all'].includes(suite)) report.stability = await stabilityRun(app);
+        if (suite === 'detail-isolation') await detailIsolationRun(app, report.detailIsolationPolicy);
       } finally { await close(app); }
     }
     if (suite === 'download-resume') await downloadRestartContinue(report.candidate, mixed);
@@ -624,6 +810,8 @@ try {
       report.status = 'failed';
     } else if (suite === 'probe') {
       report.status = 'diagnostic-only';
+    } else if (suite === 'detail-isolation') {
+      report.status = 'diagnostic-detail-isolation-collected';
     } else if (suite === 'all' && gates.length === 7 && gates.every(status => status === 'passed')) {
       report.status = !loadsPassed ? 'measured-gates-passed-load-coverage-incomplete'
         : strictLoadGates.every(status => status === 'passed') ? 'passed' : 'measured-gates-passed-load-samples-incomplete';
