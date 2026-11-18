@@ -26,7 +26,7 @@ foreach ($path in @($temp, $setupFile.DirectoryName)) {
 if (Test-Path -LiteralPath $root) { throw 'The wizard fixture must be fresh.' }
 
 $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Skill Manager'
-$expectedDefault = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager'
+$expectedDefault = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\app'
 $app = Join-Path $root 'custom-app'
 $installedExe = Join-Path $app 'agent-resource-manager.exe'
 $shortcut = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Agent Resource Manager.lnk'
