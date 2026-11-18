@@ -1,4 +1,4 @@
-name: Verify Windows installation wizard
+name: Verify installed Windows first launch
 on: create
 permissions:
   contents: read
@@ -8,7 +8,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   package:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/installer-wizard-316c0ba7-r2' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/installed-first-launch-316c0ba7' }}
     runs-on: windows-latest
     env:
       # The validation ref consumes the existing finalized candidate.
@@ -46,7 +46,7 @@ jobs:
           $setupLine = @(Get-Content -LiteralPath (Join-Path $assetDirectory 'SHA256SUMS.txt') |
             Where-Object { $_ -cmatch ('^[0-9a-f]{64}  ' + [regex]::Escape($name) + '$') })
           if ($setupLine.Count -ne 1) { throw 'Expected exactly one packaged setup checksum' }
-          ./scripts/verify-installed-wizard.ps1 -Setup (Join-Path $assetDirectory $name) -SetupSha256 ($setupLine[0].Substring(0, 64)) -ExecutableSha256 $env:EXPECTED_EXECUTABLE_SHA256 -Version $env:VERIFIED_VERSION
+          ./scripts/verify-installed-wizard.ps1 -Setup (Join-Path $assetDirectory $name) -SetupSha256 ($setupLine[0].Substring(0, 64)) -ExecutableSha256 $env:EXPECTED_EXECUTABLE_SHA256 -Version $env:VERIFIED_VERSION -VerifyFirstLaunch
       - name: Upload graphical installation verification
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
