@@ -1,0 +1,166 @@
+name: Verify hosted Windows check overlap and original stability
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  CANDIDATE_RUN_ID: '44369125710'
+  CANDIDATE_SOURCE: 371eb5dea6d902dbc7ef75666f366570e05970c0
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_371eb5dea6d902dbc7ef75666f366570e05970c0
+  CANDIDATE_ARTIFACT_ID: '14459231544'
+  CANDIDATE_SHA256: f33c6722446e8069414fb04c85c411e8a3c5c06999e93f3ebadcf27d42b779e9
+jobs:
+  measure:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-check-stability-371eb5d' }}
+    runs-on: windows-latest
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: check
+            measurementTimeout: 20
+          - suite: stability
+            measurementTimeout: 47
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      SUITE: ${{ matrix.suite }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Verify hosted runner and exact candidate provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Pin the independently verified candidate artifact ID and executable SHA256 before measurement.'
+          }
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no existing manager in the isolated runner.' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
+              $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push' -or
+              $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+          $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID) { throw 'The exact Windows candidate artifact is missing.' }
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }
+          $exe = Join-Path $candidate 'agent-resource-manager.exe'
+          $source = Join-Path $candidate 'BUILD_INFO.json'
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:CANDIDATE_SHA256 -or $info.executableSha256 -cne $digest -or
+              $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or
+              $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
+              $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the pinned executable.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+          Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
+      - name: Measure the selected native workload
+        timeout-minutes: ${{ matrix.measurementTimeout }}
+        run: |
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          if (Test-Path -LiteralPath $root) { throw 'Expected a fresh native measurement directory.' }
+          $arguments = @('--accessibility-input',
+            '--candidate', (Join-Path $candidate 'agent-resource-manager.exe'),
+            '--candidate-build-info', (Join-Path $candidate 'BUILD_INFO.native-validation.json'))
+          if ($env:SUITE -ceq 'check') {
+            $arguments += @('--suite', 'loads', '--load-kind', 'check', '--sample-overlap', 'true')
+          } else {
+            $arguments += @('--suite', 'stability')
+          }
+          $PSNativeCommandUseErrorActionPreference = $false
+          & node scripts/verify-uia-performance.mjs @arguments
+          exit $LASTEXITCODE
+      - name: Preserve raw synthetic evidence and evaluate the selected workload
+        if: ${{ always() }}
+        run: |
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          $outputs = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue)
+          if ($outputs.Count -ne 1) { throw 'Expected one isolated measurement directory.' }
+          $out = $outputs[0].FullName
+          $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-native-performance-evidence')
+          foreach ($name in @('report.json','observations.jsonl','policy-before-run.json','convergence-bounds-before-loop.json','candidate-mixed-1000-100-driver.json')) {
+            $path = Join-Path $out $name
+            if (Test-Path -LiteralPath $path -PathType Leaf) { Copy-Item -LiteralPath $path -Destination $evidence.FullName }
+          }
+          $descriptor = Join-Path $out 'mixed-native-fixture/dataset.json'
+          if (Test-Path -LiteralPath $descriptor -PathType Leaf) {
+            $datasetDirectory = New-Item -ItemType Directory -Path (Join-Path $evidence.FullName 'mixed-native-fixture')
+            Copy-Item -LiteralPath $descriptor -Destination $datasetDirectory.FullName
+          }
+          $reportPath = Join-Path $evidence.FullName 'report.json'
+          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          $driver = Get-Content -LiteralPath (Join-Path $evidence.FullName 'candidate-mixed-1000-100-driver.json') -Raw | ConvertFrom-Json
+          $events = Get-Content -LiteralPath (Join-Path $evidence.FullName 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
+          $starts = @($events | Where-Object { $_.kind -ceq 'native-startup' })
+          $exits = @($events | Where-Object { $_.kind -ceq 'native-normal-exit' })
+          $dataDir = Join-Path $out 'mixed-native-fixture\data'
+          if ($report.candidate.source -cne $env:CANDIDATE_SOURCE -or $report.candidate.sha256 -cne $env:CANDIDATE_SHA256 -or
+              $report.candidate.releaseProvenanceVerified -ne $true -or $report.harnessChangedDuringRun -ne $false -or
+              $report.nativeErrors.Count -ne 0 -or $report.error -or $report.foregroundFailure -or
+              $driver.readinessMode -cne 'strict-skill-list' -or $driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or
+              $driver.dataDirectory -ne $dataDir -or $report.dataset.dataDir -ne $dataDir -or
+              $driver.datasetDescriptorSha256 -cne (Get-FileHash -LiteralPath $descriptor -Algorithm SHA256).Hash.ToLowerInvariant() -or
+              $report.dataset.syntheticOnly -ne $true -or $report.dataset.skillCount -ne 1000 -or $report.dataset.toolCount -ne 100 -or
+              $starts.Count -ne 1 -or $starts[0].completeBackendStartup -ne $true -or $starts[0].pid -ne $driver.pid -or
+              $starts[0].creationFileTime -cne $driver.creationFileTime -or $starts[0].windowHandle -ne $driver.windowHandle -or
+              $starts[0].executableSha256 -cne $env:CANDIDATE_SHA256 -or $starts[0].sourceIdentity -cne $env:CANDIDATE_SOURCE -or
+              $exits.Count -ne 1 -or $exits[0].closedNormally -ne $true -or $driver.closedNormally -ne $true -or
+              $exits[0].pid -ne $driver.pid -or $exits[0].creationFileTime -cne $driver.creationFileTime) {
+            throw 'The native evidence did not bind the expected candidate, synthetic dataset, strict startup and normal exit.'
+          }
+          if ($env:SUITE -ceq 'check') {
+            $PSNativeCommandUseErrorActionPreference = $false
+            $recomputed = & node scripts/verify-sampled-load-evidence.mjs $env:CANDIDATE_SHA256 $reportPath
+            $replayExit = $LASTEXITCODE
+            $recomputed | Set-Content -LiteralPath (Join-Path $evidence.FullName 'check-replay.json') -Encoding utf8NoBOM
+            $replay = $recomputed | ConvertFrom-Json
+            $check = $replay.workloads.check
+            $summary = [ordered]@{suite='check'; replayExit=$replayExit; completedTasks=$check.completedTasks
+              acceptedInputs=$check.sampleOverlap.acceptedInputs; originalP95=$check.originalP95; limitedTolerance=$check.limitedTolerance}
+            $summary | ConvertTo-Json -Compress
+            if ($replayExit -ne 2 -or $replay.status -cne 'incomplete' -or $replay.reasons.Count -ne 0 -or
+                @($replay.missingWorkloads).Count -ne 2 -or 'download' -cnotin $replay.missingWorkloads -or
+                'update' -cnotin $replay.missingWorkloads -or $check.sampleOverlap.acceptedInputs -ne 400) {
+              throw 'Check-only replay did not independently verify exactly 400 overlaps.'
+            }
+            foreach ($name in @('search','filter','tab','document')) {
+              if ($check.sampleOverlap.categories.$name.count -ne 100) { throw "Expected exactly 100 verified $name overlaps." }
+            }
+            if ($check.originalP95 -cne 'passed' -or $check.limitedTolerance -cne 'passed') {
+              throw 'Check was measured but did not pass both existing thresholds. See its independent replay.'
+            }
+            if ($report.status -cne 'passed-sampled-native-check-only') { throw 'The independent result and the original check result disagree.' }
+          } else {
+            $summary = [ordered]@{suite='stability'; executableSha256=$report.candidate.sha256; normalExits=$exits.Count
+              reportSha256=(Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              samples=$report.stability.samples.Count; durationMs=$report.stability.samples[-1].elapsedMs
+              verdict=$report.stability.verdict; finalRoleObservation=$report.finalStabilityRoles}
+            $summary | ConvertTo-Json -Depth 10 -Compress
+            if ($report.suite -cne 'stability' -or $summary.samples -ne 61 -or $summary.durationMs -lt 1800000 -or
+                $report.stability.idleCalibration.Count -ne 11 -or $report.stability.warmupCycles -ne 5 -or
+                $report.stability.verdict.status -cne 'passed') { throw 'Stability did not meet the existing policy.' }
+          }
+          exit 0
+      - name: Upload only synthetic measurement evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        with:
+          name: Agent_Resource_Manager_native_${{ matrix.suite }}_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-native-performance-evidence/
+          if-no-files-found: warn
+          retention-days: 14
