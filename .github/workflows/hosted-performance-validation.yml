@@ -1,4 +1,4 @@
-name: Verify hosted Windows stability and final process roles
+name: Diagnose memory with and without local checks on one hosted Windows machine
 on: create
 permissions:
   contents: read
@@ -7,45 +7,16 @@ env:
   CANDIDATE_RUN_ID: '44349985187'
   CANDIDATE_SOURCE: d2883c225a13af1e2f6b3c6597bf6ec90ae4d55b
   CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_d2883c225a13af1e2f6b3c6597bf6ec90ae4d55b
+  CANDIDATE_ARTIFACT_ID: '14450760358'
+  CANDIDATE_SHA256: 00f3b75bd175ca0433bf477ecf79f8fdfa941c1f0ebe6760c6e107d8f62fe17c
 jobs:
-  candidate:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-stability-d2883c2' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 18
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Wait for the exact development build
-        shell: pwsh
-        run: |
-          for ($tick = 0; $tick -lt 60; $tick++) {
-            $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
-            if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
-                $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push') { throw 'Wrong candidate build identity.' }
-            if ($run.status -ceq 'completed') {
-              if ($run.conclusion -cne 'success') { throw 'The exact Windows build failed.' }
-              $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
-              if ($LASTEXITCODE -ne 0 -or @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired }).Count -ne 1) {
-                throw 'The exact Windows candidate artifact is missing.'
-              }
-              exit 0
-            }
-            Start-Sleep -Seconds 15
-          }
-          throw 'Timed out waiting for the bound build.'
   measure:
-    needs: candidate
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-memory-isolation-d2883c2' }}
     runs-on: windows-latest
-    timeout-minutes: 55
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [stability]
+    timeout-minutes: 27
     defaults:
       run:
         shell: pwsh
-    env:
-      SUITE: ${{ matrix.suite }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -53,7 +24,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-      - name: Verify runner and pinned executables
+      - name: Verify hosted runner and exact candidate provenance
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -61,6 +32,13 @@ jobs:
               -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
               -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
           if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no existing manager in the isolated runner.' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
+              $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push' -or
+              $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+          $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID) { throw 'The exact Windows candidate artifact is missing.' }
           ./scripts/verify-native-uia.ps1 -CompileOnly
           $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
           gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
@@ -69,57 +47,96 @@ jobs:
           $source = Join-Path $candidate 'BUILD_INFO.json'
           $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
           $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($info.executableSha256 -cne $digest -or $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or
-              $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or $info.workflowRunAttempt -ne 1 -or
-              $info.repository -cne $env:GITHUB_REPOSITORY -or $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the executable.' }
+          if ($digest -cne $env:CANDIDATE_SHA256 -or $info.executableSha256 -cne $digest -or
+              $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or
+              $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
+              $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the pinned executable.' }
           $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
           $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
           $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
-          "CANDIDATE_SHA256=$digest" >> $env:GITHUB_ENV
           Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
-      - name: Measure the scheduled native workload
+      - name: Run two short memory diagnostics on the same machine
+        timeout-minutes: 23
         run: |
           $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
           $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
           if (Test-Path -LiteralPath $root) { throw 'Expected a fresh native measurement directory.' }
-          $arguments = @('--suite', $env:SUITE, '--accessibility-input',
-            '--candidate', (Join-Path $candidate 'agent-resource-manager.exe'),
-            '--candidate-build-info', (Join-Path $candidate 'BUILD_INFO.native-validation.json'))
-          & node scripts/verify-uia-performance.mjs @arguments
-          exit $LASTEXITCODE
-      - name: Preserve reports and check the scheduled result
-        if: ${{ always() }}
-        run: |
-          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
-          $outputs = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue)
-          if ($outputs.Count -ne 1) { throw 'Expected one isolated measurement directory.' }
-          $out = $outputs[0].FullName
-          $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-native-performance-evidence')
-          Get-ChildItem -LiteralPath $out -File | Where-Object {
-            $_.Name -in @('report.json','observations.jsonl','policy-before-run.json','convergence-bounds-before-loop.json') -or
-            $_.Name -like '*-driver.json'
-          } | Copy-Item -Destination $evidence.FullName
-          $reportPath = Join-Path $out 'report.json'
-          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-          if ($report.suite -cne $env:SUITE -or $report.candidate.source -cne $env:CANDIDATE_SOURCE -or $report.candidate.sha256 -cne $env:CANDIDATE_SHA256 -or
-              $report.harnessChangedDuringRun -ne $false -or $report.nativeErrors.Count -ne 0 -or $report.error) { throw 'The exact native workload did not finish cleanly.' }
-          $events = Get-Content -LiteralPath (Join-Path $out 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
-          $exits = @($events | Where-Object { $_.kind -ceq 'native-normal-exit' -and $_.closedNormally -eq $true })
-          $summary = [ordered]@{suite=$env:SUITE; executableSha256=$report.candidate.sha256
-            reportSha256=(Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            normalExits=$exits.Count}
-          $summary.samples = $report.stability.samples.Count
-          $summary.durationMs = $report.stability.samples[-1].elapsedMs
-          $summary.verdict = $report.stability.verdict
-          $summary.finalRoleObservation = $report.finalStabilityRoles
-          $summary | ConvertTo-Json -Depth 10 -Compress
-          if ($exits.Count -ne 1 -or $summary.samples -ne 61 -or $summary.durationMs -lt 1800000 -or
-              $report.stability.verdict.status -cne 'passed') { throw 'Stability did not meet the existing policy.' }
-      - name: Upload only measurement evidence
+          $audit = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-memory-isolation-evidence')
+          $sessions = @()
+          foreach ($variant in @('navigation-only','navigation-with-checks')) {
+            $target = New-Item -ItemType Directory -Path (Join-Path $audit.FullName $variant)
+            $record = [ordered]@{ variant=$variant; diagnosticOnly=$true; exitCode=$null; closedNormally=$false; error=$null }
+            try {
+              if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) {
+                throw 'A manager process still exists. No new session was started.'
+              }
+              $before = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+              $PSNativeCommandUseErrorActionPreference = $false
+              & node scripts/verify-uia-performance.mjs --suite memory-isolation --memory-variant $variant --accessibility-input --candidate (Join-Path $candidate 'agent-resource-manager.exe') --candidate-build-info (Join-Path $candidate 'BUILD_INFO.native-validation.json')
+              $record.exitCode = $LASTEXITCODE
+              $new = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notin $before })
+              if ($new.Count -ne 1) { throw 'Expected one new native diagnostic directory.' }
+              foreach ($name in @('report.json','observations.jsonl','policy-before-run.json','candidate-mixed-1000-100-driver.json','mixed-native-fixture/dataset.json')) {
+                $source = Join-Path $new[0].FullName $name
+                if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $target.FullName }
+              }
+              $report = Get-Content -LiteralPath (Join-Path $target.FullName 'report.json') -Raw | ConvertFrom-Json
+              $driver = Get-Content -LiteralPath (Join-Path $target.FullName 'candidate-mixed-1000-100-driver.json') -Raw | ConvertFrom-Json
+              $events = Get-Content -LiteralPath (Join-Path $target.FullName 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
+              $exits = @($events | Where-Object { $_.kind -ceq 'native-normal-exit' -and $_.closedNormally -eq $true })
+              $record.closedNormally = $exits.Count -eq 1 -and $driver.closedNormally -eq $true -and
+                $exits[0].pid -eq $driver.pid -and $exits[0].creationFileTime -ceq $driver.creationFileTime
+              $expectedChecks = if ($variant -ceq 'navigation-only') { 0 } else { 6 }
+              $diagnostic = $report.memoryIsolation
+              $descriptor = Get-FileHash -LiteralPath (Join-Path $target.FullName 'dataset.json') -Algorithm SHA256
+              $dataDir = Join-Path $new[0].FullName 'mixed-native-fixture\data'
+              if ($record.exitCode -ne 0 -or -not $record.closedNormally -or
+                  $report.status -cne 'diagnostic-memory-isolation-collected' -or $report.suite -cne 'memory-isolation' -or
+                  $report.harnessChangedDuringRun -ne $false -or $report.nativeErrors.Count -ne 0 -or $report.error -or
+                  $report.candidate.sha256 -cne $env:CANDIDATE_SHA256 -or $report.candidate.source -cne $env:CANDIDATE_SOURCE -or
+                  $driver.readinessMode -cne 'strict-skill-list' -or $driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or
+                  $driver.dataDirectory -ne $dataDir -or $report.dataset.dataDir -ne $dataDir -or
+                  $driver.datasetDescriptorSha256 -cne $descriptor.Hash.ToLowerInvariant() -or
+                  $report.dataset.syntheticOnly -ne $true -or $report.dataset.skillCount -ne 1000 -or $report.dataset.toolCount -ne 100 -or
+                  $diagnostic.variant -cne $variant -or $diagnostic.diagnosticOnly -ne $true -or
+                  $diagnostic.samples.Count -ne 12 -or $diagnostic.checks.Count -ne $expectedChecks -or
+                  $diagnostic.finalRoles.status -cne 'observed' -or $diagnostic.finalRoles.unmatched.Count -ne 0) {
+                throw 'The exact isolated diagnostic did not collect its full timed samples, unique tasks, role identities and normal exit.'
+              }
+              $record['process'] = [ordered]@{pid=$driver.pid; creationFileTime=$driver.creationFileTime; windowHandle=$driver.windowHandle}
+              $record['startupMs'] = $driver.startupMs
+              $record['fixtureFingerprint'] = $report.dataset.dataFingerprint
+              $record['dataDirectory'] = $report.dataset.dataDir
+              $record['host'] = $report.machine.hostname
+              $record['protocol'] = [ordered]@{warmupCycles=$diagnostic.warmupCycles; preparationIdleMs=$diagnostic.preparationIdleMs; intervalMs=$diagnostic.intervalMs; cycles=$diagnostic.cycles}
+              $record['checks'] = $diagnostic.checks.Count
+              $record['durationMs'] = $diagnostic.samples[-1].elapsedMs
+              $record['privateBytesByProcess'] = $diagnostic.privateBytesByProcess
+              $record['webviewVersions'] = @($diagnostic.finalRoles.roles | Where-Object runtimeProductVersion |
+                Select-Object -ExpandProperty runtimeProductVersion -Unique | Sort-Object)
+              if ($record.webviewVersions.Count -ne 1) { throw 'Expected one verified WebView2 client version in this session.' }
+            } catch {
+              $record.error = $_.Exception.Message
+            }
+            $sessions += $record
+            [ordered]@{diagnosticOnly=$true; stabilityAcceptanceClaimed=$false; candidateSha256=$env:CANDIDATE_SHA256; sessions=$sessions} |
+              ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $audit.FullName 'memory-isolation-summary.json') -Encoding utf8NoBOM
+            $record | ConvertTo-Json -Depth 8 -Compress
+          }
+          $control,$withChecks = $sessions
+          if ($control.error -or $withChecks.error -or $control.host -cne $withChecks.host -or
+              $control.fixtureFingerprint -cne $withChecks.fixtureFingerprint -or $control.dataDirectory -eq $withChecks.dataDirectory -or
+              $control.webviewVersions[0] -cne $withChecks.webviewVersions[0] -or
+              ($control.process.pid -eq $withChecks.process.pid -and $control.process.creationFileTime -ceq $withChecks.process.creationFileTime) -or
+              ($control.protocol | ConvertTo-Json -Compress) -cne ($withChecks.protocol | ConvertTo-Json -Compress)) {
+            throw 'A comparable pair was not established. See the diagnostic summary and its original reports.'
+          }
+          exit 0
+      - name: Upload only synthetic memory diagnostic evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_native_${{ matrix.suite }}_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arm-native-performance-evidence/
+          name: Agent_Resource_Manager_native_memory_isolation_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-memory-isolation-evidence/
           if-no-files-found: warn
           retention-days: 14

@@ -63,11 +63,19 @@ if (options.help) {
   console.log('Optional --sample-overlap true with --suite loads and one explicit --load-kind collects 100 verified samples per category with a 12-minute measurement budget. Check uses serial local checks. Download uses one pinned official asset at 1 KiB/s in one fresh isolated directory (approximately eleven minutes). Update accepts two to twelve separately prepared --stage-fixture paths and stages them serially without switching originals. Reports insufficient overlap separately.');
   console.log('Optional --interaction-kind document is restricted to --suite interactive without load selection or specifications. It resumes only the original document category with the same unmeasured preparation, one hundred measured inputs and thresholds. Success is document-only partial evidence, not a complete interactive or all-suite pass. Omit it for the original four-category run.');
   console.log('Short --suite download-resume --download-spec <existing pinned official spec> creates one fresh approved download directory, starts one native download, normally quits with partial bytes, reopens the same isolated data and explicitly continues via its native history. It runs no interaction/stability loop and makes no performance claim. The existing --accessibility-input, --popup-select true and --await-foreground true setup options are available.');
+  console.log('Hosted-only --suite memory-isolation --memory-variant navigation-only|navigation-with-checks --accessibility-input records one short diagnostic with fresh synthetic data, not a stability or convergence verdict.');
   console.log('Optional --existing-stdio-proof <json> forwards only an explicitly frozen arm-pinned-existing-stdio-v1 manifest matching the candidate SHA to the unchanged ownership preflight; it does not permit a running GUI/backend.');
   process.exit(0);
 }
 const requestedTransportSha256 = transportDigest(options['transport-file-sha256']);
 const suite = options.suite || 'all';
+const memoryVariant = options['memory-variant'];
+if (suite === 'memory-isolation') {
+  const allowed = ['suite', 'memory-variant', 'accessibility-input', 'candidate', 'candidate-build-info'];
+  if (process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows' ||
+      !['navigation-only', 'navigation-with-checks'].includes(memoryVariant) || options['accessibility-input'] !== true ||
+      Object.keys(options).some(key => !allowed.includes(key))) throw new Error('Memory isolation requires the fixed hosted Windows accessibility diagnostic options.');
+} else if (memoryVariant !== undefined) throw new Error('--memory-variant requires --suite memory-isolation.');
 const interactionKind = validateInteractionSelection(options, suite);
 const loadKind = validateLoadSelection(options, suite);
 const sampleOverlap = validateOverlapSampling(options, suite, loadKind, stageFixturePaths, downloadSpecCount);
@@ -90,7 +98,7 @@ const popupSelection = options['popup-select'] === 'true';
 if (popupSelection && (!['loads', 'download-resume'].includes(suite) || !options['accessibility-input'] || foregroundSelection || closedSelection)) throw new Error('--popup-select requires the accessibility-only loads or download-resume suite without either other select mode.');
 const inputCondition = options['accessibility-input'] ? 'native-accessibility-input-to-painted-result' : 'native-ui-input-to-painted-result';
 if (options['concurrent-observation'] && !options['accessibility-input']) throw new Error('Concurrent observation requires explicit --accessibility-input.');
-if (!['prepare', 'probe', 'startup', 'interactive', 'loads', 'stability', 'all', 'download-resume'].includes(suite)) throw new Error('Unsupported native acceptance suite.');
+if (!['prepare', 'probe', 'startup', 'interactive', 'loads', 'stability', 'all', 'download-resume', 'memory-isolation'].includes(suite)) throw new Error('Unsupported native acceptance suite.');
 if (suite === 'download-resume' && (!options['download-spec'] || options['stage-fixture'] || options['concurrent-observation'])) throw new Error('download-resume requires only one explicit --download-spec and synchronous native observation; no stage fixture.');
 const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const approvedResourceParent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\resources';
@@ -491,6 +499,68 @@ Emit @{status='observed';roles=$roles}
   return observation;
 }
 
+async function memoryIsolationRun(app, variant) {
+  const cycles = 12, intervalMs = policy.sampleIntervalMs, warmupCycles = policy.warmupCycles;
+  const preparationIdleMs = report.measurement.stabilityPreparationIdleMs;
+  const expectedChecks = variant === 'navigation-with-checks' ? cycles / 2 : 0;
+  const diagnostic = report.memoryIsolation = {
+    variant, diagnosticOnly: true, warmupCycles, preparationIdleMs, intervalMs, cycles, expectedChecks, checks: [], samples: [],
+  };
+  const initial = await app.call('tasks');
+  if (initial.tasks.some(task => ['queued', 'running'].includes(task.status))) throw new Error('The fresh memory diagnostic began with an active task.');
+  const known = new Set(initial.tasks.map(task => task.id));
+  for (let index = 0; index < warmupCycles; index++) await cycle(app, index);
+  await sleep(preparationIdleMs);
+  diagnostic.baseline = await idleSample(app, 0);
+  await emit('memory-isolation-baseline', { variant, ...diagnostic.baseline });
+  const start = performance.now();
+  for (let index = 1; index <= cycles; index++) {
+    await sleep(start + index * intervalMs - performance.now());
+    const cycleStartedElapsedMs = performance.now() - start;
+    const observed = expectedChecks && index % 2 === 1 ? await check(app) : null;
+    await cycle(app, index - 1 + warmupCycles);
+    const sample = await idleSample(app, 0);
+    sample.cycle = index;
+    sample.cycleStartedElapsedMs = cycleStartedElapsedMs;
+    sample.elapsedMs = performance.now() - start;
+    diagnostic.samples.push(sample);
+    await emit('memory-isolation-sample', { variant, ...sample });
+    const next = await app.call('tasks');
+    const newTasks = next.tasks.filter(task => !known.has(task.id));
+    if (observed) {
+      const [task] = newTasks;
+      if (observed.taskIds.length !== 1 || newTasks.length !== 1 || task.id !== observed.taskIds[0] ||
+          task.action !== 'check_now' || task.status !== 'succeeded' ||
+          !(Date.parse(task.finishedAt) >= Date.parse(task.startedAt))) throw new Error('The memory diagnostic did not verify exactly one successful native check.');
+      const { id, action, status, startedAt, finishedAt } = task;
+      const receipt = { cycle: index, id, action, status, startedAt, finishedAt };
+      diagnostic.checks.push(receipt);
+      known.add(id);
+      await emit('memory-isolation-check', { variant, ...receipt });
+    } else if (newTasks.length) throw new Error('The memory diagnostic observed an unexpected native task.');
+    if (index < cycles && performance.now() - start >= (index + 1) * intervalMs) {
+      throw new Error('The short memory diagnostic overran the next fixed slot; no catch-up cycle was sent.');
+    }
+    console.log(JSON.stringify({ phase: 'memory-isolation', variant, cycle: index, elapsedMs: sample.elapsedMs,
+      privateMiB: +(sample.privateBytes / 1048576).toFixed(1), verifiedChecks: diagnostic.checks.length }));
+  }
+  if (diagnostic.checks.length !== expectedChecks) throw new Error('Expected check count was not verified.');
+  const final = diagnostic.samples.at(-1);
+  diagnostic.finalRoles = await observeFinalStabilityRoles(app, final);
+  diagnostic.privateBytesByProcess = diagnostic.finalRoles.roles.map(role => {
+    const bytes = sample => sample.ownedProcesses.find(process =>
+      process.pid === role.pid && process.creationFileTime === role.creationFileTime)?.privateBytes ?? null;
+    const initialPrivateBytes = bytes(diagnostic.baseline), finalPrivateBytes = bytes(final);
+    return { ...role, initialPrivateBytes, finalPrivateBytes,
+      changePrivateBytes: initialPrivateBytes === null ? null : finalPrivateBytes - initialPrivateBytes };
+  });
+  if (diagnostic.finalRoles.status !== 'observed' || diagnostic.finalRoles.unmatched.length ||
+      !['manager', 'webview-browser', 'webview-renderer'].every(role =>
+        diagnostic.privateBytesByProcess.some(process => process.role === role && process.initialPrivateBytes !== null))) {
+    throw new Error('The final identity observation could not bind all sampled processes and three baseline roles.');
+  }
+}
+
 function exactOfficialDownload(specification) {
   return Object.entries(officialDownload).every(([key, value]) => specification?.[key] === value);
 }
@@ -656,7 +726,7 @@ try {
       }
       report.startup.verdict = { cold: startupComparison(report.startup.baseline.cold, report.startup.candidate.cold), warm: startupComparison(report.startup.baseline.warm, report.startup.candidate.warm) };
     }
-    if (['probe', 'interactive', 'loads', 'stability', 'all'].includes(suite)) {
+    if (['probe', 'interactive', 'loads', 'stability', 'all', 'memory-isolation'].includes(suite)) {
       let app;
       try {
         app = await launch(report.candidate, mixed, 'candidate-mixed-1000-100');
@@ -679,6 +749,7 @@ try {
         if (suite === 'stability' && process.env.RUNNER_ENVIRONMENT === 'github-hosted') {
           report.finalStabilityRoles = await observeFinalStabilityRoles(app, report.stability.samples.at(-1));
         }
+        if (suite === 'memory-isolation') await memoryIsolationRun(app, memoryVariant);
       } finally { await close(app); }
     }
     if (suite === 'download-resume') await downloadRestartContinue(report.candidate, mixed);
@@ -689,6 +760,8 @@ try {
     report.status = 'incomplete';
     if (gates.some(status => ['failed', 'invalid'].includes(status)) || (suite === 'all' && strictLoadGates.some(status => ['failed', 'invalid'].includes(status)))) {
       report.status = 'failed';
+    } else if (suite === 'memory-isolation') {
+      report.status = 'diagnostic-memory-isolation-collected';
     } else if (suite === 'probe') {
       report.status = 'diagnostic-only';
     } else if (suite === 'all' && gates.length === 7 && gates.every(status => status === 'passed')) {
