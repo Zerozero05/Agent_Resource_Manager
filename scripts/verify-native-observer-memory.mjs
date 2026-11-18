@@ -23,6 +23,12 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, flag, index
 const releaseClientRequested = process.argv.includes('--release-client');
 if (releaseClientRequested && (args['release-client'] !== 'public-quit' || args.phase !== 'run' || args.variant !== 'churn-control')) throw new Error('Client release is restricted to explicit churn-control --release-client public-quit.');
 const requestedTransportSha256 = args['transport-file-sha256'];
+const rolesOnly = args['roles-only'] !== undefined;
+if (rolesOnly && (args['roles-only'] !== 'true' || args.phase !== 'run'
+  || !['ipc-control', 'churn-control'].includes(args.variant) || releaseClientRequested
+  || process.platform !== 'win32' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.GITHUB_ACTIONS !== 'true')) {
+  throw new Error('Standard process-role observation is limited to the two isolated GitHub-hosted control runs.');
+}
 if (requestedTransportSha256 !== undefined && !/^[a-f0-9]{64}$/i.test(requestedTransportSha256)) throw new Error('--transport-file-sha256 requires one exact SHA256 digest.');
 const json = value => JSON.stringify(value, null, 2) + '\n';
 const digest = async path => createHash('sha256').update(await readFile(path)).digest('hex');
@@ -164,7 +170,7 @@ async function navigate(app, index) {
 async function roles(memory, managerPid) {
   const ids = memory.processes.map(item => Number(item.pid));
   assert.ok(ids.every(Number.isSafeInteger));
-  const command = `$ErrorActionPreference='Stop';$taskIds=@(${ids.join(',')});$taskRows=Get-CimInstance Win32_Process -Filter '${ids.map(id => `ProcessId=${id}`).join(' OR ')}';@(foreach($taskRow in $taskRows){$taskRole='unknown';if($taskRow.ProcessId -eq ${managerPid}){$taskRole='manager'}elseif($taskRow.Name -eq 'msedgewebview2.exe'){$taskRole='webview-browser';if($taskRow.CommandLine -match '--type=([a-zA-Z-]+)'){$taskRole='webview-'+$Matches[1]}};[pscustomobject]@{pid=$taskRow.ProcessId;parentPid=$taskRow.ParentProcessId;creationFileTime=(Get-Process -Id $taskRow.ProcessId -ErrorAction Stop).StartTime.ToUniversalTime().ToFileTimeUtc().ToString();image=$taskRow.Name;role=$taskRole}})|ConvertTo-Json -Compress`;
+  const command = `$ErrorActionPreference='Stop';$taskIds=@(${ids.join(',')});$taskRows=Get-CimInstance Win32_Process -Filter '${ids.map(id => `ProcessId=${id}`).join(' OR ')}';@(foreach($taskRow in $taskRows){$taskRole='unknown';if($taskRow.ProcessId -eq ${managerPid}){$taskRole='manager'}elseif($taskRow.Name -eq 'msedgewebview2.exe'){$taskRole=if($taskRow.CommandLine){'webview-browser'}else{'webview-type-unavailable'};if($taskRow.CommandLine -match '--type=([a-zA-Z-]+)'){$taskRole='webview-'+$Matches[1]}};[pscustomobject]@{pid=$taskRow.ProcessId;parentPid=$taskRow.ParentProcessId;creationFileTime=(Get-Process -Id $taskRow.ProcessId -ErrorAction Stop).StartTime.ToUniversalTime().ToFileTimeUtc().ToString();image=$taskRow.Name;role=$taskRole}})|ConvertTo-Json -Compress`;
   const { stdout } = await execute('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, timeout: 20000, maxBuffer: 128 * 1024 });
   const observed = list(JSON.parse(stdout.trim()));
   for (const row of observed) assert.ok(memory.processes.some(item => item.pid === row.pid && String(item.creationFileTime) === String(row.creationFileTime)), 'Observed process identity must belong to this exact native session.');
@@ -223,19 +229,21 @@ report.harness = await Promise.all(harnessPaths.map(async path => ({ path, sha25
 await writeFile(reportPath, json(report), { flag: 'wx' });
 let app, handoff;
 async function sample(phase) {
-  const value = { phase, observedAt: new Date().toISOString(), application: await app.call('memory'), driver: await app.call('driverMemory') };
+  const value = { phase, observedAt: new Date().toISOString(), application: await app.call('memory'), driver: rolesOnly ? null : await app.call('driverMemory') };
+  if (rolesOnly) value.processRoles = await roles(value.application, app.identity.pid);
   report.samples.push(value); await writeFile(reportPath, json(report));
-  console.log(JSON.stringify({ phase, applicationMiB: value.application.privateBytes / 1048576, driverMiB: value.driver.privateBytes / 1048576 }));
+  console.log(JSON.stringify({ phase, applicationMiB: value.application.privateBytes / 1048576, driverMiB: value.driver ? value.driver.privateBytes / 1048576 : null }));
   return value;
 }
 try {
-  app = await NativeUiaSession.launch({ executable, sha256: build.executableSha256, transportSha256, dataDir: dataset.dataDir, reportPath: join(dataset.root, 'native-driver.json'), accessibilityInput: true, driverMemoryDiagnostic: true, releaseDiagnosticClient: releaseClientRequested });
+  app = await NativeUiaSession.launch({ executable, sha256: build.executableSha256, transportSha256, dataDir: dataset.dataDir, reportPath: join(dataset.root, 'native-driver.json'), accessibilityInput: true, driverMemoryDiagnostic: !rolesOnly, releaseDiagnosticClient: releaseClientRequested });
   report.native = app.identity;
   await sleep(policy.settleMs);
   const initial = stored(dataset);
   assert.ok(initial.tasks.every(task => !['running', 'queued'].includes(task.status)), 'Initial native work must finish before the query-only diagnostic.');
+  report.rolesOnly = rolesOnly;
   const baseline = await sample('before-queries');
-  report.processRoles = await roles(baseline.application, app.identity.pid);
+  report.processRoles = baseline.processRoles ?? await roles(baseline.application, app.identity.pid);
   const started = performance.now(), churn = churnVariants.includes(args.variant);
   if (churn) {
     report.limitations.push('Navigation intentionally changes synthetic workspace state and may refresh file-read metadata. Managed identities, settings, runtime file hashes and resources must remain equal.');

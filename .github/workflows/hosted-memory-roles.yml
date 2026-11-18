@@ -1,11 +1,11 @@
-name: Identify native memory process roles in a bounded diagnostic
+name: Identify native memory process roles through the standard driver
 on: create
 permissions:
   contents: read
   actions: read
 jobs:
   diagnose:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-memory-roles-bbd5175' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-memory-standard-bbd5175' }}
     runs-on: windows-latest
     timeout-minutes: 10
     defaults:
@@ -59,10 +59,14 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'The synthetic observer fixture failed to prepare.' }
             $fixture = ($prepared | ConvertFrom-Json).prepared
             $report = Join-Path (Split-Path -Parent $fixture) "$variant/observer-result.json"
-            & node scripts/verify-native-observer-memory.mjs --phase run --prepared $fixture --variant $variant --candidate (Join-Path $base 'agent-resource-manager.exe') --candidate-build-info (Join-Path $base 'BUILD_INFO.native-validation.json')
+            & node scripts/verify-native-observer-memory.mjs --phase run --prepared $fixture --variant $variant --roles-only true --candidate (Join-Path $base 'agent-resource-manager.exe') --candidate-build-info (Join-Path $base 'BUILD_INFO.native-validation.json')
             $exit = $LASTEXITCODE
             if (!(Test-Path -LiteralPath $report -PathType Leaf)) { throw 'No diagnostic report was returned.' }
             Copy-Item -LiteralPath $report -Destination (Join-Path $evidence.FullName "$variant.json")
+            $driver = Join-Path (Split-Path -Parent $report) 'native-driver.json'
+            if (Test-Path -LiteralPath $driver -PathType Leaf) {
+              Copy-Item -LiteralPath $driver -Destination (Join-Path $evidence.FullName "$variant-driver.json")
+            }
             $r = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
             [ordered]@{variant=$variant;status=$r.status;normalExit=$r.normalExit;cycles=$r.completedCycles;queries=$r.completedQueries
               reportSha256=(Get-FileHash -LiteralPath $report -Algorithm SHA256).Hash.ToLowerInvariant();error=$r.error} | ConvertTo-Json -Compress
@@ -78,5 +82,7 @@ jobs:
           path: |
             ${{ runner.temp }}/arm-memory-role-evidence/ipc-control.json
             ${{ runner.temp }}/arm-memory-role-evidence/churn-control.json
+            ${{ runner.temp }}/arm-memory-role-evidence/ipc-control-driver.json
+            ${{ runner.temp }}/arm-memory-role-evidence/churn-control-driver.json
           if-no-files-found: warn
           retention-days: 14
