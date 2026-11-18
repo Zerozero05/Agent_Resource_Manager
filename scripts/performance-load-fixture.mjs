@@ -7,7 +7,7 @@ import { FIXTURE_FORMAT } from './performance-fixture.mjs';
 
 export const LOAD_FIXTURE_FORMAT = 'agent-resource-manager-native-load-v1';
 export const VALIDATION_RESOURCE_PARENT = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\resources';
-export const MAX_NATIVE_UPDATE_FIXTURES = 12;
+export const MAX_NATIVE_UPDATE_FIXTURES = 36;
 const crcTable = Uint32Array.from({ length: 256 }, (_, index) => { let crc = index; for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1; return crc >>> 0; });
 function crc32(bytes) { let crc = 0xffffffff; for (const byte of bytes) crc = crcTable[(crc ^ byte) & 255] ^ (crc >>> 8); return (crc ^ 0xffffffff) >>> 0; }
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -78,7 +78,7 @@ export async function readNativeLoadFixture(path) {
  * A batch is committed together, after all of its fixture inputs are checked. */
 async function attachLoadFixtures(dataset, fixtures, batch) {
   if (dataset.format !== FIXTURE_FORMAT || dataset.syntheticOnly !== true || dataset.toolCount !== 100) throw new Error('Use the exact generated 100-tools performance dataset.');
-  if (!Array.isArray(fixtures) || fixtures.length < 1 || fixtures.length > MAX_NATIVE_UPDATE_FIXTURES) throw new Error('Select 1–12 independent native load fixtures.');
+  if (!Array.isArray(fixtures) || fixtures.length < 1 || fixtures.length > MAX_NATIVE_UPDATE_FIXTURES) throw new Error('Select 1–36 independent native load fixtures.');
   const ownerPath = join(dataset.root, 'fixture-owner.json');
   const owner = JSON.parse(await readFile(ownerPath, 'utf8'));
   if (owner.format !== FIXTURE_FORMAT || owner.syntheticOnly !== true || pathKey(await realpath(ownerPath)) !== pathKey(ownerPath)) throw new Error('No synthetic dataset ownership marker.');

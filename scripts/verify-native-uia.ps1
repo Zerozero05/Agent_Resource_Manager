@@ -200,8 +200,9 @@ public sealed class NativeUiMeasurement : IDisposable {
   }
   AutomationElement Named(string name,ControlType type=null,bool visible=true){return Find(root,name,type,visible);}
   void Paint(){long before=Stopwatch.GetTimestamp();if(DwmFlush()!=0||DwmFlush()!=0)throw new InvalidOperationException("DWM did not confirm desktop composition.");paintTicks+=Stopwatch.GetTimestamp()-before;}
-  void Wait(Func<bool> expected,string phase="Expected native UI result did not become interactive and presented."){Stopwatch wait=Stopwatch.StartNew();while(wait.ElapsedMilliseconds<15000){Identity(false);if(expected()){Paint();if(expected())return;}Thread.Sleep(1);}throw new InvalidOperationException(phase);}
-  public void Ready(int expectedRows){Wait(()=>{AutomationElement edit=Named("搜索 Skill",ControlType.Edit);return edit!=null&&edit.Current.IsEnabled&&SkillCount()==expectedRows&&Named("工作区标签")!=null;});StartupMs=launch.Elapsed.TotalMilliseconds;}
+  public const int StrictReadinessTimeoutMs=30000;
+  void Wait(Func<bool> expected,string phase="Expected native UI result did not become interactive and presented.",int timeoutMs=15000){Stopwatch wait=Stopwatch.StartNew();while(wait.ElapsedMilliseconds<timeoutMs){Identity(false);if(expected()){Paint();if(expected())return;}Thread.Sleep(1);}throw new InvalidOperationException(phase);}
+  public void Ready(int expectedRows){Wait(()=>{AutomationElement edit=Named("搜索 Skill",ControlType.Edit);return edit!=null&&edit.Current.IsEnabled&&SkillCount()==expectedRows&&Named("工作区标签")!=null;},timeoutMs:StrictReadinessTimeoutMs);StartupMs=launch.Elapsed.TotalMilliseconds;}
   public void ReadyWorkbench(){
     Wait(()=>{
       AutomationElement tabs=Named("工作区标签",ControlType.Tab);if(tabs==null)return false;
@@ -1462,6 +1463,7 @@ $report.privateUi=[bool]$PrivateUi
 $report.basicModeRequested=[bool]$BasicMode
 $report.workbenchOnlyReadinessRequested=[bool]$WorkbenchOnlyReadiness
 $report.readinessMode=$readinessMode
+if(-not $WorkbenchOnlyReadiness){$report.strictReadinessTimeoutMs=[NativeUiMeasurement]::StrictReadinessTimeoutMs}
 $versionInfo=[Diagnostics.FileVersionInfo]::GetVersionInfo([IO.Path]::GetFullPath($Executable));$report.productVersion=$versionInfo.ProductVersion;$report.fileVersion=$versionInfo.FileVersion
 $session=$null;$ready=$false;$clientReleased=$false
 try {
