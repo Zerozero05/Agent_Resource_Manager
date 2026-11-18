@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 工作台按需统计（开发候选） | 2026-11-19 | 1、独立说明等标签页不再计算工作台的分类和汇总。[详情](CHANGELOG.md#workbench-only-summary-20261119) |
 | Windows 工作流运行环境 | 2026-11-19 | 1、固定支持 Node 24 的检出和 Node 安装组件。[详情](CHANGELOG.md#github-actions-node24-20261119) |
 | 启动与数据路径说明 | 2026-11-19 | 1、明确新版启动程序、全新便携包的存储布局及旧库兼容规则。[详情](CHANGELOG.md#startup-guide-paths-20261119) |
 | 后台检查与任务历史的内存开销（开发候选） | 2026-11-19 | 1、后台检查省去中间技能库快照。[详情](CHANGELOG.md#background-check-allocation-20261119)<br>2、保存任务历史时直接读取现有资源键，继续兼容原记录格式。[详情](CHANGELOG.md#background-check-allocation-20261119) |

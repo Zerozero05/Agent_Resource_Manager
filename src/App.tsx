@@ -820,9 +820,6 @@ export default function SessionApp() {
   }, [pane.kind, pane.state.view, pane.state.clientId, pane.state.section, pane.state.focusRevision]);
   const selected = displaySkills.find(skill => skill.id === selectedId);
   const localSkills = state.skills.filter(skill => skill.localPath);
-  const libraryTotals = libraryCounts(state.skills, state.sources);
-  const changedSkills = state.skills.filter(needsAttention);
-  const remoteErrors = state.sources.filter(source => source.error);
   const categories = state.settings.categories || [];
   const resolvedCategoryColors = useMemo(() => categoryColors(categories), [categories]);
   const categoryTitle = categoryFilter === 'all' ? '全部 Skills' : categoryFilter === 'favorites' ? '收藏' : categoryFilter === 'uncategorized' ? '未分类' : categories.find(category => category.id === categoryFilter)?.name || '分类已不存在';
@@ -1369,7 +1366,7 @@ export default function SessionApp() {
       { id: 'forget', label: '移除管理记录…', disabled, title: '保留原文件、客户端实际连接和 GitHub 内容；停止自动导入此项。', action: () => setModal({ kind: 'forget', skill }) },
     ];
   }
-  const categoryPanel = <section className="category-panel" aria-label="Skill 分类">
+  const categoryPanel = isHome && <section className="category-panel" aria-label="Skill 分类">
     <div className="category-heading"><strong>分类</strong><button className="icon-button" aria-label="创建分类" title="创建分类" disabled={busy} onClick={() => editCategory()}><Plus size={16} /></button>{compactSidebar && <button className="icon-button" aria-label="关闭分类面板" onClick={() => setSidebarFlyout(false)}><X size={15} /></button>}</div>
     <div className="category-list">{[{ id: 'all', name: '全部 Skills' }, { id: 'favorites', name: '收藏' }, { id: 'uncategorized', name: '未分类' }, ...categories].map(category => {
       const count = state.skills.filter(skill => category.id === 'all' || (category.id === 'favorites' ? skill.favorite : category.id === 'uncategorized' ? !skill.categoryId : skill.categoryId === category.id)).length;
@@ -1661,6 +1658,9 @@ export default function SessionApp() {
     {floatingMenu && <FloatingMenu menu={floatingMenu} onClose={closeFloatingMenu} />}
   </div>;
 
+  const libraryTotals = libraryCounts(state.skills, state.sources);
+  const changedSkills = state.skills.filter(needsAttention);
+  const remoteErrors = state.sources.filter(source => source.error);
   const sidebar = <div className={`app-shell workspace-sidebar-frame ${compactSidebar ? 'sidebar-collapsed' : ''} ${sidebarFlyout && compactSidebar ? 'sidebar-flyout' : ''}`} style={{ '--sidebar-width': `${compactSidebar ? 72 : expandedSidebarWidth}px`, '--sidebar-expanded-width': `${expandedSidebarWidth}px` } as React.CSSProperties}>
     <aside className="sidebar" ref={sidebarRef}>
       <div className="sidebar-top"><div className="brand"><span className="brand-icon brand-artwork" aria-hidden="true" /><div><strong className="brand-title" title="Agent 资源管理器"><span>Agent</span>{' '}<span>资源管理器</span></strong></div></div></div>
