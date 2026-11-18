@@ -8,7 +8,7 @@ import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { NativeUiaSession, assertNoUserManager } from './native-uia-client.mjs';
 import { beginUiaNativeStage, beginUiaNativeDownload, resumeUiaNativeDownload, waitNativeTask } from './native-uia-loads.mjs';
-import { readNativeLoadFixture, attachNativeLoadResource, attachNativeLoadResources } from './performance-load-fixture.mjs';
+import { MAX_NATIVE_UPDATE_FIXTURES, readNativeLoadFixture, attachNativeLoadResource, attachNativeLoadResources } from './performance-load-fixture.mjs';
 import { createPerformanceFixture } from './performance-fixture.mjs';
 import { PERFORMANCE_POLICY as policy, ownedForeground, startupComparison, localInteractionVerdict, backgroundLoadVerdict, freezeConvergenceBounds, stabilityVerdict } from './performance-policy.mjs';
 
@@ -50,8 +50,8 @@ function validateOverlapSampling(options, suite, loadKind, stagePaths, downloadS
     throw new Error('Sampled overlap accepts only the selected workload specification.');
   }
   if (loadKind === 'download' && (downloadSpecs !== 1 || typeof options['download-spec'] !== 'string')) throw new Error('Sampled download requires one explicit pinned --download-spec path.');
-  if (loadKind === 'update' && (stagePaths.length < 2 || stagePaths.length > 12 || stagePaths.some(path => typeof path !== 'string'))) {
-    throw new Error('Sampled update requires two to twelve separate --stage-fixture paths.');
+  if (loadKind === 'update' && (stagePaths.length < 2 || stagePaths.length > MAX_NATIVE_UPDATE_FIXTURES || stagePaths.some(path => typeof path !== 'string'))) {
+    throw new Error('Sampled update requires two to thirty-six separate --stage-fixture paths.');
   }
   return true;
 }
@@ -60,7 +60,7 @@ if (options.help) {
   console.log('Optional --closed-select true is limited to --suite loads --accessibility-input. It uses ordinary closed-select Home/Down keyboard setup for the two GitHub fields, records raw option state, and verifies the final exact value. It cannot be combined with --foreground-select.');
   console.log('Optional --popup-select true is limited to --suite loads --accessibility-input. It opens the exact native select by mouse, uses its completed catalogue for bounded Home/Down/Enter, and verifies the retained exact value. Popup focus requires exact RawView ancestry and owned Win32 focus. This functional setup is excluded from P95 and is mutually exclusive with the other select modes.');
   console.log('Optional --load-kind check|download|update is restricted to --suite loads and explicitly resumes that one original workload with the same six measured overlap inputs and thresholds. Download requires --download-spec; update requires --stage-fixture and does not read or download an optional --download-spec. Success is partial-limited evidence only. Omit --load-kind for the original complete loads run, which still requires both specifications.');
-  console.log('Optional --sample-overlap true with --suite loads and one explicit --load-kind collects 100 verified samples per category with a 12-minute measurement budget. Check uses serial local checks. Download uses one pinned official asset at 1 KiB/s in one fresh isolated directory (approximately eleven minutes). Update accepts two to twelve separately prepared --stage-fixture paths and stages them serially without switching originals. Reports insufficient overlap separately.');
+  console.log('Optional --sample-overlap true with --suite loads and one explicit --load-kind collects 100 verified samples per category with a 12-minute measurement budget. Check uses serial local checks. Download uses one pinned official asset at 1 KiB/s in one fresh isolated directory (approximately eleven minutes). Update accepts two to thirty-six separately prepared --stage-fixture paths and stages them serially without switching originals. Reports insufficient overlap separately.');
   console.log('Optional --interaction-kind document is restricted to --suite interactive without load selection or specifications. It resumes only the original document category with the same unmeasured preparation, one hundred measured inputs and thresholds. Success is document-only partial evidence, not a complete interactive or all-suite pass. Omit it for the original four-category run.');
   console.log('Short --suite download-resume --download-spec <existing pinned official spec> creates one fresh approved download directory, starts one native download, normally quits with partial bytes, reopens the same isolated data and explicitly continues via its native history. It runs no interaction/stability loop and makes no performance claim. The existing --accessibility-input, --popup-select true and --await-foreground true setup options are available.');
   console.log('Optional --existing-stdio-proof <json> forwards only an explicitly frozen arm-pinned-existing-stdio-v1 manifest matching the candidate SHA to the unchanged ownership preflight; it does not permit a running GUI/backend.');
@@ -72,7 +72,7 @@ const interactionKind = validateInteractionSelection(options, suite);
 const loadKind = validateLoadSelection(options, suite);
 const sampleOverlap = validateOverlapSampling(options, suite, loadKind, stageFixturePaths, downloadSpecCount);
 const sampledLoadActions = Object.freeze({ check: 'check_now', download: 'apply_resource_download', update: 'apply_resource_update_stage' });
-const sampledLoadPolicy = Object.freeze({ maximumTasks: { check: 96, download: 1, update: 12 }, maximumAttempts: 560, maximumMeasurementMs: 12 * 60 * 1000, maximumQueuedObservationMs: 8000, longTaskCategoryBurst: 5 });
+const sampledLoadPolicy = Object.freeze({ maximumTasks: { check: 96, download: 1, update: MAX_NATIVE_UPDATE_FIXTURES }, maximumAttempts: 560, maximumMeasurementMs: 12 * 60 * 1000, maximumQueuedObservationMs: 8000, longTaskCategoryBurst: 5 });
 const passedLoadsStatus = sampleOverlap ? `passed-sampled-native-${loadKind}-only` : loadKind ? 'passed-partial-limited-background-loads-only' : 'passed-background-loads-only';
 const passedInteractionStatus = 'passed-partial-document-interactions-only';
 if (options['await-foreground'] !== undefined && !['true', 'false'].includes(options['await-foreground'])) throw new Error('--await-foreground requires an explicit true or false.');

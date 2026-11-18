@@ -1,4 +1,4 @@
-name: Verify hosted Windows download and update overlap
+name: Verify hosted Windows update overlap with sufficient independent tasks
 on: create
 permissions:
   contents: read
@@ -9,7 +9,7 @@ env:
   CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_bbd51752eec3d616203ee7a0529d0d935b7cc8ba
 jobs:
   candidate:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-download-update-bbd5175' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-update-sampling-bbd5175' }}
     runs-on: ubuntu-latest
     timeout-minutes: 18
     env:
@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [download, update]
+        suite: [update]
     defaults:
       run:
         shell: pwsh
@@ -84,21 +84,11 @@ jobs:
           $arguments = @('--suite', 'loads', '--load-kind', $env:SUITE, '--sample-overlap', 'true', '--accessibility-input',
             '--candidate', (Join-Path $candidate 'agent-resource-manager.exe'),
             '--candidate-build-info', (Join-Path $candidate 'BUILD_INFO.native-validation.json'))
-          if ($env:SUITE -eq 'download') {
-            $resourceRoot = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\resources'
-            New-Item -ItemType Directory -Path $resourceRoot | Out-Null
-            $specification = Join-Path $env:RUNNER_TEMP 'pinned-agent-reach-download.json'
-            [ordered]@{ repository='Panniantong/Agent-Reach'; tag='v1.6.0'; releaseId=421526768; assetId=668240314
-              assetName='agent-reach.zip'; assetBytes=676536 } | ConvertTo-Json -Compress |
-              Set-Content -LiteralPath $specification -Encoding utf8NoBOM
-            $arguments += @('--download-spec', $specification, '--popup-select', 'true')
-          } elseif ($env:SUITE -eq 'update') {
-            $generated = & node --input-type=module -e "import {createNativeLoadFixture} from './scripts/performance-load-fixture.mjs'; import {join} from 'node:path'; const manifestPaths=[]; for(let index=0;index<12;index++){ const f=await createNativeLoadFixture(); manifestPaths.push(join(f.root,'load-fixture.json')); } console.log(JSON.stringify(manifestPaths));"
-            if ($LASTEXITCODE -ne 0) { throw 'Could not prepare independent synthetic update fixtures.' }
-            $manifests = @($generated | ConvertFrom-Json)
-            if ($manifests.Count -ne 12 -or @($manifests | Sort-Object -Unique).Count -ne 12) { throw 'The exact update fixture count was not created.' }
-            foreach ($manifest in $manifests) { $arguments += @('--stage-fixture', $manifest) }
-          } else { throw 'Unexpected load suite.' }
+          $generated = & node --input-type=module -e "import {createNativeLoadFixture, MAX_NATIVE_UPDATE_FIXTURES} from './scripts/performance-load-fixture.mjs'; import {join} from 'node:path'; const manifestPaths=[]; for(let index=0;index<MAX_NATIVE_UPDATE_FIXTURES;index++){ const f=await createNativeLoadFixture(); manifestPaths.push(join(f.root,'load-fixture.json')); } console.log(JSON.stringify(manifestPaths));"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not prepare independent synthetic update fixtures.' }
+          $manifests = @($generated | ConvertFrom-Json)
+          if ($manifests.Count -ne 36 -or @($manifests | Sort-Object -Unique).Count -ne 36) { throw 'The exact update fixture count was not created.' }
+          foreach ($manifest in $manifests) { $arguments += @('--stage-fixture', $manifest) }
           & node scripts/verify-uia-performance.mjs @arguments
           exit $LASTEXITCODE
       - name: Preserve reports and check the scheduled result
