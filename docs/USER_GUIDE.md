@@ -266,9 +266,9 @@ v0.1.7起，默认ZIP名称为Skill内部名，例如paper-write.zip；包内继
 - 恢复原始字节保存在管理数据目录的`recovery/<事务ID>/before`，对应`journal.json`记录目标与摘要。先保留当前新增内容再恢复；不要直接整目录覆盖。
 - 恢复材料和记录不自动删除。程序目录、数据目录和原始Skill目录各自独立，卸载或清理时应分别核对。
 
-首次启动默认使用可执行文件旁的 Skill_Manager_Data。现有路径继续保留，设置页显示实际生效位置；v0.2.1 可预览并迁移程序管理的数据与缓存，先复制校验再切换，旧文件保留。以`skill-manager.exe --data-dir <绝对目录>`启动会临时锁定目录，这不会迁移其他位置已有的数据。
+新装 Agent Resource Manager 直接运行 `agent-resource-manager.exe` 或使用随包启动脚本。全新便携包在 `app` 目录运行，包内 `data-directory.txt` 的 `.` 指向程序目录；程序以便携包根目录为管理根，默认使用同级的 `data` 存放管理数据库、`cache/webview` 存放 WebView 缓存。若新版程序直接放在管理根，默认布局相同。已有保存位置配置继续生效；旧程序名或已检测到的旧库可沿用 `Skill_Manager_Data`。实际位置以“设置 → 保存位置”为准。
 
-也可在可执行文件旁保存UTF-8文本data-directory.txt，一行写入绝对目录或相对程序目录的路径。优先级为命令参数 > 环境变量SKILL_MANAGER_DATA_DIR > storage-paths.json保存配置 > data-directory.txt侧文件 > 默认目录。读取失败或格式无效会停止初始化，避免意外打开空数据库。管理数据与源码放在同一根目录时，应忽略manager.sqlite3及其临时文件、recovery、webview和侧文件，再检查Git清单。
+以 `agent-resource-manager.exe --data-dir <绝对目录>` 启动可为本次运行指定管理数据目录。路径含空格时请加引号。显式启动参数优先于 `SKILL_MANAGER_DATA_DIR`。常规启动使用有效的 `storage-paths.json` 配置；没有该配置时，可在程序旁的 UTF-8 文本 `data-directory.txt` 中写入一行绝对路径，或相对程序目录的路径。读取失败或配置无效时会显示错误。迁移已有数据请使用“设置 → 保存位置”的预览和校验流程。若源码和管理数据共用目录，提交前应排除 SQLite 数据及临时文件、恢复材料、缓存和本机路径配置。
 
 ## 分类与侧栏快捷操作（v0.1.5）
 

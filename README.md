@@ -71,9 +71,9 @@ v0.2.11 便携包的 `data-directory.txt` 为 `.`，新使用时把管理数据�
 
 v0.3 开发预览可从运行包中的 `app\agent-resource-manager.exe` 或启动脚本打开。本机示例安装位置为 `D:\03_github_projects\Agent_Management\Agent_Resource_Manager`，管理数据在其 `data` 子目录；已有入口继续使用同一份数据。旧正式版 v0.2.11 的程序名为 `skill-manager.exe`。
 
-可通过 `--data-dir <绝对路径>` 或 `SKILL_MANAGER_DATA_DIR` 指定数据目录。未配置路径的新预览默认使用程序所在目录，检测到已有旧版数据时沿用旧库。数据目录保存设置、来源、SQLite 状态及必要恢复材料。
+可通过 `--data-dir <绝对路径>` 或 `SKILL_MANAGER_DATA_DIR` 指定数据目录。全新 v0.3 便携包默认将管理数据保存在包根目录下的 `data`，WebView 缓存保存在 `cache/webview`；已有设置或旧库继续按原路径使用。数据目录保存设置、来源、SQLite 状态及必要恢复材料。
 
-也可在程序旁放置 `data-directory.txt`，写入一行数据目录路径。优先级：命令参数、环境变量、该文件、默认目录。相对路径以程序所在目录为起点；无效侧文件会明确失败，不静默创建另一套数据。
+也可在程序旁放置 `data-directory.txt`，写入一行数据目录路径。显式启动参数优先于环境变量；常规启动沿用有效的 `storage-paths.json`，没有该配置时再使用该侧文件或默认位置。相对路径以程序所在目录为起点；无效侧文件会明确失败，不静默创建另一套数据。
 
 1. 在 **Skills** 添加本地目录，可多选后预览勾选；保存为“自动导入目录”后，新建 Skill 自动登记，未选项保持忽略。也可仅登记一次，或添加 GitHub 地址。
 2. 用列表或卡片查找和管理技能；搜索覆盖全库，空格分隔的关键词可跨名称、用途、仓库和路径匹配。点击名称或“查看”打开详情标签，随时切回工作台；工具栏“详情”保留原分栏阅读方式。视图、每页数量和排序自动保存。
@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 启动与数据路径说明 | 2026-11-19 | 1、明确新版启动程序、全新便携包的存储布局及旧库兼容规则。[详情](CHANGELOG.md#startup-guide-paths-20261119) |
 | 后台检查与任务历史的内存开销（开发候选） | 2026-11-19 | 1、后台检查省去中间技能库快照。[详情](CHANGELOG.md#background-check-allocation-20261119)<br>2、保存任务历史时直接读取现有资源键，继续兼容原记录格式。[详情](CHANGELOG.md#background-check-allocation-20261119) |
 | 说明页与更新准备（开发候选） | 2026-11-19 | 1、打开独立说明页时按需读取导出选择，已开始的选择可继续使用。[详情](CHANGELOG.md#document-export-and-update-preparation-20261119)<br>2、计算候选更新所需空间时，复用已选文件的成员索引。[详情](CHANGELOG.md#document-export-and-update-preparation-20261119) |
 | Skill 说明打开速度（开发候选） | 2026-11-18 | 1、读取说明时减少重复状态复制和无关预览处理。[详情](CHANGELOG.md#skill-document-opening-20261118)<br>2、技能排序和快捷入口按需计算。[详情](CHANGELOG.md#skill-document-opening-20261118) |
