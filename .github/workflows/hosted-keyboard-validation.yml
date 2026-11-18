@@ -1,0 +1,141 @@
+name: Validate native keyboard shortcuts on isolated Windows
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  CANDIDATE_RUN_ID: '44341382564'
+  EXPECTED_EXECUTABLE_SHA256: e5001e79fb5bb18a847244846a43cdf9e9ae95f59e3ac4de0d63893ec044046d
+  CANDIDATE_SOURCE: c6bd6821066b90fb0db5fdefd0792bc8cf828e53
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_c6bd6821066b90fb0db5fdefd0792bc8cf828e53
+jobs:
+  candidate:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-keyboard-c6bd682' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    outputs:
+      artifact_id: ${{ steps.verify.outputs.artifact_id }}
+      artifact_digest: ${{ steps.verify.outputs.artifact_digest }}
+    steps:
+      - name: Wait for the exact Windows candidate artifact
+        id: verify
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for ($tick = 0; $tick -lt 80; $tick++) {
+            $candidate = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $candidate.head_sha -cne $env:CANDIDATE_SOURCE -or $candidate.run_attempt -ne 1 -or
+                $candidate.path -cne '.github/workflows/check.yml' -or $candidate.event -cne 'push') { throw 'Candidate run identity differs.' }
+            if ($candidate.status -ceq 'completed') {
+              if ($candidate.conclusion -cne 'success') { throw 'The exact Windows build failed.' }
+              $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+              if ($LASTEXITCODE -ne 0) { throw 'Could not verify the candidate artifact list.' }
+              $matches = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
+              if ($matches.Count -ne 1 -or $matches[0].digest -cnotmatch '^sha256:[0-9a-f]{64}$') { throw 'The exact candidate artifact is missing its identity.' }
+              "artifact_id=$($matches[0].id)" >> $env:GITHUB_OUTPUT
+              "artifact_digest=$($matches[0].digest)" >> $env:GITHUB_OUTPUT
+              exit 0
+            }
+            Start-Sleep -Seconds 15
+          }
+          throw 'Timed out waiting for the bound candidate build.'
+  keyboard:
+    needs: candidate
+    runs-on: windows-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Verify the interactive runner, artifact and release executable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.candidate.outputs.artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.candidate.outputs.artifact_digest }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no existing manager process.' }
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+          $artifact = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:CANDIDATE_ARTIFACT_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $artifact.id -ne $env:CANDIDATE_ARTIFACT_ID -or $artifact.name -cne $env:CANDIDATE_ARTIFACT -or
+              $artifact.expired -or $artifact.digest -cne $env:CANDIDATE_ARTIFACT_DIGEST -or
+              $artifact.workflow_run.id -ne $env:CANDIDATE_RUN_ID -or $artifact.workflow_run.head_sha -cne $env:CANDIDATE_SOURCE) {
+            throw 'Candidate artifact identity changed.'
+          }
+          $base = Join-Path $env:RUNNER_TEMP 'arm-native-keyboard-candidate'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $base
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }
+          $exe = Join-Path $base 'agent-resource-manager.exe'
+          $source = Join-Path $base 'BUILD_INFO.json'
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:EXPECTED_EXECUTABLE_SHA256 -or $info.executableSha256 -cne $digest -or $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or
+              $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or $info.workflowRunAttempt -ne 1 -or
+              $info.repository -cne $env:GITHUB_REPOSITORY -or $info.version -cne '0.3.0-dev.1') {
+            throw 'Build provenance does not bind to the executable.'
+          }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $base 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+          "ARM_KEYBOARD_CANDIDATE_SHA256=$digest" >> $env:GITHUB_ENV
+      - name: Prepare an isolated synthetic keyboard fixture
+        run: |
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          if (Test-Path -LiteralPath $root) { throw 'Expected a fresh keyboard measurement directory.' }
+          $prepared = & node scripts/verify-native-keyboard.mjs --phase prepare | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $prepared.status -cne 'prepared-not-run' -or $prepared.noNativeLaunch -ne $true -or
+              [IO.Path]::GetFileName($prepared.fixture) -cne 'keyboard-fixture.json' -or
+              (Split-Path -Parent (Split-Path -Parent $prepared.fixture)) -cne $root) {
+            throw 'The exact isolated keyboard fixture was not prepared.'
+          }
+          "ARM_KEYBOARD_FIXTURE=$($prepared.fixture)" >> $env:GITHUB_ENV
+      - name: Exercise real shortcuts and native input undo
+        run: |
+          $base = Join-Path $env:RUNNER_TEMP 'arm-native-keyboard-candidate'
+          $arguments = @('--phase', 'run', '--fixture', $env:ARM_KEYBOARD_FIXTURE, '--candidate', (Join-Path $base 'agent-resource-manager.exe'),
+            '--candidate-build-info', (Join-Path $base 'BUILD_INFO.native-validation.json'), '--await-foreground-seconds', '60')
+          & node scripts/verify-native-keyboard.mjs @arguments
+          exit $LASTEXITCODE
+      - name: Preserve the reports and verify the native result
+        if: ${{ always() }}
+        run: |
+          if (-not $env:ARM_KEYBOARD_FIXTURE) { throw 'No prepared keyboard fixture was recorded.' }
+          $root = Split-Path -Parent $env:ARM_KEYBOARD_FIXTURE
+          $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-native-keyboard-evidence')
+          $resultPath = Join-Path $root 'keyboard-result.json'
+          $driverPath = Join-Path $root 'keyboard-fixture/native-driver.json'
+          foreach ($path in @($resultPath, $driverPath)) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) { Copy-Item -LiteralPath $path -Destination $evidence.FullName }
+          }
+          $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+          $driver = Get-Content -LiteralPath $driverPath -Raw | ConvertFrom-Json
+          [ordered]@{status=$result.status; currentStep=$result.currentStep; normalExit=$result.normalExit; source=$result.candidate.sourceIdentity
+            resultSha256=(Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            driverSha256=(Get-FileHash -LiteralPath $driverPath -Algorithm SHA256).Hash.ToLowerInvariant()} | ConvertTo-Json -Compress
+          if ($result.status -cne 'passed-native-shortcuts-and-input-undo-scope' -or $result.normalExit -ne $true -or
+              $result.syntheticOnly -ne $true -or $result.results.imeCompositionVerified -ne $false -or
+              $result.candidate.sourceIdentity -cne $env:CANDIDATE_SOURCE -or $result.candidate.sha256 -cne $env:ARM_KEYBOARD_CANDIDATE_SHA256 -or
+              $driver.executableSha256 -cne $env:ARM_KEYBOARD_CANDIDATE_SHA256 -or $driver.closedNormally -ne $true -or
+              $driver.functionalKeyboardInputRequested -ne $true -or $driver.pid -ne $result.native.pid -or
+              $driver.creationFileTime -cne $result.native.creationFileTime -or $driver.windowHandle -ne $result.native.windowHandle) {
+            throw 'The scheduled shortcut checks did not finish with the exact native window and normal exit.'
+          }
+      - name: Upload only the two keyboard reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        with:
+          name: Agent_Resource_Manager_native_keyboard_${{ github.run_id }}_${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/arm-native-keyboard-evidence/keyboard-result.json
+            ${{ runner.temp }}/arm-native-keyboard-evidence/native-driver.json
+          if-no-files-found: warn
+          retention-days: 14
