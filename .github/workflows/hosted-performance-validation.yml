@@ -1,4 +1,4 @@
-name: Verify hosted Windows startup and stability
+name: Verify hosted Windows local-check overlap
 on: create
 permissions:
   contents: read
@@ -9,7 +9,7 @@ env:
   CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_bbd51752eec3d616203ee7a0529d0d935b7cc8ba
 jobs:
   candidate:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-startup-stability-bbd5175' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-check-overlap-bbd5175' }}
     runs-on: ubuntu-latest
     timeout-minutes: 18
     env:
@@ -36,11 +36,11 @@ jobs:
   measure:
     needs: candidate
     runs-on: windows-latest
-    timeout-minutes: 55
+    timeout-minutes: 23
     strategy:
       fail-fast: false
       matrix:
-        suite: [startup, stability]
+        suite: [check]
     defaults:
       run:
         shell: pwsh
@@ -76,34 +76,14 @@ jobs:
           $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
           $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
           Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
-          if ($env:SUITE -eq 'startup') {
-            $name = 'Skill_Manager_v0.2.11_windows_x64_portable.zip'
-            gh release download v0.2.11 --repo $env:GITHUB_REPOSITORY --pattern $name --dir $candidate
-            if ($LASTEXITCODE -ne 0) { throw 'Pinned v0.2.11 published archive download failed.' }
-            $zip = Join-Path $candidate $name
-            if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ine '2a16a0f8c92937d17018f9c42a461a55bc5560f9b2f101a1e9a6e6d644e2170c') { throw 'Legacy archive checksum mismatch.' }
-            $legacy = Join-Path $candidate 'v0.2.11'
-            Expand-Archive -LiteralPath $zip -DestinationPath $legacy
-            $files = @(Get-ChildItem -LiteralPath $legacy -Recurse -File -Filter 'skill-manager.exe')
-            $sha = '1ca90747eca2ac3229762928d05036724229e910463c28be40925e9b2fb2092f'
-            if ($files.Count -ne 1 -or (Get-FileHash -LiteralPath $files[0].FullName -Algorithm SHA256).Hash -ine $sha) { throw 'Legacy executable checksum mismatch.' }
-            @{exe=$files[0].FullName; buildMode='release'; version='0.2.11'; executableSha256=$sha
-              sourceCommit='c160c61ae7031f383237de0848ce733106ae0cac'; releaseAssetId=679297489} |
-              ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $candidate 'baseline-build-info.json') -Encoding utf8NoBOM
-          }
       - name: Measure the scheduled native workload
         run: |
           $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
           $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
           if (Test-Path -LiteralPath $root) { throw 'Expected a fresh native measurement directory.' }
-          $arguments = @('--suite', $env:SUITE, '--accessibility-input',
+          $arguments = @('--suite', 'loads', '--load-kind', 'check', '--sample-overlap', 'true', '--accessibility-input',
             '--candidate', (Join-Path $candidate 'agent-resource-manager.exe'),
             '--candidate-build-info', (Join-Path $candidate 'BUILD_INFO.native-validation.json'))
-          if ($env:SUITE -eq 'startup') {
-            $baseline = Join-Path $candidate 'baseline-build-info.json'
-            $legacy = Get-Content -LiteralPath $baseline -Raw | ConvertFrom-Json
-            $arguments += @('--baseline', $legacy.exe, '--baseline-build-info', $baseline)
-          }
           & node scripts/verify-uia-performance.mjs @arguments
           exit $LASTEXITCODE
       - name: Preserve reports and check the scheduled result
@@ -120,29 +100,24 @@ jobs:
           } | Copy-Item -Destination $evidence.FullName
           $reportPath = Join-Path $out 'report.json'
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-          if ($report.suite -cne $env:SUITE -or $report.candidate.source -cne $env:CANDIDATE_SOURCE -or
+          if ($report.suite -cne 'loads' -or $report.candidate.source -cne $env:CANDIDATE_SOURCE -or
               $report.harnessChangedDuringRun -ne $false -or $report.nativeErrors.Count -ne 0 -or $report.error) { throw 'The exact native workload did not finish cleanly.' }
           $events = Get-Content -LiteralPath (Join-Path $out 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
           $exits = @($events | Where-Object { $_.kind -ceq 'native-normal-exit' -and $_.closedNormally -eq $true })
           $summary = [ordered]@{suite=$env:SUITE; executableSha256=$report.candidate.sha256
             reportSha256=(Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash.ToLowerInvariant()
             normalExits=$exits.Count}
-          if ($env:SUITE -eq 'startup') {
-            $summary.startup = $report.startup.verdict
-            $summary | ConvertTo-Json -Depth 10 -Compress
-            if ($exits.Count -ne 42 -or $report.startup.verdict.cold.status -cne 'passed' -or $report.startup.verdict.warm.status -cne 'passed') { throw 'Cold or warm startup did not meet the existing policy.' }
-            foreach ($version in @('baseline','candidate')) {
-              foreach ($condition in @('cold','warm')) {
-                if ($report.startup.$version.$condition.Count -ne 10) { throw 'Startup samples are incomplete.' }
-              }
-            }
-          } else {
-            $summary.samples = $report.stability.samples.Count
-            $summary.durationMs = $report.stability.samples[-1].elapsedMs
-            $summary.verdict = $report.stability.verdict
-            $summary | ConvertTo-Json -Depth 10 -Compress
-            if ($exits.Count -ne 1 -or $summary.samples -ne 61 -or $summary.durationMs -lt 1800000 -or
-                $report.stability.verdict.status -cne 'passed') { throw 'Stability did not meet the existing policy.' }
+          $score = $report.loadVerdict.check.sampledOverlap
+          $summary.status = $report.status
+          $summary.overlap = $score
+          $summary | ConvertTo-Json -Depth 10 -Compress
+          if ($exits.Count -ne 1 -or $report.loadSelection.scope -cne 'sampled-check-only' -or
+              $report.status -cne 'passed-sampled-native-check-only' -or $score.status -cne 'passed') {
+            throw 'The local check did not meet the existing overlap policy.'
+          }
+          foreach ($name in @('search','filter','tab','document')) {
+            if ($score.categories.$name.count -lt 100 -or $score.categories.$name.status -cne 'passed' -or
+                $score.categories.$name.limitedTolerance.status -cne 'passed') { throw "Insufficient or failed overlap samples for $name." }
           }
       - name: Upload only measurement evidence
         if: ${{ always() }}
