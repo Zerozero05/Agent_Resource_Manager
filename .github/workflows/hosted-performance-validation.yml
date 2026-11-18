@@ -1,33 +1,36 @@
-name: Verify three native workloads on one hosted Windows machine (retry)
+name: Verify three native workloads on one hosted Windows machine (65b14b9)
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44349985187'
-  CANDIDATE_SOURCE: d2883c225a13af1e2f6b3c6597bf6ec90ae4d55b
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_d2883c225a13af1e2f6b3c6597bf6ec90ae4d55b
-  CANDIDATE_ARTIFACT_ID: '14450760358'
-  CANDIDATE_SHA256: 00f3b75bd175ca0433bf477ecf79f8fdfa941c1f0ebe6760c6e107d8f62fe17c
+  CANDIDATE_RUN_ID: '44394986153'
+  CANDIDATE_SOURCE: 65b14b96b7243e0339b3eb5f2fd4f92ae1898df6
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_65b14b96b7243e0339b3eb5f2fd4f92ae1898df6
+  CANDIDATE_ARTIFACT_ID: '14470108635'
+  CANDIDATE_SHA256: '090dc7a9e4298b0153baee53c2f2f8329a2dc1a95708b4a9cfbf840e2d46ab91'
 jobs:
   measure:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-combined-r2-d2883c2' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-combined-65b14b9' }}
     runs-on: windows-latest
     timeout-minutes: 50
     defaults:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - name: Verify hosted runner and exact candidate provenance
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Pin the independently verified candidate artifact ID and executable SHA256 before measurement.'
+          }
           if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
               -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
               -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
@@ -114,7 +117,7 @@ jobs:
               $dataDir = Join-Path $new[0].FullName 'mixed-native-fixture\data'
               if ($driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or $driver.strictReadinessTimeoutMs -ne 30000 -or
                   $report.loadSelection.kind -cne $kind -or $report.candidate.source -cne $env:CANDIDATE_SOURCE -or
-                  $report.candidate.sha256 -cne $env:CANDIDATE_SHA256) { throw 'The workload does not bind the exact candidate and strict 30-second startup.' }
+                  $report.candidate.sha256 -cne $env:CANDIDATE_SHA256) { throw 'The workload does not bind the exact candidate and strict UI readiness with the 30-second load setup budget.' }
               if ($driver.dataDirectory -ne $dataDir -or $report.dataset.dataDir -ne $dataDir) {
                 throw 'The workload did not use its own fresh synthetic dataset.'
               }
