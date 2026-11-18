@@ -1,5 +1,9 @@
 # Sources and dependencies
 
+### GitHub Actions 运行环境 — 2026-11-19
+
+Windows 检查与发行材料准备固定使用 Node.js 24 版本的官方检出和 Node 安装组件。版本分别为 checkout v7.0.1（`3d3c42e`）和 setup-node v7.1.0（`949feb2`）。两者仅用于托管工作流。 [checkout 固定清单](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/action.yml) · [setup-node 固定清单](https://github.com/actions/setup-node/blob/949feb2413d6458794dcd2491c4babbbce0c15c1/action.yml)
+
 ### 工具目录修复与测试连接模式 — 2026-11-17
 
 目录修复复用本项目既有适配器、预览、目录身份检查、SQLite事务及React组件，无新增依赖或复制第三方代码。测试连接模式依据微软[accept语义](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-accept)及[SO_RCVTIMEO适用范围](https://learn.microsoft.com/en-us/windows/win32/winsock/sol-socket-socket-options)核对：接收连接继承监听套接字属性，读取超时作用于阻塞读取。修复仅显式设置合成服务连接模式，保留原时限及全部业务断言；线上文档阅读不等同本轮测试已通过。
