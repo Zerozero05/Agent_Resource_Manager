@@ -4,14 +4,14 @@ permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44380557746'
-  CANDIDATE_SOURCE: 3f703b18e92bd765678027404741f7844a9bd94e
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_3f703b18e92bd765678027404741f7844a9bd94e
-  CANDIDATE_ARTIFACT_ID: '14465615399'
-  CANDIDATE_SHA256: f8e240df74644942c929cc8d0ad699e1369c7a51cedab662620e8152c4ab41af
+  CANDIDATE_RUN_ID: '44394986153'
+  CANDIDATE_SOURCE: 65b14b96b7243e0339b3eb5f2fd4f92ae1898df6
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_65b14b96b7243e0339b3eb5f2fd4f92ae1898df6
+  CANDIDATE_ARTIFACT_ID: '14470108635'
+  CANDIDATE_SHA256: '090dc7a9e4298b0153baee53c2f2f8329a2dc1a95708b4a9cfbf840e2d46ab91'
 jobs:
   motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-pixels-3f703b1-r4' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-pixels-65b14b9' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:
@@ -33,7 +33,7 @@ jobs:
             throw 'The visual diagnostic requires an isolated interactive GitHub-hosted Windows VM.'
           }
           if ($env:ImageVersion -cne '20261103.298.1') {
-            throw "The selected runner image ($env:ImageVersion) differs from the same-candidate hosted startup evidence. No candidate was downloaded or started."
+            throw "The selected runner image ($env:ImageVersion) differs from the previously verified Windows test image. No candidate was downloaded or started."
           }
           if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[a-f0-9]{64}$') {
             throw 'Pin the independently verified artifact ID and executable SHA256 before measurement.'

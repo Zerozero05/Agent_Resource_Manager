@@ -15,6 +15,7 @@ $policy = [ordered]@{ trials=3; neutralSettleMs=250; beforeMs=95; afterMs=430; m
     minimumEndpointSamples=4; minimumRgbDistance=12; minimumIntermediateColors=2 }
 $report = [ordered]@{ candidateSha256=$ExpectedSha256; syntheticOnly=$true; status='incomplete'; phase='preflight'
     policy=$policy; arms=@(); attemptedSystemChange=$false; systemRestored=$false; closedNormally=$false
+    capture='One native BitBlt into a 32-bit DIB row per sample, with GdiFlush before reading the two pixels.'
     scope='Native foreground hover pixels on one inactive sidebar control. No DOM or CSS readback and no display-DPI or whole-app animation claim.' }
 function Write-Report { $report | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $output -Encoding utf8NoBOM }
 Write-Report
@@ -49,6 +50,15 @@ public sealed class HostedMotionPixels : IDisposable {
     [StructLayout(LayoutKind.Sequential)] struct LastInput { public uint Size, Time; }
     [StructLayout(LayoutKind.Sequential)] struct Mouse { public int X,Y; public uint Data,Flags,Time; public UIntPtr Extra; }
     [StructLayout(LayoutKind.Sequential)] struct Input { public uint Type; public Mouse Mouse; }
+    [StructLayout(LayoutKind.Sequential)] struct BitmapInfoHeader {
+        public uint Size;
+        public int Width, Height;
+        public ushort Planes, BitsPerPixel;
+        public uint Compression, SizeImage;
+        public int XPelsPerMeter, YPelsPerMeter;
+        public uint ColorsUsed, ColorsImportant;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct BitmapInfo { public BitmapInfoHeader Header; public uint Color; }
 
     [DllImport("user32.dll", EntryPoint="SystemParametersInfoW", SetLastError=true)]
     static extern bool GetSetting(uint action, uint arg, out int value, uint flags);
@@ -64,23 +74,48 @@ public sealed class HostedMotionPixels : IDisposable {
     [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint count, Input[] input, int structSize);
     [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr window);
     [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr window, IntPtr dc);
-    [DllImport("gdi32.dll")] static extern uint GetPixel(IntPtr dc, int x, int y);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll", SetLastError=true)] static extern IntPtr CreateDIBSection(IntPtr dc, ref BitmapInfo info, uint usage,
+        out IntPtr pixels, IntPtr section, uint offset);
+    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr value);
+    [DllImport("gdi32.dll", SetLastError=true)] static extern bool BitBlt(IntPtr dest, int dx, int dy, int width, int height,
+        IntPtr src, int sx, int sy, uint rasterOp);
+    [DllImport("gdi32.dll")] static extern bool GdiFlush();
+    [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr value);
 
     readonly Process owner;
     readonly IntPtr window;
     readonly long creation;
-    IntPtr screen;
+    readonly Point first, second;
+    readonly int rowWidth, secondOffset;
+    IntPtr screen, memory, bitmap, previousBitmap, pixels;
     uint inputTick;
-    public HostedMotionPixels(int pid, long creationFileTime, long handle) {
+    public HostedMotionPixels(int pid, long creationFileTime, long handle, int firstX, int firstY, int secondX, int secondY) {
+        if(firstY!=secondY||firstX>=secondX)throw new ArgumentException("The two visual points must share one ordered pixel row.");
+        first=new Point(firstX,firstY);
+        second=new Point(secondX,secondY);
+        rowWidth=checked(secondX-firstX+1);
+        secondOffset=checked((rowWidth-1)*4);
         owner=Process.GetProcessById(pid);
         window=new IntPtr(handle);
         creation=creationFileTime;
-        inputTick=InputTick();
         try {
+            inputTick=InputTick();
             Guard();
+            VerifyPoint(first); VerifyPoint(second);
             screen=GetDC(IntPtr.Zero);
             if(screen==IntPtr.Zero)throw new InvalidOperationException("The owned desktop pixels are unavailable.");
-        } catch { owner.Dispose(); throw; }
+            memory=CreateCompatibleDC(screen);
+            if(memory==IntPtr.Zero)throw new InvalidOperationException("Cannot allocate the one-row capture context.");
+            var info=new BitmapInfo { Header=new BitmapInfoHeader {
+                Size=(uint)Marshal.SizeOf<BitmapInfoHeader>(), Width=rowWidth, Height=-1, Planes=1, BitsPerPixel=32 }};
+            bitmap=CreateDIBSection(memory,ref info,0,out pixels,IntPtr.Zero,0);
+            if(bitmap==IntPtr.Zero||pixels==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
+            IntPtr selected=SelectObject(memory,bitmap);
+            if(selected==IntPtr.Zero||selected==new IntPtr(-1))throw new InvalidOperationException("Cannot select the one-row capture bitmap.");
+            previousBitmap=selected;
+        } catch { Dispose(); throw; }
     }
     public static bool AnimationsEnabled() {
         if(!GetSetting(0x1042,0,out int value,0))throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -120,17 +155,24 @@ public sealed class HostedMotionPixels : IDisposable {
         public uint First {get;set;}
         public uint Second {get;set;}
     }
-    public Sample[] Trace(int outX,int outY,int hoverX,int hoverY,int firstX,int firstY,int secondX,int secondY,
-                         int settleMs,int beforeMs,int afterMs) {
-        var target=new Point(hoverX,hoverY); var first=new Point(firstX,firstY); var second=new Point(secondX,secondY);
+    uint ReadColor(int offset) {
+        // Keep the same COLORREF byte order as GetPixel in the saved trace.
+        uint rgb=(uint)Marshal.ReadInt32(pixels,offset);
+        return ((rgb>>16)&0xff)|(rgb&0xff00)|((rgb&0xff)<<16);
+    }
+    public Sample[] Trace(int outX,int outY,int hoverX,int hoverY,int settleMs,int beforeMs,int afterMs) {
+        var target=new Point(hoverX,hoverY);
         Move(new Point(outX,outY)); Thread.Sleep(settleMs);
         var rows=new List<Sample>(); var timer=Stopwatch.StartNew();
         void Read() {
             double begin=timer.Elapsed.TotalMilliseconds;
             Guard(); VerifyPoint(first); VerifyPoint(second);
-            uint a=GetPixel(screen,first.X,first.Y),b=GetPixel(screen,second.X,second.Y);
+            const uint SrcCopyWithLayers=0x40cc0020;
+            if(!BitBlt(memory,0,0,rowWidth,1,screen,first.X,first.Y,SrcCopyWithLayers))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            if(!GdiFlush())throw new InvalidOperationException("Cannot synchronize the captured pixel row.");
+            uint a=ReadColor(0),b=ReadColor(secondOffset);
             Guard();
-            if(a==uint.MaxValue||b==uint.MaxValue)throw new InvalidOperationException("The hosted desktop did not expose readable composited pixels.");
             rows.Add(new Sample {BeginMs=begin,EndMs=timer.Elapsed.TotalMilliseconds,First=a,Second=b});
             Thread.Sleep(4);
         }
@@ -143,6 +185,11 @@ public sealed class HostedMotionPixels : IDisposable {
         return rows.ToArray();
     }
     public void Dispose() {
+        if(memory!=IntPtr.Zero){
+            if(previousBitmap!=IntPtr.Zero)SelectObject(memory,previousBitmap);
+            DeleteDC(memory); memory=IntPtr.Zero; previousBitmap=IntPtr.Zero;
+        }
+        if(bitmap!=IntPtr.Zero){DeleteObject(bitmap);bitmap=IntPtr.Zero;pixels=IntPtr.Zero;}
         if(screen!=IntPtr.Zero){ReleaseDC(IntPtr.Zero,screen);screen=IntPtr.Zero;}
         owner.Dispose();
     }
@@ -243,12 +290,12 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         if ([HostedMotionPixels]::AnimationsEnabled() -ne $expectedEnabled) { throw 'Unexpected OS setting before this arm.' }
         if ($button.Current.IsOffscreen -or $button.Current.BoundingRectangle -ne $geometry) { throw 'The original navigation target moved or became unavailable.' }
         # Setup changes use UIA. Create a new guarded observation only after those explicit test controls.
-        $probe = [HostedMotionPixels]::new($session.Pid,[long]$session.CreationFileTime,$session.Handle)
+        $points = $report.points
+        $probe = [HostedMotionPixels]::new($session.Pid,[long]$session.CreationFileTime,$session.Handle,
+            $points.background[0],$points.background[1],$points.background[2],$points.background[3])
         try {
             for ($attempt=1; $attempt -le $policy.trials; $attempt++) {
-                $points = $report.points
                 $trace = @($probe.Trace($points.neutral[0],$points.neutral[1],$points.hover[0],$points.hover[1],
-                    $points.background[0],$points.background[1],$points.background[2],$points.background[3],
                     $policy.neutralSettleMs,$policy.beforeMs,$policy.afterMs))
                 $early = @($trace | Where-Object { $_.EndMs -le -3 })
                 $late = @($trace | Where-Object { $_.BeginMs -ge 290 })
