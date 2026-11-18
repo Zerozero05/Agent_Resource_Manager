@@ -1158,11 +1158,16 @@ fn auto_associate_selected(
 }
 
 fn save_association_state(m: &mut Manager, previous: crate::model::State) -> Result<Value, String> {
+    save_association_changes(m, previous)?;
+    Ok(m.snapshot())
+}
+
+fn save_association_changes(m: &mut Manager, previous: crate::model::State) -> Result<(), String> {
     if let Err(error) = m.save() {
         m.state = previous;
         return Err(error);
     }
-    Ok(m.snapshot())
+    Ok(())
 }
 
 fn auto_associate(m: &mut Manager) -> Result<Value, String> {
@@ -1222,6 +1227,11 @@ fn auto_associate(m: &mut Manager) -> Result<Value, String> {
 }
 
 fn refresh(m: &mut Manager, req: &Value) -> Result<Value, String> {
+    refresh_and_save(m, req)?;
+    Ok(m.snapshot())
+}
+
+fn refresh_and_save(m: &mut Manager, req: &Value) -> Result<(), String> {
     if req["localOnly"] == true {
         return refresh_local(m, req);
     }
@@ -1428,9 +1438,9 @@ fn refresh(m: &mut Manager, req: &Value) -> Result<Value, String> {
     }
     if automatic && semantic_state(&m.state)? == semantic_state(&previous)? {
         m.state = previous;
-        return Ok(m.snapshot());
+        return Ok(());
     }
-    save_association_state(m, previous)
+    save_association_changes(m, previous)
 }
 
 fn check_fingerprint(source: &Value, skills: &[Value]) -> Result<String, String> {
@@ -1515,7 +1525,7 @@ fn semantic_state(state: &crate::model::State) -> Result<Value, String> {
 
 pub(crate) fn check(m: &mut Manager, req: &Value) -> Result<Value, String> {
     let before = m.state.skills.clone();
-    let mut result = refresh(m, req)?;
+    refresh_and_save(m, req)?;
     let associated = m
         .state
         .skills
@@ -1550,8 +1560,16 @@ pub(crate) fn check(m: &mut Manager, req: &Value) -> Result<Value, String> {
         .filter(|skill| skill["associationPending"] == true)
         .count();
     let docs_updated = documentation_updates(&before, &m.state.skills);
-    result["checkSummary"] = json!({"newRemote":new_remote,"associated":associated,"associationPending":association_pending,"needsAttention":attention,"errors":errors,"docsUpdated":docs_updated});
-    Ok(result)
+    Ok(json!({
+        "checkSummary": {
+            "newRemote": new_remote,
+            "associated": associated,
+            "associationPending": association_pending,
+            "needsAttention": attention,
+            "errors": errors,
+            "docsUpdated": docs_updated
+        }
+    }))
 }
 
 fn documentation_updates(before: &[Value], current: &[Value]) -> usize {
@@ -1629,7 +1647,7 @@ fn refresh_matches(selected: &Option<BTreeSet<String>>, skill: &Value) -> bool {
         .as_ref()
         .is_none_or(|ids| skill["id"].as_str().is_some_and(|id| ids.contains(id)))
 }
-fn refresh_local(m: &mut Manager, req: &Value) -> Result<Value, String> {
+fn refresh_local(m: &mut Manager, req: &Value) -> Result<(), String> {
     let selected = m.refresh_selection(req)?;
     let previous = m.state.clone();
     let source_errors: BTreeMap<String, Value> = m
@@ -1728,7 +1746,7 @@ fn refresh_local(m: &mut Manager, req: &Value) -> Result<Value, String> {
             }
         }
     }
-    save_association_state(m, previous)
+    save_association_changes(m, previous)
 }
 fn note_untracked(skill: &mut Value, all: &BTreeMap<String, String>, scope: &[String]) {
     let untracked: Vec<_> = all.keys().filter(|p| !scope.contains(p)).cloned().collect();

@@ -1,5 +1,18 @@
 # v0.3.0-dev.1
 
+## d2883c2 候选验收（2026-11-19）
+
+以下结果对应 Windows x64 开发候选 `00f3b75b`，源码提交 `d2883c2`。本机仍通过此前交付的入口运行，公开发行仍为 v0.2.11。
+
+- Windows 构建及静态检查通过，前端 750 项、Rust 958 项通过。本机用候选程序核对了 41 个管理工具的后台接口。 [Windows 构建](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/44349985187)
+- 旧版安装、升级到此候选和普通卸载已在云端隔离环境运行，三步均成功，合成管理数据和外部资源保持原样。该结果绑定当次云端安装包。 [升级和卸载核对](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/44354932948)
+- 同机各十轮冷热启动达到计划限制。30 分钟运行正常退出且空闲 CPU 达标，内存收敛仍未达到原标准。短内存对照显示，界面切换与后台检查均值得继续排查。 [启动](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/44359695498) · [30 分钟测试](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/44351973547) · [短对照](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/44363662826)
+- 独立更新负载下，搜索、筛选、页签及说明的 P95 为 245–286 ms，均超过原 200 ms 目标并满足计划的有限容差。另有同机三负载复验，结论以该次测量为准。 [更新实测](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/44350246153) · [同机复验](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/44363982631)
+
+实际显示与系统动效、正式切换、新版本发行材料仍需单独验收。下文各附件摘要只对应其列出的历史候选。
+
+## 先前候选记录
+
 **独立验收候选 9436a75a（2026-11-18）。** 修复多个标签页恢复时，一条草稿读取失败导致其他标签一直停在恢复中的问题。70 项相关测试、前端与离线 Windows 构建及 stdio 检查通过。当前正式启动入口仍运行 0c84ce2e。已生成独立候选的便携包和安装包，离线确认两份附件包含同一程序和许可证。已逐项回读本地源码审阅 ZIP，核对到候选运行输入和实际安装模板。正式源码提交、原生恢复、实际安装和公开发布仍待完成。[草稿恢复修复](../CHANGELOG.md#workspace-draft-restore-retry-20261118)
 
 **当前本机启动入口：0c84ce2e，更新于 2026-11-18，未公开发行。** 已修复恢复的 Skill 标签名未随同一 Skill 更新的问题。相关工作区检查、独立 Windows 构建、stdio 与便携、安装候选的内容核对通过；两个包包含同一程序和许可。正式启动入口已切到此版并成功读取原库；安装候选未签名、未运行。本机改动未提交，旧提交的源码包不能作为本候选的对应源码附件。[本次更新](../CHANGELOG.md#skill-tab-title-and-mixed-load-evidence-20261118)

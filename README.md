@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 后台检查与任务历史的内存开销（开发候选） | 2026-11-19 | 1、后台检查省去中间技能库快照。[详情](CHANGELOG.md#background-check-allocation-20261119)<br>2、保存任务历史时直接读取现有资源键，继续兼容原记录格式。[详情](CHANGELOG.md#background-check-allocation-20261119) |
 | 说明页与更新准备（开发候选） | 2026-11-19 | 1、打开独立说明页时按需读取导出选择，已开始的选择可继续使用。[详情](CHANGELOG.md#document-export-and-update-preparation-20261119)<br>2、计算候选更新所需空间时，复用已选文件的成员索引。[详情](CHANGELOG.md#document-export-and-update-preparation-20261119) |
 | Skill 说明打开速度（开发候选） | 2026-11-18 | 1、读取说明时减少重复状态复制和无关预览处理。[详情](CHANGELOG.md#skill-document-opening-20261118)<br>2、技能排序和快捷入口按需计算。[详情](CHANGELOG.md#skill-document-opening-20261118) |
 | 资源搜索焦点（开发候选） | 2026-11-18 | 1、全部资源与工具搜索框聚焦时只显示一圈清晰轮廓。[详情](CHANGELOG.md#resource-search-focus-20261118) |

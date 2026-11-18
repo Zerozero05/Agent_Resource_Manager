@@ -32,6 +32,11 @@ fn automatic_checks() -> String {
     "auto".into()
 }
 
+pub(crate) struct TaskHistoryRow {
+    pub(crate) id: String,
+    pub(crate) payload: String,
+}
+
 pub struct Manager {
     pub(crate) basic_mode: bool,
     resource_catalog_available: bool,
@@ -967,7 +972,7 @@ impl Manager {
     pub(crate) fn store_workspace_with_history(
         &self,
         value: &Value,
-        records: &[Value],
+        records: &[TaskHistoryRow],
     ) -> Result<(), String> {
         if self.basic_mode {
             return Ok(());
@@ -985,10 +990,7 @@ impl Manager {
             for record in records {
                 db.execute(
                     "INSERT INTO task_history(id,payload) VALUES(?1,?2)",
-                    params![
-                        record["id"].as_str().ok_or("Invalid task history ID")?,
-                        record.to_string()
-                    ],
+                    params![record.id, record.payload],
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -1027,7 +1029,24 @@ impl Manager {
             .collect();
         records
     }
+    #[cfg(test)]
     pub(crate) fn store_task_history(&self, records: &[Value]) -> Result<(), String> {
+        let rows = records
+            .iter()
+            .map(|record| {
+                Ok(TaskHistoryRow {
+                    id: record["id"]
+                        .as_str()
+                        .ok_or("Invalid task history ID")?
+                        .into(),
+                    payload: record.to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, &str>>()?;
+        self.store_task_history_rows(&rows)
+    }
+
+    pub(crate) fn store_task_history_rows(&self, records: &[TaskHistoryRow]) -> Result<(), String> {
         if self.basic_mode {
             return Ok(());
         }
@@ -1039,8 +1058,7 @@ impl Manager {
         let result = (|| {
             let mut retained = BTreeSet::new();
             for record in records {
-                let id = record["id"].as_str().ok_or("Invalid task history ID")?;
-                if !retained.insert(id) {
+                if !retained.insert(record.id.as_str()) {
                     return Err("Duplicate task history ID".into());
                 }
             }
@@ -1067,11 +1085,8 @@ impl Manager {
                 .prepare("INSERT INTO task_history(id,payload) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload WHERE task_history.payload <> excluded.payload")
                 .map_err(|e| e.to_string())?;
             for record in records {
-                save.execute(params![
-                    record["id"].as_str().ok_or("Invalid task history ID")?,
-                    record.to_string()
-                ])
-                .map_err(|e| e.to_string())?;
+                save.execute(params![record.id, record.payload])
+                    .map_err(|e| e.to_string())?;
             }
             db.execute_batch("COMMIT").map_err(|e| e.to_string())
         })();

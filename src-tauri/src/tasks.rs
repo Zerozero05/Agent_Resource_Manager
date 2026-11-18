@@ -1,5 +1,5 @@
 //! Background operations share one durable state writer, never a long I/O lock.
-use crate::model::{now, Manager, ManagerRuntime, State};
+use crate::model::{now, Manager, ManagerRuntime, State, TaskHistoryRow};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
@@ -118,12 +118,34 @@ pub(crate) struct Task {
     resources: Vec<String>,
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+enum TaskHistoryField<'a> {
+    Summary(&'a Value),
+    Resources(&'a [String]),
+}
+
 impl Task {
     fn terminal(&self) -> bool {
         !matches!(self.status.as_str(), "queued" | "running")
     }
     fn metadata(&self) -> Value {
         serde_json::to_value(self).expect("serializable task")
+    }
+    fn history_row(&self) -> TaskHistoryRow {
+        let summary = self.summary();
+        let mut fields: BTreeMap<_, _> = summary
+            .as_object()
+            .expect("task summary object")
+            .iter()
+            .map(|(name, value)| (name.as_str(), TaskHistoryField::Summary(value)))
+            .collect();
+        // Keep the existing JSON field order for SQLite's unchanged-row comparison.
+        fields.insert("resources", TaskHistoryField::Resources(&self.resources));
+        TaskHistoryRow {
+            id: self.id.clone(),
+            payload: serde_json::to_string(&fields).expect("serializable task metadata"),
+        }
     }
     fn summary(&self) -> Value {
         // Scheduling keys remain in durable history and individual task reads.
@@ -234,7 +256,7 @@ fn retention_action(action: &str) -> &'static str {
         _ => "other",
     }
 }
-fn history_records(jobs: &BTreeMap<String, Job>) -> Vec<Value> {
+fn history_records(jobs: &BTreeMap<String, Job>) -> Vec<TaskHistoryRow> {
     let mut terminal: Vec<_> = jobs
         .values()
         .filter(|job| job.visible && job.task.terminal())
@@ -246,11 +268,11 @@ fn history_records(jobs: &BTreeMap<String, Job>) -> Vec<Value> {
             .cmp(&a.task.finished_at.as_deref())
     });
     terminal.truncate(HISTORY_LIMIT);
-    let mut records: Vec<_> = terminal.iter().map(|job| job.task.metadata()).collect();
+    let mut records: Vec<_> = terminal.iter().map(|job| job.task.history_row()).collect();
     records.extend(
         jobs.values()
             .filter(|job| job.visible && !job.task.terminal())
-            .map(|job| job.task.metadata()),
+            .map(|job| job.task.history_row()),
     );
     records
 }
@@ -1456,7 +1478,7 @@ impl TaskSystem {
         self.manager
             .lock()
             .map_err(|_| "Manager state lock failed")?
-            .store_task_history(&records)
+            .store_task_history_rows(&records)
     }
     fn persist_visible(&self, id: &str) -> Result<(), String> {
         let visible = self
@@ -6175,6 +6197,51 @@ mod tests {
     }
 
     #[test]
+    fn task_history_row_matches_legacy_bytes_without_rewriting() {
+        let (dir, service) = fixture();
+        let result = Arc::new(TaskResult::new(&json!({"privateResult":true})));
+        let resources = (0..2002)
+            .map(|index| format!("file:D:\\技能\\{index}\t\"输入\"\n🧪"))
+            .collect();
+        let mut job = retention_job("history-row", "check_now", result.clone(), resources);
+        job.task.started_at = Some("2026-11-11T00:00:01Z".into());
+        job.task.finished_at = Some("2026-11-11T00:00:02Z".into());
+        job.task.error = Some("历史提示".into());
+        job.task.origin = json!({"windowLabel":"main","paneId":"详情"});
+        job.task.progress = json!({"total":2002,"completed":2002});
+        job.task.result_files = serde_json::from_value(json!([{
+            "id":"result","label":"摘要","path":"D:\\技能\\摘要.md",
+            "bytes":42,"modifiedMillis":null
+        }]))
+        .unwrap();
+        let legacy = job.task.metadata();
+        let row = job.task.history_row();
+        assert_eq!(row.id, job.task.id);
+        assert_eq!(row.payload, legacy.to_string());
+        let empty = retention_job("empty-row", "get_document", result, vec![]);
+        assert_eq!(
+            empty.task.history_row().payload,
+            empty.task.metadata().to_string()
+        );
+
+        service
+            .manager
+            .lock()
+            .unwrap()
+            .store_task_history(&[legacy])
+            .unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("manager.sqlite3")).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER reject_unchanged_history_write BEFORE UPDATE ON task_history
+             BEGIN SELECT RAISE(ABORT,'unchanged history was rewritten'); END;",
+        )
+        .unwrap();
+        service.jobs.lock().unwrap().insert(row.id, job);
+        service.persist_history().unwrap();
+        assert_eq!(history_payloads(&db)["history-row"], row.payload);
+    }
+
+    #[test]
     fn task_history_incremental_persistence_changes_only_modified_rows() {
         let (dir, service) = fixture();
         let before = vec![
@@ -6386,7 +6453,10 @@ mod tests {
         let mut hidden = retention_job("hidden", "check_now", payload, vec![]);
         hidden.visible = false;
         jobs.insert("hidden".into(), hidden);
-        let records = history_records(&jobs);
+        let records: Vec<Value> = history_records(&jobs)
+            .into_iter()
+            .map(|row| serde_json::from_str(&row.payload).unwrap())
+            .collect();
         let mut expected_ids = vec!["terminal-104".to_owned()];
         expected_ids.extend((0..99).map(|index| format!("terminal-{index:03}")));
         expected_ids.extend(["active-a".to_owned(), "active-z".to_owned()]);

@@ -254,14 +254,14 @@ pub(crate) fn discover(manager: &mut Manager, request: &Value) -> Result<Discove
     Ok(result)
 }
 
-fn persist(manager: &mut Manager, previous: State) -> Result<Value, String> {
-    if serde_json::to_value(&manager.state).ok() != serde_json::to_value(&previous).ok() {
+fn persist(manager: &mut Manager, previous: State) -> Result<(), String> {
+    if manager.state != previous {
         if let Err(error) = manager.save() {
             manager.state = previous;
             return Err(error);
         }
     }
-    Ok(manager.snapshot())
+    Ok(())
 }
 
 pub(crate) fn handle(manager: &mut Manager, request: &Value) -> Result<Option<Value>, String> {
@@ -298,7 +298,8 @@ pub(crate) fn handle(manager: &mut Manager, request: &Value) -> Result<Option<Va
         if changed {
             manager.state.check_summary = summary.clone();
         }
-        let mut value = persist(manager, previous)?;
+        persist(manager, previous)?;
+        let mut value = manager.snapshot();
         value["checkSummary"] = summary;
         value["discoveredSkillIds"] = json!(discovery.changed_ids);
         return Ok(Some(value));
@@ -509,19 +510,17 @@ pub(crate) fn handle(manager: &mut Manager, request: &Value) -> Result<Option<Va
             if !discovery.changed_ids.is_empty() {
                 manager.save()?;
             }
-            let mut value = if remote_request["discoveryOnly"] == true
+            let check = if remote_request["discoveryOnly"] == true
                 && remote_request["skillIds"]
                     .as_array()
                     .is_some_and(Vec::is_empty)
             {
-                manager.snapshot()
+                // A discovery-only no-op inherits the current live summary.
+                manager.snapshot()["checkSummary"].clone()
             } else {
-                crate::remote::check(manager, &remote_request)?
+                crate::remote::check(manager, &remote_request)?["checkSummary"].clone()
             };
-            let mut summary = value["checkSummary"]
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
+            let mut summary = check.as_object().cloned().unwrap_or_default();
             summary.insert("imported".into(), json!(discovery.imported));
             summary.insert("newLocal".into(), json!(discovery.imported));
             let remote_errors = summary.get("errors").and_then(Value::as_u64).unwrap_or(0);
@@ -545,13 +544,14 @@ pub(crate) fn handle(manager: &mut Manager, request: &Value) -> Result<Option<Va
                 manager.state.check_summary = json!(summary);
             }
             persist(manager, previous)?;
-            value = manager.snapshot();
+            let mut value = manager.snapshot();
             value["checkSummary"] = json!(summary);
             return Ok(Some(value));
         }
         _ => unreachable!(),
     }
-    Ok(Some(persist(manager, previous)?))
+    persist(manager, previous)?;
+    Ok(Some(manager.snapshot()))
 }
 
 #[cfg(test)]
