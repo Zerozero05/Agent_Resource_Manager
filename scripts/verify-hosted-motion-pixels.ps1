@@ -169,12 +169,29 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
     # Existing pipe guard checks that its exact launched owner is ready with this isolated database.
     $session.ReadObservation('task_list') | Out-Null
     $report.native = [ordered]@{ pid=$session.Pid; creationFileTime=$session.CreationFileTime; windowHandle=$session.Handle }
-    $report.phase = 'settings-motion-control'
-    $session.ClickNamed('设置','主要导航')
-    if (-not @($session.InspectNamed('设置分类') | Where-Object { -not $_.offscreen }).Count) {
-        $session.ClickNamed('设置分类：常规',$null)
+    function Wait-VisibleControl([string]$name,[string]$type) {
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            $rows = @($session.InspectNamed($name,$null) | Where-Object { $_.type -ceq $type -and $_.enabled -and -not $_.offscreen })
+            if ($rows.Count -gt 1) { throw "The visible owned control is ambiguous: $name." }
+            if ($rows.Count -eq 1) { return }
+            Start-Sleep -Milliseconds 50
+        } while ($clock.ElapsedMilliseconds -lt 10000)
+        throw "The visible owned control did not appear: $name."
     }
-    $session.ClickNamed('外观','设置分类')
+
+    $report.phase = 'settings-navigation'
+    $session.InvokeUnique('设置','主要导航')
+    $report.phase = 'settings-classification'
+    Wait-VisibleControl '设置分类：常规' 'ControlType.Button'
+    if (-not @($session.InspectNamed('外观',$null) | Where-Object { $_.type -ceq 'ControlType.Button' -and $_.enabled -and -not $_.offscreen }).Count) {
+        $session.InvokeUnique('设置分类：常规',$null)
+    }
+    $report.phase = 'settings-appearance'
+    $session.InvokeUnique('外观','设置分类')
+    Wait-VisibleControl '设置分类：外观' 'ControlType.Button'
+    $report.phase = 'settings-motion-control'
+    Wait-VisibleControl '动效' 'ControlType.ComboBox'
     $uia = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$session.Handle)
     function Find-Exact($root,$name) {
         $match = $root.FindAll([Windows.Automation.TreeScope]::Descendants,

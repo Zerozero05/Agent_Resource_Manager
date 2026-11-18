@@ -11,7 +11,7 @@ env:
   CANDIDATE_SHA256: f8e240df74644942c929cc8d0ad699e1369c7a51cedab662620e8152c4ab41af
 jobs:
   motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-pixels-3f703b1-r2' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-pixels-3f703b1-r3' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:
