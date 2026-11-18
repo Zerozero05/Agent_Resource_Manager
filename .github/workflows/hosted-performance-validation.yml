@@ -1,4 +1,4 @@
-name: Verify hosted Windows update overlap with sufficient independent tasks
+name: Verify hosted Windows update overlap with a 30-second startup budget
 on: create
 permissions:
   contents: read
@@ -7,9 +7,10 @@ env:
   CANDIDATE_RUN_ID: '44341382564'
   CANDIDATE_SOURCE: c6bd6821066b90fb0db5fdefd0792bc8cf828e53
   CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_c6bd6821066b90fb0db5fdefd0792bc8cf828e53
+  CANDIDATE_SHA256: e5001e79fb5bb18a847244846a43cdf9e9ae95f59e3ac4de0d63893ec044046d
 jobs:
   candidate:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-update-sampling-c6bd682' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-update-startup30-c6bd682' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -69,7 +70,7 @@ jobs:
           $source = Join-Path $candidate 'BUILD_INFO.json'
           $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
           $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($info.executableSha256 -cne $digest -or $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or
+          if ($digest -cne $env:CANDIDATE_SHA256 -or $info.executableSha256 -cne $digest -or $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or
               $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or $info.workflowRunAttempt -ne 1 -or
               $info.repository -cne $env:GITHUB_REPOSITORY -or $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the executable.' }
           $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
@@ -103,9 +104,17 @@ jobs:
             $_.Name -in @('report.json','observations.jsonl','policy-before-run.json','convergence-bounds-before-loop.json') -or
             $_.Name -like '*-driver.json'
           } | Copy-Item -Destination $evidence.FullName
+          $driverPath = Join-Path $out 'candidate-mixed-1000-100-driver.json'
+          if (Test-Path -LiteralPath $driverPath -PathType Leaf) {
+            $driver = Get-Content -LiteralPath $driverPath -Raw | ConvertFrom-Json
+            if ($driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or $driver.strictReadinessTimeoutMs -ne 30000) { throw 'Expected the pinned candidate and strict 30-second startup wait.' }
+            [ordered]@{startupMs=$driver.startupMs; readinessBudgetMs=$driver.strictReadinessTimeoutMs; driverStatus=$driver.status
+              error=$driver.error; closedNormally=$driver.closedNormally; visibleControlTypes=@($driver.names | Select-Object -ExpandProperty type -Unique)
+              driverSha256=(Get-FileHash -LiteralPath $driverPath -Algorithm SHA256).Hash.ToLowerInvariant()} | ConvertTo-Json -Compress
+          }
           $reportPath = Join-Path $out 'report.json'
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-          if ($report.suite -cne 'loads' -or $report.candidate.source -cne $env:CANDIDATE_SOURCE -or
+          if ($report.suite -cne 'loads' -or $report.candidate.source -cne $env:CANDIDATE_SOURCE -or $report.candidate.sha256 -cne $env:CANDIDATE_SHA256 -or
               $report.harnessChangedDuringRun -ne $false -or $report.nativeErrors.Count -ne 0 -or $report.error) { throw 'The exact native workload did not finish cleanly.' }
           $events = Get-Content -LiteralPath (Join-Path $out 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
           $exits = @($events | Where-Object { $_.kind -ceq 'native-normal-exit' -and $_.closedNormally -eq $true })
