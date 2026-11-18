@@ -1,4 +1,4 @@
-name: Verify hosted Windows local-check overlap
+name: Verify hosted Windows download and update overlap
 on: create
 permissions:
   contents: read
@@ -9,7 +9,7 @@ env:
   CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_bbd51752eec3d616203ee7a0529d0d935b7cc8ba
 jobs:
   candidate:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-check-overlap-bbd5175' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-download-update-bbd5175' }}
     runs-on: ubuntu-latest
     timeout-minutes: 18
     env:
@@ -36,11 +36,11 @@ jobs:
   measure:
     needs: candidate
     runs-on: windows-latest
-    timeout-minutes: 23
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        suite: [check]
+        suite: [download, update]
     defaults:
       run:
         shell: pwsh
@@ -81,9 +81,24 @@ jobs:
           $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
           $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
           if (Test-Path -LiteralPath $root) { throw 'Expected a fresh native measurement directory.' }
-          $arguments = @('--suite', 'loads', '--load-kind', 'check', '--sample-overlap', 'true', '--accessibility-input',
+          $arguments = @('--suite', 'loads', '--load-kind', $env:SUITE, '--sample-overlap', 'true', '--accessibility-input',
             '--candidate', (Join-Path $candidate 'agent-resource-manager.exe'),
             '--candidate-build-info', (Join-Path $candidate 'BUILD_INFO.native-validation.json'))
+          if ($env:SUITE -eq 'download') {
+            $resourceRoot = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\resources'
+            New-Item -ItemType Directory -Path $resourceRoot | Out-Null
+            $specification = Join-Path $env:RUNNER_TEMP 'pinned-agent-reach-download.json'
+            [ordered]@{ repository='Panniantong/Agent-Reach'; tag='v1.6.0'; releaseId=421526768; assetId=668240314
+              assetName='agent-reach.zip'; assetBytes=676536 } | ConvertTo-Json -Compress |
+              Set-Content -LiteralPath $specification -Encoding utf8NoBOM
+            $arguments += @('--download-spec', $specification, '--popup-select', 'true')
+          } elseif ($env:SUITE -eq 'update') {
+            $generated = & node --input-type=module -e "import {createNativeLoadFixture} from './scripts/performance-load-fixture.mjs'; import {join} from 'node:path'; const manifestPaths=[]; for(let index=0;index<12;index++){ const f=await createNativeLoadFixture(); manifestPaths.push(join(f.root,'load-fixture.json')); } console.log(JSON.stringify(manifestPaths));"
+            if ($LASTEXITCODE -ne 0) { throw 'Could not prepare independent synthetic update fixtures.' }
+            $manifests = @($generated | ConvertFrom-Json)
+            if ($manifests.Count -ne 12 -or @($manifests | Sort-Object -Unique).Count -ne 12) { throw 'The exact update fixture count was not created.' }
+            foreach ($manifest in $manifests) { $arguments += @('--stage-fixture', $manifest) }
+          } else { throw 'Unexpected load suite.' }
           & node scripts/verify-uia-performance.mjs @arguments
           exit $LASTEXITCODE
       - name: Preserve reports and check the scheduled result
@@ -107,13 +122,13 @@ jobs:
           $summary = [ordered]@{suite=$env:SUITE; executableSha256=$report.candidate.sha256
             reportSha256=(Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash.ToLowerInvariant()
             normalExits=$exits.Count}
-          $score = $report.loadVerdict.check.sampledOverlap
+          $score = $report.loadVerdict.($env:SUITE).sampledOverlap
           $summary.status = $report.status
           $summary.overlap = $score
           $summary | ConvertTo-Json -Depth 10 -Compress
-          if ($exits.Count -ne 1 -or $report.loadSelection.scope -cne 'sampled-check-only' -or
-              $report.status -cne 'passed-sampled-native-check-only' -or $score.status -cne 'passed') {
-            throw 'The local check did not meet the existing overlap policy.'
+          if ($exits.Count -ne 1 -or $report.loadSelection.scope -cne ("sampled-$env:SUITE-only") -or
+              $report.status -cne ("passed-sampled-native-$env:SUITE-only") -or $score.status -cne 'passed') {
+            throw 'The selected workload did not meet the existing overlap policy.'
           }
           foreach ($name in @('search','filter','tab','document')) {
             if ($score.categories.$name.count -lt 100 -or $score.categories.$name.status -cne 'passed' -or
