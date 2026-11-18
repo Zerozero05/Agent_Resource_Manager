@@ -624,6 +624,53 @@ mod tests {
         assert!(handle(&mut manager, &json!({"action":"export","skillId":id,"planId":plan["id"],"destinationMode":"default","destination":destination})).is_err());
         assert_eq!(zip_entries(&destination), entries);
     }
+
+    #[test]
+    fn explicit_custom_export_writes_only_the_selected_archive() {
+        let (temp, mut manager, id, root) = fixture();
+        fs::write(root.join("LICENSE"), "Synthetic fixture license").unwrap();
+        fs::write(root.join("CHANGELOG.md"), "Unselected local notes").unwrap();
+        let originals = local::files(&root).unwrap();
+        let default_directory = manager.storage.path("export").unwrap();
+        assert!(!default_directory.exists());
+        let custom_directory = temp.path().join("chosen-exports");
+        fs::create_dir(&custom_directory).unwrap();
+        let destination = custom_directory.join("selected.zip");
+
+        let plan = crate::dispatch(
+            &mut manager,
+            &json!({"action":"get_export_plan","skillId":id,"selectedIds":["file:README.md"]}),
+        )
+        .unwrap();
+        assert_eq!(plan["canExport"], true, "{plan}");
+        let request = json!({"action":"export","skillId":id,"planId":plan["id"],"destinationMode":"custom","destination":destination});
+        let result = crate::dispatch(&mut manager, &request).unwrap();
+        assert_eq!(result["planId"], plan["id"]);
+        assert_eq!(
+            local::canonical(Path::new(result["path"].as_str().unwrap())).unwrap(),
+            local::canonical(&destination).unwrap()
+        );
+        let entries = zip_entries(&destination);
+        assert_eq!(
+            entries.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["LICENSE", "README.md", "SKILL.md", PROVENANCE]
+        );
+        assert_eq!(entries["LICENSE"], b"Synthetic fixture license");
+        assert_eq!(entries["README.md"], b"Optional package note");
+        assert_eq!(
+            entries["SKILL.md"],
+            fs::read(root.join("SKILL.md")).unwrap()
+        );
+
+        let archive = fs::read(&destination).unwrap();
+        assert!(crate::dispatch(&mut manager, &request)
+            .unwrap_err()
+            .contains("Cannot create a new export"));
+        assert_eq!(fs::read(&destination).unwrap(), archive);
+        assert!(!default_directory.exists());
+        assert_eq!(local::files(&root).unwrap(), originals);
+    }
+
     fn add_reference(root: &Path, paths: &[&Path]) {
         let mut content = fs::read_to_string(root.join("SKILL.md")).unwrap();
         for path in paths {
