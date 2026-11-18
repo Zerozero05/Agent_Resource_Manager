@@ -891,6 +891,27 @@ public sealed class NativeUiMeasurement : IDisposable {
     AutomationElement target=KeyboardTarget(name);KeyboardFocused(target,"before-shortcut-"+gesture);Send(keys);KeyboardSettled("after-shortcut-"+gesture+"-paint");
     return new{gesture=gesture,originInput=name,method="guarded-existing-SendInput",functionalOnly=true,imeCompositionVerified=false};
   }
+  public object KeyboardSearchFocus(string name,string phase) {
+    if(!keyboardInput||!AccessibilityInput)throw new InvalidOperationException("Search focus requires an explicit accessibility and functional keyboard session.");
+    if(name!="搜索全部资源"&&name!="搜索工具")throw new InvalidOperationException("Search focus is limited to the two resource search fields.");
+    AutomationElement search=Unique(name,ControlType.Edit), target=search;
+    if(search.Current.IsPassword)throw new InvalidOperationException("Search focus cannot use a protected field.");
+    if(phase=="pointer") {
+      PresentControl(search);
+      KeyboardGuard("before-resource-search-pointer");
+      ClickNative(search);
+    } else if(phase=="tab"||phase=="shift-tab") {
+      AutomationElement next=name=="搜索全部资源"?Unique("全部",ControlType.Button,"资源类型"):Unique("工具类型",ControlType.ComboBox);
+      AutomationElement source=phase=="tab"?search:next;
+      target=phase=="tab"?next:search;
+      KeyboardFocused(source,"before-resource-search-"+phase);
+      if(phase=="tab")Send(new[]{Key(9),Key(9,true)});
+      else Send(new[]{Key(16),Key(9),Key(9,true),Key(16,true)});
+    } else throw new InvalidOperationException("Unsupported resource search focus action.");
+    Wait(()=>KeyboardFocusOwned(target),"The observed native keyboard focus did not reach the exact resource control.");
+    KeyboardFocused(target,"after-resource-search-"+phase);
+    return new{phase,search=name,focusedName=target.Current.Name,focusedType=target.Current.ControlType.ProgrammaticName,bounds=target.Current.BoundingRectangle.ToString(),pid=Pid,windowHandle=Handle,keyboardFocusOwned=true};
+  }
   bool Selected(AutomationElement element){object selection;return element.TryGetCurrentPattern(SelectionItemPattern.Pattern,out selection)&&((SelectionItemPattern)selection).Current.IsSelected;}
   public object InspectNamed(string name,string scopeName=null){Identity(false);try{AutomationElement scope=String.IsNullOrEmpty(scopeName)?root:Named(scopeName,null,false);if(scope==null)throw new InvalidOperationException("Exact observation scope unavailable.");List<object> results=new List<object>();foreach(AutomationElement element in scope.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,name)))results.Add(new{name=element.Current.Name,type=element.Current.ControlType.ProgrammaticName,enabled=element.Current.IsEnabled,offscreen=element.Current.IsOffscreen,bounds=element.Current.BoundingRectangle.ToString(),hasKeyboardFocus=element.Current.HasKeyboardFocus,selected=Selected(element)});return results;}catch(ElementNotAvailableException){return new object[0];}}
   public object FormFields(){Identity(false);List<object> results=new List<object>();try{CacheRequest cache=new CacheRequest();cache.Add(AutomationElement.NameProperty);cache.Add(AutomationElement.ControlTypeProperty);cache.Add(AutomationElement.IsEnabledProperty);cache.Add(AutomationElement.IsOffscreenProperty);using(cache.Activate()){foreach(AutomationElement element in root.FindAll(TreeScope.Descendants,new OrCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.ComboBox),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.CheckBox),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Spinner))))results.Add(new{name=element.Cached.Name,type=element.Cached.ControlType.ProgrammaticName,enabled=element.Cached.IsEnabled,offscreen=element.Cached.IsOffscreen});}}catch(ElementNotAvailableException){return new object[0];}catch(COMException error) when(error.HResult==unchecked((int)0x80040201)){return new object[0];}return results;}
@@ -1486,6 +1507,7 @@ try {
                 if($request.op -eq 'keyboardSelectPopupCombo' -and ($PrivateUi -or -not $KeyboardInput -or -not $AccessibilityInput)){throw 'Popup combo keyboard selection requires an explicitly enabled non-private functional keyboard session.'}
                 if($PrivateUi -and $request.op -in @('snapshot','names','screenshot','comboState','windowIdentity')){throw 'Whole-interface observations are disabled for the private UI session.'}
                 if($request.op -in @('keyboardShortcut','keyboardEdit','keyboardField','keyboardIme','prepareKeyboardForeground') -and ($PrivateUi -or -not $KeyboardInput)){throw 'Keyboard operations require an explicitly enabled non-private functional session.'}
+                if($request.op -eq 'keyboardSearchFocus' -and ($PrivateUi -or -not $KeyboardInput -or -not $AccessibilityInput)){throw 'Search focus requires an explicitly enabled non-private accessibility and functional keyboard session.'}
                 if($request.op -in @('driverMemory','collectDriverMemory') -and (-not $DriverMemoryDiagnostic -or $Mode -ne 'bridge' -or -not $AccessibilityInput -or $KeyboardInput -or $PrivateUi)){throw 'Driver memory diagnostics require an explicitly enabled non-private accessibility-only bridge session without keyboard input.'}
                 $value=switch($request.op){
                     'releaseClient' {
@@ -1512,6 +1534,7 @@ try {
                     'click' {$session.ClickNamed([string]$request.name,[string]$request.scope);@{clicked=$true}}
                     'type' {$session.TypeNamed([string]$request.name,[string]$request.value);@{typed=$true}}
                     'keyboardShortcut' {$session.KeyboardShortcut([string]$request.name,[string]$request.gesture)}
+                    'keyboardSearchFocus' {$session.KeyboardSearchFocus([string]$request.name,[string]$request.phase)}
                     'keyboardEdit' {$session.KeyboardEdit([string]$request.name,[string]$request.value)}
                     'keyboardIme' {
                         if($request.PSObject.Properties.Name -contains 'prepareChineseIme' -and $request.prepareChineseIme -isnot [bool]){throw 'Chinese IME preparation requires an explicit boolean.'}

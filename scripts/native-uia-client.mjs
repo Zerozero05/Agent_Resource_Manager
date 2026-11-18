@@ -307,6 +307,10 @@ export class NativeUiaSession {
       if (fields.focusBeforeExpand && (this.privateUi || this.accessibilityInput !== true || fields.foreground === true)) return Promise.reject(new Error('Focus before expansion requires a non-private accessibility-only functional selection.'));
     }
     if (op === 'prepareKeyboardForeground' && (this.privateUi || this.keyboardInput !== true)) return Promise.reject(new Error('Keyboard operations require an explicitly enabled non-private functional session.'));
+    if (op === 'keyboardSearchFocus') {
+      if (this.privateUi || this.keyboardInput !== true || this.accessibilityInput !== true) return Promise.reject(new Error('Search focus requires an explicitly enabled non-private accessibility and functional keyboard session.'));
+      if (!['搜索全部资源', '搜索工具'].includes(fields.name) || !['pointer', 'tab', 'shift-tab'].includes(fields.phase)) return Promise.reject(new Error('Search focus accepts only the two resource search fields and the fixed focus sequence steps.'));
+    }
     if (['keyboardShortcut', 'keyboardEdit', 'keyboardField', 'keyboardIme'].includes(op)) {
       if (this.privateUi || this.keyboardInput !== true) return Promise.reject(new Error('Keyboard operations require an explicitly enabled non-private functional session.'));
       if (typeof fields.name !== 'string' || !fields.name || fields.name.length > 160) return Promise.reject(new Error('Keyboard operations require one exact named input.'));
