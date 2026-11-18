@@ -1,110 +1,105 @@
-name: Prepare Windows release assets
-on:
-  workflow_dispatch:
-    inputs:
-      candidate_run_id:
-        description: Successful Windows candidate run
-        required: true
-      candidate_artifact:
-        description: Exact verified candidate artifact name
-        required: true
-      executable_sha256:
-        description: Independently verified candidate executable SHA256
-        required: true
-      verify_installation:
-        description: Test install, upgrade, and uninstall without uploading packages
-        type: boolean
-        default: false
+name: Verify native Windows interface
+on: create
 permissions:
   contents: read
   actions: read
-concurrency:
-  group: prepare-release-${{ github.ref }}
-  cancel-in-progress: false
 jobs:
-  package:
+  frame:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/native-frame-validation-316c0ba7' }}
     runs-on: windows-latest
+    timeout-minutes: 20
     defaults:
       run:
         shell: pwsh
+    env:
+      CANDIDATE_RUN_ID: '44299528537'
+      CANDIDATE_SOURCE: 52fff45240081984b46f44b091193d1ba14896d3
+      CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_52fff45240081984b46f44b091193d1ba14896d3
+      EXPECTED_EXECUTABLE_SHA256: 316c0ba7d3f0bb037b7078cfeee702b80f50d1c65986de0ac1c49afac3fe6884
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-      - name: Install locked packaging tools
-        run: |
-          npm install --global pnpm@11.25.0
-          if ($LASTEXITCODE -ne 0) { throw 'Package manager installation failed' }
-          pnpm install --frozen-lockfile
-          if ($LASTEXITCODE -ne 0) { throw 'Locked packaging tool installation failed' }
-      - name: Download and verify candidate, then prepare seven release assets
-        id: release
+      - name: Verify runner and exact production candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          CANDIDATE_ARTIFACT: ${{ inputs.candidate_artifact }}
-          EXPECTED_EXECUTABLE_SHA256: ${{ inputs.executable_sha256 }}
-        run: ./scripts/prepare-release.ps1 -CandidateRunId $env:CANDIDATE_RUN_ID -CandidateArtifact $env:CANDIDATE_ARTIFACT -ExpectedExecutableSha256 $env:EXPECTED_EXECUTABLE_SHA256
-      - name: Verify the installed upgrade on a hosted Windows runner
-        if: ${{ inputs.verify_installation }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERIFIED_VERSION: ${{ steps.release.outputs.version }}
-          VERIFIED_EXECUTABLE_SHA256: ${{ inputs.executable_sha256 }}
         run: |
-          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows') {
-            throw 'The installer lifecycle must run in a fresh GitHub-hosted Windows VM'
-          }
-          $legacyName = 'Skill_Manager_v0.2.11_windows_x64_setup.exe'
-          $legacy = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-legacy-setup')
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'The isolated runner already has a manager process.' }
+          Add-Type -AssemblyName System.Windows.Forms
+          $screen = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+          [pscustomobject]@{ phase='native-frame-environment'; width=$screen.Width; height=$screen.Height
+            sessionId=[Diagnostics.Process]::GetCurrentProcess().SessionId; pwsh=$PSVersionTable.PSVersion.ToString()
+            node=(& node --version); operatingSystem=[Environment]::OSVersion.VersionString } | ConvertTo-Json -Compress
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+          $run = & gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.conclusion -cne 'success' -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1) { throw 'The exact candidate run was not the expected successful attempt.' }
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-frame-candidate'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'The pinned candidate archive could not be retrieved.' }
+          $exe = Join-Path $candidate 'agent-resource-manager.exe'
+          $source = Join-Path $candidate 'BUILD_INFO.json'
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:EXPECTED_EXECUTABLE_SHA256 -or
+              $info.executableSha256 -cne $env:EXPECTED_EXECUTABLE_SHA256 -or $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or
+              $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or $info.workflowRunAttempt -ne 1 -or
+              $info.repository -cne $env:GITHUB_REPOSITORY -or $info.version -cne '0.3.0-dev.1') { throw 'Candidate metadata did not bind to the verified executable.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+      - name: Exercise native window layout and preserve evidence
+        run: |
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-frame-candidate'
+          $prepared = & node scripts/verify-native-frame.mjs --phase prepare --densities comfortable,compact
+          if ($LASTEXITCODE -ne 0) { throw 'Isolated frame data preparation failed.' }
+          $descriptor = ($prepared | ConvertFrom-Json).fixture
+          $fixtureRoot = Split-Path -Parent $descriptor
+          $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-native-frame-evidence')
+          $exit = 1
           try {
-            gh release download v0.2.11 --repo $env:GITHUB_REPOSITORY --pattern $legacyName --dir $legacy.FullName
-            if ($LASTEXITCODE -ne 0) { throw 'The published v0.2.11 baseline installer could not be downloaded' }
+            & node scripts/verify-native-frame.mjs --phase run --fixture $descriptor --candidate (Join-Path $candidate 'agent-resource-manager.exe') --candidate-build-info (Join-Path $candidate 'BUILD_INFO.native-validation.json') --accessibility-input
+            $exit = $LASTEXITCODE
           } finally {
-            $env:GH_TOKEN = $null
+            foreach ($file in @('frame-result.json','frame-events.jsonl')) {
+              $source = Join-Path $fixtureRoot $file
+              if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $evidence.FullName }
+            }
+            $result = Join-Path $evidence.FullName 'frame-result.json'
+            if (Test-Path -LiteralPath $result -PathType Leaf) {
+              $report = Get-Content -LiteralPath $result -Raw | ConvertFrom-Json
+              $images = 0
+              foreach ($case in $report.cases) {
+                $dir = Join-Path $fixtureRoot $case.name
+                $driver = Join-Path $dir 'native-driver.json'
+                if (Test-Path -LiteralPath $driver -PathType Leaf) {
+                  Copy-Item -LiteralPath $driver -Destination (Join-Path $evidence.FullName "$($case.name)-native-driver.json")
+                }
+                foreach ($capture in $case.screenshots) {
+                  if ((Get-FileHash -LiteralPath $capture.path -Algorithm SHA256).Hash -ine $capture.sha256) { throw 'An owned-window capture differs from its recorded digest.' }
+                  $images++
+                  if ((Split-Path -Leaf $capture.path) -in @('wide.png','narrow-flyout.png','appearance-rows.png','unified-bottom.png')) {
+                    Copy-Item -LiteralPath $capture.path -Destination (Join-Path $evidence.FullName "$($case.name)-$(Split-Path -Leaf $capture.path)")
+                  }
+                }
+              }
+              [pscustomobject]@{ phase='native-frame-outcome'; status=$report.status; exe=$report.candidate.sha256
+                cases=@($report.cases | ForEach-Object { @{ name=$_.name; theme=$_.configuredTheme; density=$_.density; zoom=$_.configuredZoom
+                  cycles=$_.cycles.Count; screenshots=$_.screenshots.Count; normalExit=$_.closedNormally; preferences=$_.displayPreferencesRetained } })
+                captureHashesVerified=$images; error=$report.error; reportSha256=(Get-FileHash -LiteralPath $result -Algorithm SHA256).Hash.ToLowerInvariant() } | ConvertTo-Json -Depth 8 -Compress
+              if ($exit -eq 0 -and ($report.status -cne 'passed-synthetic-native-frame' -or $report.cases.Count -ne 8 -or $images -ne 88)) { throw 'A successful report did not contain the complete frame matrix.' }
+            } elseif ($exit -eq 0) { throw 'The frame run did not produce a report.' }
           }
-          $name = "Agent_Resource_Manager_v$($env:VERIFIED_VERSION)_windows_x64_setup.exe"
-          $assetDirectory = Join-Path $env:GITHUB_WORKSPACE 'outputs/release-assets'
-          $setupLine = @(Get-Content -LiteralPath (Join-Path $assetDirectory 'SHA256SUMS.txt') |
-            Where-Object { $_ -cmatch ('^[0-9a-f]{64}  ' + [regex]::Escape($name) + '$') })
-          if ($setupLine.Count -ne 1) { throw 'Expected exactly one packaged setup checksum' }
-          $parameters = @{
-            OldSetup = (Join-Path $legacy.FullName $legacyName)
-            OldSetupSha256 = 'd1a439fe476d05736c21bb6ee8c59e0ae0bbdaae54943106b5ec3a0b5dbf76aa'
-            OldExecutableSha256 = '1ca90747eca2ac3229762928d05036724229e910463c28be40925e9b2fb2092f'
-            OldVersion = '0.2.11'
-            CurrentSetup = (Join-Path $assetDirectory $name)
-            CurrentSetupSha256 = $setupLine[0].Substring(0, 64)
-            CurrentExecutableSha256 = $env:VERIFIED_EXECUTABLE_SHA256
-            CurrentVersion = $env:VERIFIED_VERSION
-            TestRoot = (Join-Path $env:RUNNER_TEMP 'arm-installed-upgrade')
-          }
-          ./scripts/verify-installed-upgrade.ps1 @parameters
-      - name: Upload installer lifecycle verification
-        if: ${{ always() && inputs.verify_installation }}
+          if ($exit -ne 0) { exit $exit }
+      - name: Upload native interface evidence
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_installed_upgrade_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arm-installed-upgrade/installed-upgrade-report.json
+          name: Agent_Resource_Manager_native_frame_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-native-frame-evidence/
           if-no-files-found: warn
-          retention-days: 14
-      - name: Upload reviewable release assets
-        if: ${{ !inputs.verify_installation }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
-        with:
-          name: Agent_Resource_Manager_v${{ steps.release.outputs.version }}_release_assets_${{ github.sha }}
-          path: outputs/release-assets/
-          if-no-files-found: error
-          retention-days: 14
-      - name: Upload packaging verification
-        if: ${{ !inputs.verify_installation }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
-        with:
-          name: Agent_Resource_Manager_release_verification_${{ github.sha }}
-          path: outputs/release-verification/
-          if-no-files-found: error
           retention-days: 14
