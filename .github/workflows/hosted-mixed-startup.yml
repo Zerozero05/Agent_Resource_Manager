@@ -1,0 +1,82 @@
+name: Probe fresh mixed native startup
+on: create
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-mixed-startup-bbd5175' }}
+    runs-on: windows-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CANDIDATE_RUN_ID: '44323802557'
+      CANDIDATE_SOURCE: bbd51752eec3d616203ee7a0529d0d935b7cc8ba
+      CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_bbd51752eec3d616203ee7a0529d0d935b7cc8ba
+      CANDIDATE_SHA256: 54269857d8cdcd3b2d9ab52f9eb00949960abb98470e8c8a8c399e5db645c273
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Verify fresh runner and exact prior build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted interactive Windows runner on D:.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no manager process.' }
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+          $verified = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $verified.conclusion -cne 'success' -or $verified.head_sha -cne $env:CANDIDATE_SOURCE -or
+              $verified.run_attempt -ne 1 -or $verified.path -cne '.github/workflows/check.yml' -or $verified.event -cne 'push') { throw 'Candidate run identity differs.' }
+          $base = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $base
+          if ($LASTEXITCODE -ne 0) { throw 'The exact previous candidate archive could not be retrieved.' }
+          $exe = Join-Path $base 'agent-resource-manager.exe'
+          $source = Join-Path $base 'BUILD_INFO.json'
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:CANDIDATE_SHA256 -or
+              $info.executableSha256 -cne $env:CANDIDATE_SHA256 -or $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or
+              $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or $info.workflowRunAttempt -ne 1 -or
+              $info.repository -cne $env:GITHUB_REPOSITORY -or $info.version -cne '0.3.0-dev.1') { throw 'Candidate executable or provenance differs.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $base 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+      - name: Launch once using the original strict readiness check
+        run: |
+          $base = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          if (Test-Path -LiteralPath $root) { throw 'Expected a fresh native measurement directory.' }
+          & node scripts/verify-hosted-mixed-startup.mjs --candidate (Join-Path $base 'agent-resource-manager.exe') --candidate-build-info (Join-Path $base 'BUILD_INFO.native-validation.json')
+          exit $LASTEXITCODE
+      - name: Preserve the exact startup and driver evidence
+        if: ${{ always() }}
+        run: |
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          $outputs = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue)
+          if ($outputs.Count -ne 1) { throw 'Expected one fresh mixed startup output directory.' }
+          $out = $outputs[0].FullName
+          $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-native-mixed-startup-evidence')
+          foreach ($name in @('mixed-startup-result.json','candidate-mixed-1000-100-driver.json')) {
+            $path = Join-Path $out $name
+            if (Test-Path -LiteralPath $path -PathType Leaf) { Copy-Item -LiteralPath $path -Destination $evidence.FullName }
+          }
+          $report = Get-Content -LiteralPath (Join-Path $out 'mixed-startup-result.json') -Raw | ConvertFrom-Json
+          if ($report.candidate.sha256 -cne $env:CANDIDATE_SHA256 -or $report.fixture.skillCount -ne 1000 -or $report.fixture.toolCount -ne 100 -or
+              $report.fixture.dataFingerprint -cne 'bd3bb8c680b1b7578d376583ab4b416c88ee47b66ae66b813bee455ca31ba3a1') { throw 'Unexpected candidate or mixed fixture.' }
+          [ordered]@{status=$report.status;closedNormally=$report.closedNormally;startupMs=$report.native.startupMs;webview=$report.webview;profileMarkers=$report.profileMarkers
+            driverPreserved=(Test-Path -LiteralPath (Join-Path $evidence.FullName 'candidate-mixed-1000-100-driver.json') -PathType Leaf)} | ConvertTo-Json -Depth 8 -Compress
+      - name: Upload only the two diagnostic reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        with:
+          name: Agent_Resource_Manager_native_mixed_startup_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-native-mixed-startup-evidence/
+          if-no-files-found: warn
+          retention-days: 14
