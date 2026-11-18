@@ -75,15 +75,72 @@ export function localInteractionVerdict(samples, condition = 'native-ui-input-to
   }));
 }
 
+const backgroundCategories = ['search', 'filter', 'tab', 'document'];
+const backgroundActions = { check: 'check_now', download: 'apply_resource_download', update: 'apply_resource_update_stage' };
+const explicitTimestamp = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value) ? Date.parse(value) : NaN;
+
+// Only ordered, distinct observations that finish inside an actual task can
+// support a statistical claim. Retain the historical smoke calculation below.
+function independentlySampledLoads(records, nativePid, condition, identity) {
+  const tally = Object.fromEntries(Object.keys(backgroundActions).map(kind => [kind, { samples: [], rejected: {} }]));
+  const owned = identity?.pid === nativePid && Number.isSafeInteger(nativePid) && nativePid > 0
+    && Number.isSafeInteger(identity.windowHandle) && identity.windowHandle > 0
+    && typeof identity.creationFileTime === 'string' && /^\d+$/.test(identity.creationFileTime);
+  const intervals = new Set();
+  let lastFinish = 0;
+  for (const record of records) {
+    if (!Object.hasOwn(tally, record.kind)) continue;
+    const entry = tally[record.kind];
+    const reject = reason => { entry.rejected[reason] = (entry.rejected[reason] || 0) + 1; };
+    const { sample, beforeObservedAtMs: before, afterObservedAtMs: after } = record;
+    if (!owned || sample?.pid !== nativePid || sample.windowHandle !== identity.windowHandle
+      || sample.creationFileTime !== identity.creationFileTime || sample.foregroundBefore !== true
+      || sample.foregroundAfter !== true || sample.condition !== condition) {
+      reject('unverified-window'); continue;
+    }
+    const { startedAtUtcMs: start, finishedAtUtcMs: finish } = sample;
+    if (!backgroundCategories.includes(sample.category) || ![before, start, finish, after].every(value => Number.isSafeInteger(value) && value > 0)
+      || before > start || start > finish || finish > after) {
+      reject('invalid-input-interval'); continue;
+    }
+    const taskStart = explicitTimestamp(record.taskStartedAt), taskFinish = explicitTimestamp(record.taskFinishedAt);
+    if (record.taskAction !== backgroundActions[record.kind] || typeof record.taskId !== 'string' || !record.taskId.trim()
+      || record.beforeStatus !== 'running' || !Number.isFinite(taskStart) || taskStart > before
+      || (record.afterStatus === 'running' ? record.taskFinishedAt != null
+        : record.afterStatus !== 'succeeded' || !Number.isFinite(taskFinish) || taskFinish < finish || taskFinish > after)) {
+      reject('not-contained-in-running-task'); continue;
+    }
+    const key = `${start}:${finish}`;
+    if (intervals.has(key) || start < lastFinish) {
+      reject('duplicate-or-unordered-input'); continue;
+    }
+    intervals.add(key);
+    lastFinish = finish;
+    entry.samples.push(sample);
+  }
+  return Object.fromEntries(Object.entries(tally).map(([kind, { samples, rejected }]) => {
+    const categories = localInteractionVerdict(samples, condition);
+    // The local helper retains partial latency values for diagnostics. Do not
+    // expose them here as a P95 of a sufficient mixed-load sample population.
+    for (const value of Object.values(categories)) {
+      if (value.status === 'incomplete') value.p95Ms = null;
+    }
+    const statuses = Object.values(categories).map(value => value.status);
+    const status = statuses.includes('invalid') ? 'invalid' : statuses.includes('failed') ? 'failed'
+      : statuses.every(value => value === 'passed') ? 'passed' : 'incomplete';
+    return [kind, { status, acceptedInputs: samples.length, rejected, categories }];
+  }));
+}
+
 // Additional native smoke coverage is intentionally separate from the >=100
 // category/P95 gate. A task must actually overlap the input, never merely have
 // completed earlier. The normal UI must cover all four categories for each load.
-export function backgroundLoadVerdict(records, nativePid, condition = 'native-ui-input-to-painted-result') {
+export function backgroundLoadVerdict(records, nativePid, condition = 'native-ui-input-to-painted-result', identity) {
   inputCondition(condition);
-  const expected = { check: 'check_now', download: 'apply_resource_download', update: 'apply_resource_update_stage' };
-  return Object.fromEntries(Object.entries(expected).map(([kind, action]) => {
+  const sampled = independentlySampledLoads(records, nativePid, condition, identity);
+  return Object.fromEntries(Object.entries(backgroundActions).map(([kind, action]) => {
     const accepted = records.filter(record => record.kind === kind && record.taskAction === action && ['queued', 'running'].includes(record.beforeStatus) && record.sample?.pid === nativePid && record.sample.condition === condition && record.beforeObservedAtMs <= record.sample.startedAtUtcMs && record.afterObservedAtMs >= record.sample.finishedAtUtcMs && (['queued', 'running'].includes(record.afterStatus) || Date.parse(record.taskFinishedAt || '') >= record.sample.startedAtUtcMs));
-    const categories = ['search', 'filter', 'tab', 'document'].map(category => ({ category, count: accepted.filter(record => record.sample.category === category).length }));
+    const categories = backgroundCategories.map(category => ({ category, count: accepted.filter(record => record.sample.category === category).length }));
     const durations = accepted.map(record => record.sample.durationMs);
     const invalidDurations = durations.filter(value => !Number.isFinite(value) || value < 0).length;
     const overLimitInputs = durations.filter(value => value > PERFORMANCE_POLICY.localP95LimitMs).length;
@@ -94,7 +151,7 @@ export function backgroundLoadVerdict(records, nativePid, condition = 'native-ui
     const toleranceCategories = Object.fromEntries(categories.map(({ category }) => [category, limitedInteractionTolerance(accepted.filter(record => record.sample.category === category).map(record => record.sample.durationMs))]));
     const toleranceStatuses = Object.values(toleranceCategories).map(value => value.status);
     const toleranceStatus = toleranceStatuses.includes('invalid') ? 'invalid' : toleranceStatuses.includes('failed') ? 'failed' : toleranceStatuses.every(value => value === 'passed') ? 'passed' : 'incomplete';
-    return [kind, { status, actualOverlappingInputs: accepted.length, categories, limitMs: PERFORMANCE_POLICY.localP95LimitMs, overLimitInputs, invalidDurations, maximumObservedMs: durations.length && !invalidDurations ? Math.max(...durations) : null, limitedTolerance: { status: toleranceStatus, categories: toleranceCategories } }];
+    return [kind, { status, actualOverlappingInputs: accepted.length, categories, limitMs: PERFORMANCE_POLICY.localP95LimitMs, overLimitInputs, invalidDurations, maximumObservedMs: durations.length && !invalidDurations ? Math.max(...durations) : null, limitedTolerance: { status: toleranceStatus, categories: toleranceCategories }, sampledOverlap: sampled[kind] }];
   }));
 }
 

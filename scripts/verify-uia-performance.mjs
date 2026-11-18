@@ -1,4 +1,4 @@
-import { readFile, writeFile, appendFile, mkdir, mkdtemp, lstat } from 'node:fs/promises';
+import { readFile, writeFile, appendFile, mkdir, mkdtemp, lstat, realpath } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { resolve, join, basename } from 'node:path';
@@ -7,12 +7,16 @@ import { cpus, hostname, release } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { NativeUiaSession, assertNoUserManager } from './native-uia-client.mjs';
-import { beginUiaNativeStage, beginUiaNativeDownload, resumeUiaNativeDownload } from './native-uia-loads.mjs';
-import { readNativeLoadFixture, attachNativeLoadResource } from './performance-load-fixture.mjs';
+import { beginUiaNativeStage, beginUiaNativeDownload, resumeUiaNativeDownload, waitNativeTask } from './native-uia-loads.mjs';
+import { readNativeLoadFixture, attachNativeLoadResource, attachNativeLoadResources } from './performance-load-fixture.mjs';
 import { createPerformanceFixture } from './performance-fixture.mjs';
 import { PERFORMANCE_POLICY as policy, ownedForeground, startupComparison, localInteractionVerdict, backgroundLoadVerdict, freezeConvergenceBounds, stabilityVerdict } from './performance-policy.mjs';
 
-const options = Object.fromEntries(process.argv.slice(2).reduce((pairs, arg, index, args) => arg.startsWith('--') ? [...pairs, [arg.slice(2), args[index + 1]?.startsWith('--') || !args[index + 1] ? true : args[index + 1]]] : pairs, []));
+const argumentPairs = process.argv.slice(2).flatMap((arg, index, args) => arg.startsWith('--')
+  ? [[arg.slice(2), args[index + 1]?.startsWith('--') || !args[index + 1] ? true : args[index + 1]]] : []);
+const options = Object.fromEntries(argumentPairs);
+const stageFixturePaths = argumentPairs.filter(([name]) => name === 'stage-fixture').map(([, path]) => path);
+const downloadSpecCount = argumentPairs.filter(([name]) => name === 'download-spec').length;
 function validateLoadSelection(options, suite) {
   const kind = options['load-kind'];
   if (kind !== undefined && (suite !== 'loads' || !['check', 'download', 'update'].includes(kind))) throw new Error('--load-kind requires --suite loads and exactly check, download or update.');
@@ -34,11 +38,29 @@ function transportDigest(value, candidateSha256) {
   if (typeof value !== 'string' || !/^[a-f0-9]{64}$/i.test(value)) throw new Error('--transport-file-sha256 requires one exact SHA256 digest.');
   return value.toLowerCase();
 }
+function validateOverlapSampling(options, suite, loadKind, stagePaths, downloadSpecs) {
+  if (options['sample-overlap'] === undefined) {
+    if (stagePaths.length > 1) throw new Error('Repeated --stage-fixture is limited to sampled update loads.');
+    return false;
+  }
+  if (options['sample-overlap'] !== 'true' || suite !== 'loads' || !['check', 'download', 'update'].includes(loadKind) || options['concurrent-observation'] !== undefined) {
+    throw new Error('--sample-overlap true requires --suite loads, one explicit --load-kind and synchronous observation.');
+  }
+  if ((loadKind !== 'download' && options['download-spec'] !== undefined) || (loadKind !== 'update' && options['stage-fixture'] !== undefined)) {
+    throw new Error('Sampled overlap accepts only the selected workload specification.');
+  }
+  if (loadKind === 'download' && (downloadSpecs !== 1 || typeof options['download-spec'] !== 'string')) throw new Error('Sampled download requires one explicit pinned --download-spec path.');
+  if (loadKind === 'update' && (stagePaths.length < 2 || stagePaths.length > 12 || stagePaths.some(path => typeof path !== 'string'))) {
+    throw new Error('Sampled update requires two to twelve separate --stage-fixture paths.');
+  }
+  return true;
+}
 if (options.help) {
   console.log('Native release UIAutomation acceptance: --candidate <exe> --candidate-build-info <json> [--baseline <v0.2.11 exe> --baseline-build-info <json>] --suite prepare|probe|startup|interactive|loads|stability|all. Measured interactions require the exact owned window in the foreground before and after input. Optional --accessibility-input --concurrent-observation separates observed UI readiness from the accessibility call return as diagnostics only. Optional --foreground-select true permits guarded foreground keyboard selection only for GitHub release and asset dropdowns; these functional-only selections are recorded separately and do not change the measured UIA category. Optional --await-foreground true is restricted to probe, interactive, loads or stability; after native readiness it prints the owned PID/HWND and waits up to sixty seconds for external activation using read-only observations. It sends no input and changes no measurement threshold. The complete loads suite requires --download-spec and --stage-fixture. All files stay in the approved validation directory. Downloads require an explicit specification.');
   console.log('Optional --closed-select true is limited to --suite loads --accessibility-input. It uses ordinary closed-select Home/Down keyboard setup for the two GitHub fields, records raw option state, and verifies the final exact value. It cannot be combined with --foreground-select.');
   console.log('Optional --popup-select true is limited to --suite loads --accessibility-input. It opens the exact native select by mouse, uses its completed catalogue for bounded Home/Down/Enter, and verifies the retained exact value. Popup focus requires exact RawView ancestry and owned Win32 focus. This functional setup is excluded from P95 and is mutually exclusive with the other select modes.');
   console.log('Optional --load-kind check|download|update is restricted to --suite loads and explicitly resumes that one original workload with the same six measured overlap inputs and thresholds. Download requires --download-spec; update requires --stage-fixture and does not read or download an optional --download-spec. Success is partial-limited evidence only. Omit --load-kind for the original complete loads run, which still requires both specifications.');
+  console.log('Optional --sample-overlap true with --suite loads and one explicit --load-kind collects 100 verified samples per category with a 12-minute measurement budget. Check uses serial local checks. Download uses one pinned official asset at 1 KiB/s in one fresh isolated directory (approximately eleven minutes). Update accepts two to twelve separately prepared --stage-fixture paths and stages them serially without switching originals. Reports insufficient overlap separately.');
   console.log('Optional --interaction-kind document is restricted to --suite interactive without load selection or specifications. It resumes only the original document category with the same unmeasured preparation, one hundred measured inputs and thresholds. Success is document-only partial evidence, not a complete interactive or all-suite pass. Omit it for the original four-category run.');
   console.log('Short --suite download-resume --download-spec <existing pinned official spec> creates one fresh approved download directory, starts one native download, normally quits with partial bytes, reopens the same isolated data and explicitly continues via its native history. It runs no interaction/stability loop and makes no performance claim. The existing --accessibility-input, --popup-select true and --await-foreground true setup options are available.');
   console.log('Optional --existing-stdio-proof <json> forwards only an explicitly frozen arm-pinned-existing-stdio-v1 manifest matching the candidate SHA to the unchanged ownership preflight; it does not permit a running GUI/backend.');
@@ -48,7 +70,10 @@ const requestedTransportSha256 = transportDigest(options['transport-file-sha256'
 const suite = options.suite || 'all';
 const interactionKind = validateInteractionSelection(options, suite);
 const loadKind = validateLoadSelection(options, suite);
-const passedLoadsStatus = loadKind ? 'passed-partial-limited-background-loads-only' : 'passed-background-loads-only';
+const sampleOverlap = validateOverlapSampling(options, suite, loadKind, stageFixturePaths, downloadSpecCount);
+const sampledLoadActions = Object.freeze({ check: 'check_now', download: 'apply_resource_download', update: 'apply_resource_update_stage' });
+const sampledLoadPolicy = Object.freeze({ maximumTasks: { check: 96, download: 1, update: 12 }, maximumAttempts: 560, maximumMeasurementMs: 12 * 60 * 1000, maximumQueuedObservationMs: 8000, longTaskCategoryBurst: 5 });
+const passedLoadsStatus = sampleOverlap ? `passed-sampled-native-${loadKind}-only` : loadKind ? 'passed-partial-limited-background-loads-only' : 'passed-background-loads-only';
 const passedInteractionStatus = 'passed-partial-document-interactions-only';
 if (options['await-foreground'] !== undefined && !['true', 'false'].includes(options['await-foreground'])) throw new Error('--await-foreground requires an explicit true or false.');
 if (options['await-foreground'] !== undefined && !['probe', 'interactive', 'loads', 'stability', 'download-resume'].includes(suite)) throw new Error('--await-foreground is available only for probe, interactive, loads, stability or download-resume.');
@@ -68,6 +93,10 @@ if (options['concurrent-observation'] && !options['accessibility-input']) throw 
 if (!['prepare', 'probe', 'startup', 'interactive', 'loads', 'stability', 'all', 'download-resume'].includes(suite)) throw new Error('Unsupported native acceptance suite.');
 if (suite === 'download-resume' && (!options['download-spec'] || options['stage-fixture'] || options['concurrent-observation'])) throw new Error('download-resume requires only one explicit --download-spec and synchronous native observation; no stage fixture.');
 const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
+const approvedResourceParent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\resources';
+const officialDownload = Object.freeze({ repository: 'Panniantong/Agent-Reach', tag: 'v1.6.0', releaseId: 421526768, assetId: 668240314, assetName: 'agent-reach.zip', assetBytes: 676536 });
+const officialDownloadSha256 = '59c37586e45e5e111a78686e98a9d11ae71a7b4b1a334c41aef82831ea5b0a05';
+const sampledDownloadBytesPerSecond = 1024;
 await mkdir(approved, { recursive: true });
 const output = await mkdtemp(join(approved, 'uia-performance-')), logPath = join(output, 'observations.jsonl');
 const sleep = ms => new Promise(done => setTimeout(done, Math.max(0, ms)));
@@ -88,7 +117,10 @@ if (interactionKind) {
   report.interactionSelection = { scope: 'partial-limited', kind: interactionKind, omittedKinds: ['search', 'filter', 'tab'], requiredSamples: policy.localSamplesPerCategory, fullInteractiveAcceptanceClaimed: false };
   report.limitations.push('This explicit document-only continuation retains the original unmeasured preparation and document loop. It does not rerun or claim the omitted categories, background loads, startup or stability; existing results are not automatically merged into a complete interactive or all-suite pass.');
 }
-if (loadKind) {
+if (sampleOverlap) {
+  report.loadSelection = { scope: `sampled-${loadKind}-only`, kind: loadKind, omittedKinds: ['check', 'download', 'update'].filter(kind => kind !== loadKind), requiredSamplesPerCategory: policy.localSamplesPerCategory, budget: sampledLoadPolicy, fullLoadsAcceptanceClaimed: false };
+  report.limitations.push('Each native task is verified before starting the next. The fixed measurement budget excludes finishing the outstanding task, UI cleanup and normal exit. Unmeasured setup is outside the latency interval. This run supplies evidence for only the selected workload, without claiming startup or stability.');
+} else if (loadKind) {
   report.loadSelection = { scope: 'partial-limited', kind: loadKind, omittedKinds: ['check', 'download', 'update'].filter(kind => kind !== loadKind), requiredOverlapInputs: 6, fullLoadsAcceptanceClaimed: false };
   report.limitations.push('This explicit single-workload continuation does not rerun or claim the omitted workloads. Existing results remain separate evidence; they are not automatically merged into a complete loads pass.');
 }
@@ -171,7 +203,7 @@ async function awaitOwnedForeground(app) {
   }
 }
 async function close(app) { if (app) { const result = await app.quit(); await emit('native-normal-exit', { label: app.label, pid: app.identity.pid, creationFileTime: app.identity.creationFileTime, closedNormally: result.driverReport.closedNormally }); } }
-async function interaction(app, op, fields = {}, measured = true) {
+async function interaction(app, op, fields = {}, measured = true, measurementDeadline) {
   if (!measured) return app.call(op, fields);
   const before = await app.call('windowIdentity');
   if (!ownedForeground(before, app.identity)) {
@@ -179,6 +211,7 @@ async function interaction(app, op, fields = {}, measured = true) {
     await emit('native-measurement-foreground-rejected', report.foregroundFailure);
     throw new Error('The exact owned PID and captured/main HWND must be foreground before a measured interaction.');
   }
+  if (measurementDeadline !== undefined && performance.now() >= measurementDeadline) return null;
   const sample = await app.call(op, fields);
   let after;
   try {
@@ -228,12 +261,20 @@ async function interactionRun(app, count) {
   for (let i = 0; i < count; i++) { await interaction(app, 'search', { index: i + 10 }, false); await interaction(app, 'openDocument', { index: i + 10 }); await app.call('closeDocument', { index: i + 10 }); }
   await recordBackground(app, load, 'document'); await app.call('clear');
 }
-async function loadSample(app, load, op, fields) {
-  const before = (await app.call('tasks')).tasks.find(task => task.id === load.taskId), beforeObservedAtMs = Date.now();
-  const sample = await interaction(app, op, fields);
-  const after = (await app.call('tasks')).tasks.find(task => task.id === load.taskId), afterObservedAtMs = Date.now();
+async function loadSample(app, load, op, fields, activeMeasurementDeadline) {
+  const activeOnly = activeMeasurementDeadline !== undefined;
+  const readTask = async () => activeOnly ? (await app.call('task', { taskId: load.taskId })).task
+    : (await app.call('tasks')).tasks.find(task => task.id === load.taskId);
+  const before = await readTask(), beforeObservedAtMs = Date.now();
+  if (activeOnly && (before?.id !== load.taskId || before.action !== sampledLoadActions[load.kind])) throw new Error('The exact sampled task identity changed before measuring.');
+  if (activeOnly && (before.status !== 'running' || performance.now() >= activeMeasurementDeadline)) return null;
+  const sample = activeOnly ? await interaction(app, op, fields, true, activeMeasurementDeadline) : await interaction(app, op, fields);
+  if (!sample) return null;
+  const after = await readTask(), afterObservedAtMs = Date.now();
+  if (activeOnly && (after?.id !== before.id || after.action !== before.action)) throw new Error('The exact sampled task identity changed while measuring.');
   const record = { kind: load.kind, taskId: load.taskId, taskAction: before?.action || after?.action, beforeStatus: before?.status, afterStatus: after?.status, beforeObservedAtMs, afterObservedAtMs, taskStartedAt: before?.startedAt || after?.startedAt, taskFinishedAt: after?.finishedAt, sample };
   (report.loadCoverage ||= []).push(record); await emit('native-background-input-overlap', record);
+  return record;
 }
 async function loadInteractions(app, load) {
   await loadSample(app, load, 'search', { index: 17 }); await app.call('clear');
@@ -253,7 +294,106 @@ async function backgroundLoads(app) {
     await loadInteractions(app, await beginUiaNativeDownload(app, app.fixture, specification));
   }
   if ((!loadKind || loadKind === 'update') && options['stage-fixture']) await loadInteractions(app, await beginUiaNativeStage(app, app.fixture, resolve(options['stage-fixture'])));
-  report.loadVerdict = backgroundLoadVerdict(report.loadCoverage || [], app.identity.pid, inputCondition);
+  report.loadVerdict = backgroundLoadVerdict(report.loadCoverage || [], app.identity.pid, inputCondition, app.identity);
+}
+async function sampledLoads(app, kind, startTask, maximumTasks, limits = sampledLoadPolicy) {
+  const categories = ['search', 'filter', 'tab', 'document'];
+  const started = performance.now(), deadline = started + limits.maximumMeasurementMs;
+  const currentCounts = () => {
+    report.loadVerdict = backgroundLoadVerdict(report.loadCoverage || [], app.identity.pid, inputCondition, app.identity);
+    return report.loadVerdict[kind].sampledOverlap.categories;
+  };
+  const assertForeground = async () => {
+    if (!ownedForeground(await app.call('windowIdentity'), app.identity)) throw new Error('The exact owned foreground was lost before sampled load setup; no operation was sent.');
+  };
+  const guarded = async (operation, fields) => { await assertForeground(); return app.call(operation, fields); };
+  const stats = report.sampledLoad = { kind, attempts: 0, taskRuns: [], stopReason: null };
+  let counts = currentCounts();
+  const nextCategory = () => categories.reduce((next, candidate) => counts[candidate].count < counts[next].count ? candidate : next);
+  const timeAndAttemptsRemain = () => performance.now() < deadline && stats.attempts < limits.maximumAttempts;
+  const stopReason = () => categories.every(category => counts[category].count >= policy.localSamplesPerCategory) ? 'sample-count'
+    : performance.now() >= deadline ? 'time-budget' : stats.attempts >= limits.maximumAttempts ? 'attempt-budget'
+      : stats.taskRuns.length >= maximumTasks ? 'task-budget' : null;
+  const readTask = async load => {
+    const task = (await app.call('task', { taskId: load.taskId })).task;
+    if (task?.id !== load.taskId || task.action !== sampledLoadActions[kind]) throw new Error('The native load did not return the same task identity.');
+    return task;
+  };
+  const prepareCategory = async category => {
+    let searchActive = false, github = false, home = false, openIndex = null;
+    const nextIndex = () => 100 + stats.attempts;
+    let index = nextIndex();
+    if (category === 'tab' || category === 'document') {
+      await guarded('search', { index: category === 'tab' ? 0 : index });
+      searchActive = true;
+      if (category === 'tab') { await guarded('openDocument', { index: 0 }); openIndex = 0; }
+    }
+    return {
+      reset: async () => {
+        if (openIndex !== null) await guarded('closeDocument', { index: openIndex });
+        if (github) await guarded('filter', { github: false });
+        if (searchActive) await guarded('clear');
+      },
+      measure: async (load, maximumBurst) => {
+        const burstStart = stats.attempts;
+        while (timeAndAttemptsRemain() && counts[category].count < policy.localSamplesPerCategory && stats.attempts - burstStart < maximumBurst) {
+          const op = category === 'document' ? 'openDocument' : category;
+          const fields = category === 'filter' ? { github: !github } : category === 'tab' ? { home: !home } : { index };
+          const record = await loadSample(app, load, op, fields, deadline);
+          if (!record) return;
+          stats.attempts++;
+          counts = currentCounts();
+          if (category === 'search') { searchActive = true; index = nextIndex(); }
+          else if (category === 'filter') github = fields.github;
+          else if (category === 'tab') home = fields.home;
+          else openIndex = index;
+          if (record.afterStatus !== 'running') return;
+          if (category === 'document' && timeAndAttemptsRemain() && counts[category].count < policy.localSamplesPerCategory && stats.attempts - burstStart < maximumBurst) {
+            await guarded('closeDocument', { index });
+            openIndex = null;
+            index = nextIndex();
+            if (performance.now() < deadline) await guarded('search', { index });
+          }
+        }
+      },
+    };
+  };
+  const taskIds = new Set();
+  while (!stopReason()) {
+    // Short checks start with the largest deficit prepared. Longer tasks
+    // rotate short bursts so one category cannot exhaust their running time.
+    const preparedCheck = kind === 'check' ? await prepareCategory(nextCategory()) : null;
+    await assertForeground();
+    if (!timeAndAttemptsRemain()) { await preparedCheck?.reset(); break; }
+    const load = await startTask(stats.taskRuns.length);
+    if (load.kind !== kind || typeof load.taskId !== 'string' || !load.taskId || taskIds.has(load.taskId)
+      || (kind !== 'check' && typeof load.finish !== 'function')) throw new Error('The sampled load did not start a distinct expected native task with its required completion check.');
+    taskIds.add(load.taskId);
+    const run = { taskId: load.taskId, generatedScope: load.generatedScope, resourceId: load.resourceId };
+    stats.taskRuns.push(run);
+    const queuedDeadline = Math.min(deadline, performance.now() + limits.maximumQueuedObservationMs);
+    let task = await readTask(load);
+    while (task.status === 'queued' && performance.now() < queuedDeadline) { await sleep(30); task = await readTask(load); }
+    if (preparedCheck) {
+      if (task.status === 'running') await preparedCheck.measure(load, limits.maximumAttempts);
+    } else {
+      while (task.status === 'running' && timeAndAttemptsRemain() && counts[nextCategory()].count < policy.localSamplesPerCategory) {
+        const prepared = await prepareCategory(nextCategory());
+        await prepared.measure(load, limits.longTaskCategoryBurst);
+        await prepared.reset();
+        task = await readTask(load);
+      }
+    }
+    const receipt = load.finish ? await load.finish() : null;
+    const final = load.finish ? await readTask(load) : await waitNativeTask(app, load.taskId);
+    if (final.id !== load.taskId || final.action !== sampledLoadActions[kind] || final.status !== 'succeeded'
+      || (load.finish && (receipt?.taskId !== load.taskId || receipt.complete !== true))) throw new Error('The sampled load did not verify the exact native task completion.');
+    Object.assign(run, { status: final.status, startedAt: final.startedAt, finishedAt: final.finishedAt, receipt });
+    await preparedCheck?.reset();
+    await emit('native-sampled-load-finished', { kind, ...run });
+  }
+  stats.stopReason = stopReason();
+  stats.elapsedIncludingFinalizationMs = performance.now() - started;
 }
 async function cycle(app, index) {
   await interaction(app, 'search', { index: index % 1000 }, false); await app.call('clear');
@@ -287,14 +427,64 @@ async function stabilityRun(app) {
   return { warmupCycles: policy.warmupCycles, idleCalibration: idle, bounds, samples, verdict: stabilityVerdict(samples, bounds, policy.warmupCycles) };
 }
 
+function exactOfficialDownload(specification) {
+  return Object.entries(officialDownload).every(([key, value]) => specification?.[key] === value);
+}
+
+function sampledDownloadTiming(task, specification) {
+  const durationMs = Date.parse(task.finishedAt) - Date.parse(task.startedAt);
+  const minimumDurationMs = specification.assetBytes / specification.bytesPerSecond * 1000;
+  if (!Number.isFinite(durationMs) || durationMs < Math.floor(minimumDurationMs)) throw new Error('The exact native download did not run for the selected rate and asset size.');
+  return { durationMs, minimumDurationMs, bytesPerSecond: specification.bytesPerSecond };
+}
+
+async function sampledDownload(app, source) {
+  const parent = await lstat(approvedResourceParent);
+  if (!parent.isDirectory() || parent.isSymbolicLink() || (await realpath(approvedResourceParent)).toLowerCase() !== resolve(approvedResourceParent).toLowerCase()) throw new Error('Sampled download requires the existing approved ordinary resource directory.');
+  const directory = await mkdtemp(join(approvedResourceParent, 'native-download-sampled-'));
+  const specification = { ...officialDownload, directory, bytesPerSecond: sampledDownloadBytesPerSecond };
+  report.downloadSpecification = { ...source, specification, assetSha256: officialDownloadSha256 };
+  await emit('native-sampled-download-specification', report.downloadSpecification);
+  const load = await beginUiaNativeDownload(app, app.fixture, specification);
+  if (load.bytesPerSecond !== specification.bytesPerSecond || load.expectedBytes !== specification.assetBytes || !load.downloadId) throw new Error('Sampled download did not bind the exact selected asset and rate.');
+  return { ...load, async finish() {
+    const receipt = await load.finish();
+    const target = resolve(load.targetPath).toLowerCase();
+    if (receipt.downloadId !== load.downloadId || resolve(receipt.archivePath).toLowerCase() !== target ||
+      target !== resolve(directory, `${load.downloadId}-${specification.assetName}`).toLowerCase()) throw new Error('The native download completed outside its exact pinned destination or download identity.');
+    const file = await lstat(receipt.archivePath), sha256 = await digest(receipt.archivePath);
+    if (!file.isFile() || file.isSymbolicLink() || file.size !== specification.assetBytes || sha256 !== officialDownloadSha256) throw new Error('The completed sampled download did not match the pinned ordinary asset bytes.');
+    const task = (await app.call('task', { taskId: load.taskId })).task;
+    if (task?.id !== load.taskId || task.action !== sampledLoadActions.download || task.status !== 'succeeded') throw new Error('The sampled download timing did not bind the completed native task.');
+    return { ...receipt, sha256, bytes: file.size, ...sampledDownloadTiming(task, specification) };
+  } };
+}
+
+async function prepareSampledStages(dataset, suppliedPaths) {
+  const paths = suppliedPaths.map(path => resolve(path));
+  if (paths.some(path => basename(path) !== 'load-fixture.json') || new Set(paths.map(path => path.toLowerCase())).size !== paths.length) {
+    throw new Error('Sampled update requires separate canonical load-fixture.json paths without repetition.');
+  }
+  const fixtures = [], hashes = [];
+  for (const path of paths) {
+    const sha256 = await digest(path);
+    fixtures.push(await readNativeLoadFixture(path));
+    if (await digest(path) !== sha256) throw new Error('A sampled update fixture changed during preparation.');
+    hashes.push(sha256);
+  }
+  return (await attachNativeLoadResources(dataset, fixtures)).map((seed, index) => ({ ...seed, manifestSha256: hashes[index] }));
+}
+
+async function sampledStage(app, dataset, seed) {
+  if (await digest(seed.fixturePath) !== seed.manifestSha256) throw new Error('The sampled update fixture changed since its binding to the isolated dataset.');
+  return beginUiaNativeStage(app, dataset, seed.fixturePath, seed);
+}
+
 async function downloadRestartContinue(info, fixture) {
   const specPath = resolve(options['download-spec']), originalSpec = JSON.parse(await readFile(specPath, 'utf8'));
-  if (originalSpec.repository !== 'Panniantong/Agent-Reach' || originalSpec.tag !== 'v1.6.0'
-    || originalSpec.releaseId !== 421526768 || originalSpec.assetId !== 668240314
-    || originalSpec.assetName !== 'agent-reach.zip' || originalSpec.assetBytes !== 676536) throw new Error('Short continuation acceptance requires the existing pinned official asset specification.');
-  const resourceParent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\resources';
-  await mkdir(resourceParent, { recursive: true });
-  const directory = await mkdtemp(join(resourceParent, 'native-download-resume-'));
+  if (!exactOfficialDownload(originalSpec)) throw new Error('Short continuation acceptance requires the existing pinned official asset specification.');
+  await mkdir(approvedResourceParent, { recursive: true });
+  const directory = await mkdtemp(join(approvedResourceParent, 'native-download-resume-'));
   const specification = { ...originalSpec, directory, bytesPerSecond: 16384 };
   await writeFile(join(output, 'download-resume-spec.json'), JSON.stringify(specification, null, 2) + '\n', { flag: 'wx' });
   const readOriginalData = () => {
@@ -369,8 +559,17 @@ async function downloadRestartContinue(info, fixture) {
 }
 
 try {
+  let downloadSource, stageSeeds;
+  if (sampleOverlap && loadKind === 'download') {
+    const path = resolve(options['download-spec']), bytes = await readFile(path);
+    if (!exactOfficialDownload(JSON.parse(bytes.toString('utf8')))) throw new Error('Sampled download requires the existing pinned official asset specification.');
+    downloadSource = { path, sha256: createHash('sha256').update(bytes).digest('hex') };
+  }
   const mixed = await createPerformanceFixture(output, 'mixed-native-fixture', 100); report.dataset = mixed;
-  if ((!loadKind || loadKind === 'update') && options['stage-fixture']) { const fixture = await readNativeLoadFixture(resolve(options['stage-fixture'])); report.stageFixture = { path: resolve(options['stage-fixture']), sha256: await digest(resolve(options['stage-fixture'])), seed: await attachNativeLoadResource(mixed, fixture) }; }
+  if (sampleOverlap && loadKind === 'update') {
+    stageSeeds = await prepareSampledStages(mixed, stageFixturePaths);
+    report.stageFixtures = stageSeeds;
+  } else if ((!loadKind || loadKind === 'update') && options['stage-fixture']) { const fixture = await readNativeLoadFixture(resolve(options['stage-fixture'])); report.stageFixture = { path: resolve(options['stage-fixture']), sha256: await digest(resolve(options['stage-fixture'])), seed: await attachNativeLoadResource(mixed, fixture) }; }
   if (suite === 'prepare') report.status = 'prepared-not-measured';
   else {
     if (process.platform !== 'win32') throw new Error('Real Windows native acceptance must run on Windows.');
@@ -402,7 +601,16 @@ try {
           if (suite !== 'probe' && (options['download-spec'] || options['stage-fixture'])) await backgroundLoads(app);
           report.interactionVerdict = localInteractionVerdict(report.interactions, inputCondition);
         }
-        if (suite === 'loads') await backgroundLoads(app);
+        if (suite === 'loads') {
+          if (!sampleOverlap) await backgroundLoads(app);
+          else if (loadKind === 'check') await sampledLoads(app, loadKind, async () => {
+            const initial = await check(app);
+            if (initial.taskIds.length !== 1) throw new Error('The actual native local check task was not uniquely observed.');
+            return { kind: 'check', taskId: initial.taskIds[0] };
+          }, sampledLoadPolicy.maximumTasks.check);
+          else if (loadKind === 'download') await sampledLoads(app, loadKind, () => sampledDownload(app, downloadSource), sampledLoadPolicy.maximumTasks.download);
+          else await sampledLoads(app, loadKind, index => sampledStage(app, mixed, stageSeeds[index]), stageSeeds.length);
+        }
         if (['stability', 'all'].includes(suite)) report.stability = await stabilityRun(app);
       } finally { await close(app); }
     }
@@ -410,11 +618,27 @@ try {
     const gates = [report.startup.verdict?.cold.status, report.startup.verdict?.warm.status, ...Object.values(report.interactionVerdict || {}).map(value => value.status), report.stability?.verdict.status].filter(Boolean);
     const loadFailure = Object.values(report.loadVerdict || {}).some(value => ['failed', 'invalid'].includes(value.status));
     const loadsPassed = ['check', 'download', 'update'].every(kind => report.loadVerdict?.[kind]?.status === 'passed');
-    report.status = gates.some(status => ['failed', 'invalid'].includes(status)) ? 'failed' : suite === 'probe' ? 'diagnostic-only' : suite === 'all' && gates.length === 7 && gates.every(status => status === 'passed') ? loadsPassed ? 'passed' : 'measured-gates-passed-load-coverage-incomplete' : 'incomplete';
+    const strictLoadGates = ['check', 'download', 'update'].map(kind => report.loadVerdict?.[kind]?.sampledOverlap?.status);
+    report.status = 'incomplete';
+    if (gates.some(status => ['failed', 'invalid'].includes(status)) || (suite === 'all' && strictLoadGates.some(status => ['failed', 'invalid'].includes(status)))) {
+      report.status = 'failed';
+    } else if (suite === 'probe') {
+      report.status = 'diagnostic-only';
+    } else if (suite === 'all' && gates.length === 7 && gates.every(status => status === 'passed')) {
+      report.status = !loadsPassed ? 'measured-gates-passed-load-coverage-incomplete'
+        : strictLoadGates.every(status => status === 'passed') ? 'passed' : 'measured-gates-passed-load-samples-incomplete';
+    }
     if (suite === 'interactive' && interactionKind && report.status !== 'failed' && report.interactionVerdict?.[interactionKind]?.status === 'passed') report.status = passedInteractionStatus;
-    if (suite === 'loads' && (loadKind ? report.loadVerdict?.[loadKind]?.status === 'passed' : loadsPassed)) report.status = passedLoadsStatus;
+    const sampledScope = loadKind && report.loadSelection?.scope === `sampled-${loadKind}-only`;
+    if (suite === 'loads' && sampledScope) {
+      const score = report.loadVerdict?.[loadKind]?.sampledOverlap;
+      const tolerance = Object.values(score?.categories ?? {}).map(value => value.limitedTolerance.status);
+      if (['failed', 'invalid'].includes(score?.status) || tolerance.some(value => ['failed', 'invalid'].includes(value))) report.status = 'failed';
+      else if (score?.status === 'passed' && tolerance.length === 4 && tolerance.every(value => value === 'passed')) report.status = passedLoadsStatus;
+      else report.status = `native-${loadKind}-overlap-samples-incomplete`;
+    } else if (suite === 'loads' && (loadKind ? report.loadVerdict?.[loadKind]?.status === 'passed' : loadsPassed)) report.status = passedLoadsStatus;
     if (suite === 'download-resume' && report.downloadResume?.passed === true) report.status = 'passed-native-download-restart-continue-only';
-    if (loadFailure) report.status = 'failed';
+    if (loadFailure && !sampledScope) report.status = 'failed';
     if (options['concurrent-observation'] && report.status !== 'failed') report.status = 'diagnostic-only-concurrent-observation';
   }
 } catch (error) { report.status = 'blocked-or-failed'; report.error = String(error); process.exitCode = 1; }

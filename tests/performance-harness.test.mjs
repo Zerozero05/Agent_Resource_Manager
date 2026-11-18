@@ -241,3 +241,63 @@ test('background tolerance keeps overlap and complete-category evidence separate
   const blocked = record('document', 2000); blocked.afterObservedAtMs = 3000;
   assert.equal(backgroundLoadVerdict([...smoke, blocked], 42).download.limitedTolerance.status, 'failed');
 });
+
+const strictIdentity = { pid: 42, windowHandle: 42_001, creationFileTime: '134399999999999999' };
+const strictCondition = 'native-ui-input-to-painted-result';
+const sampledRecord = (category, index, durationMs = 120) => {
+  const start = 1_790_000_000_000 + 2000 * index, finish = start + durationMs;
+  return { kind: 'update', taskId: 'native-stage-1', taskAction: 'apply_resource_update_stage',
+    beforeStatus: 'running', afterStatus: 'running', taskStartedAt: new Date(1_789_999_999_000).toISOString(),
+    beforeObservedAtMs: start - 1, afterObservedAtMs: finish + 1,
+    sample: { ...strictIdentity, category, condition: strictCondition, durationMs, foregroundBefore: true, foregroundAfter: true,
+      startedAtUtcMs: start, finishedAtUtcMs: finish } };
+};
+const sampledScore = records => backgroundLoadVerdict(records, strictIdentity.pid, strictCondition, strictIdentity).update.sampledOverlap;
+
+test('mixed-load P95 needs 100 distinct owned observations per category and keeps original and tolerance outcomes separate', () => {
+  const categories = ['search', 'filter', 'tab', 'document'];
+  const records = categories.flatMap((category, group) => Array.from({ length: 100 }, (_, index) =>
+    sampledRecord(category, group * 100 + index, category === 'document' ? 220 : 120)));
+  const complete = sampledScore(records);
+  assert.equal(complete.acceptedInputs, 400);
+  assert.equal(complete.status, 'failed');
+  assert.equal(complete.categories.search.status, 'passed');
+  assert.equal(complete.categories.search.p95Ms, 120);
+  assert.equal(complete.categories.document.p95Ms, 220);
+  assert.equal(complete.categories.document.limitedTolerance.status, 'passed');
+  const copies = sampledScore(Array(100).fill(records[0]));
+  assert.equal(copies.status, 'incomplete');
+  assert.equal(copies.acceptedInputs, 1);
+  assert.equal(copies.rejected['duplicate-or-unordered-input'], 99);
+  assert.equal(copies.categories.search.p95Ms, null);
+  assert.equal(sampledScore([sampledRecord('document', 0, 1000)]).categories.document.limitedTolerance.status, 'failed');
+});
+
+test('mixed-load samples require a started task enclosing paint, exact owned foreground, and non-overlapping inputs', () => {
+  const entry = sampledRecord('search', 0);
+  const end = entry.sample.finishedAtUtcMs, start = entry.sample.startedAtUtcMs;
+  const duringFinish = { ...entry, afterStatus: 'succeeded', taskFinishedAt: new Date(end).toISOString() };
+  assert.equal(sampledScore([duringFinish]).acceptedInputs, 1);
+  const bestEffort = [
+    { ...entry, beforeStatus: 'queued' },
+    { ...entry, taskStartedAt: new Date(start + 1).toISOString() },
+    { ...entry, taskStartedAt: '2026-09-01T00:00:00' },
+    { ...duringFinish, taskFinishedAt: new Date(end - 1).toISOString() },
+    { ...duringFinish, taskFinishedAt: new Date(end + 2).toISOString() },
+    { ...entry, taskId: '' },
+    { ...entry, afterStatus: 'running', taskFinishedAt: new Date(end).toISOString() },
+    { ...entry, sample: { ...entry.sample, foregroundAfter: false } },
+    { ...entry, sample: { ...entry.sample, pid: 43 } },
+    { ...entry, sample: { ...entry.sample, windowHandle: 2 } },
+    { ...entry, sample: { ...entry.sample, creationFileTime: '2' } },
+    { ...entry, sample: { ...entry.sample, finishedAtUtcMs: start - 1 } },
+    { ...entry, sample: { ...entry.sample, finishedAtUtcMs: NaN } },
+  ];
+  assert.equal(sampledScore(bestEffort).acceptedInputs, 0);
+  const overlap = { ...entry, sample: { ...entry.sample, category: 'filter', startedAtUtcMs: start + 1, finishedAtUtcMs: end + 1 } };
+  assert.equal(sampledScore([entry, overlap]).acceptedInputs, 1);
+  assert.equal(sampledScore([entry, overlap]).rejected['duplicate-or-unordered-input'], 1);
+  assert.equal(sampledScore([sampledRecord('tab', 3), entry]).rejected['duplicate-or-unordered-input'], 1);
+  const invalid = { ...entry, sample: { ...entry.sample, durationMs: NaN } };
+  assert.equal(sampledScore([invalid]).categories.search.limitedTolerance.status, 'invalid');
+});

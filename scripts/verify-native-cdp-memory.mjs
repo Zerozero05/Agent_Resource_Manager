@@ -12,7 +12,7 @@ import { createPerformanceFixture, FIXTURE_FORMAT } from './performance-fixture.
 import { assertNoUserManager } from './native-uia-client.mjs';
 
 const format = 'agent-resource-manager-cdp-memory-v1';
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, flag, index, all) => flag.startsWith('--') ? [...pairs, [flag.slice(2), all[index + 1]]] : pairs, []));
 const cycleIntervalMs = args['cycle-interval-ms'] === undefined ? 1000 : Number(args['cycle-interval-ms']);
 assert.ok(Number.isInteger(cycleIntervalMs) && cycleIntervalMs >= 1000 && cycleIntervalMs <= 10000, 'Diagnostic cycle cadence must be 1000–10000 milliseconds.');

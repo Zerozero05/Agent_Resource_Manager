@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import assert from 'node:assert/strict';
 
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 export const MIGRATION_FIXTURE_FORMAT = 'agent-resource-manager-native-migration-v1';
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 function within(path, parent) { const rel = relative(resolve(parent), resolve(path)); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); }

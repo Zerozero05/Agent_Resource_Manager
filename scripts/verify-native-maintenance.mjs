@@ -10,7 +10,7 @@ import { NativeUiaSession } from './native-uia-client.mjs';
 // is strictly read-only: every tested mutation goes through the real native UI.
 const format = 'agent-resource-manager-native-maintenance-v1';
 const driverFormat = 'agent-resource-manager-native-performance-v1';
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation';
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation';
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, arg, index, all) => arg.startsWith('--') ? [...pairs, [arg.slice(2), all[index + 1]?.startsWith('--') || !all[index + 1] ? true : all[index + 1]]] : pairs, []));
 if (Object.hasOwn(args, 'transport-file-sha256') && (typeof args['transport-file-sha256'] !== 'string' || !/^[a-f0-9]{64}$/i.test(args['transport-file-sha256']))) throw new Error('--transport-file-sha256 requires one exact SHA256 digest.');
 const requestedTransportSha256 = args['transport-file-sha256']?.toLowerCase();

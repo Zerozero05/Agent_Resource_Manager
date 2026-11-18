@@ -29,7 +29,7 @@ if (options.help) { console.log(help); process.exit(0); }
 const suite = options.suite || 'all';
 if (!['all', 'startup', 'interactive', 'stability', 'prepare'].includes(suite)) throw new Error(help);
 if (process.platform !== 'win32' && suite !== 'prepare') throw new Error('Native Windows acceptance must run on Windows.');
-const baseOutput = resolve(typeof options.output === 'string' ? options.output : 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data');
+const baseOutput = resolve(typeof options.output === 'string' ? options.output : 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data');
 if (process.platform === 'win32' && !/^D:\\/i.test(baseOutput)) throw new Error('Choose an absolute D-drive output directory.');
 await mkdir(baseOutput, { recursive: true });
 const output = await mkdtemp(join(baseOutput, 'native-performance-'));

@@ -5,8 +5,8 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 // Representative read-only capability observations. Never persist returned content.
-const root = 'D:/03_github_projects/Agent-Reach';
-const approved = 'D:/03_github_projects/Agent_Resource_Manager/validation/manager-data';
+const root = 'D:/03_github_projects/Web_Tools/Agent_Reach';
+const approved = 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data';
 const phase = process.argv[2];
 if (!['before', 'after'].includes(phase)) throw new Error('Choose before or after adoption');
 const baseline = phase === 'after' ? JSON.parse(await readFile(process.argv[3], 'utf8')) : null;

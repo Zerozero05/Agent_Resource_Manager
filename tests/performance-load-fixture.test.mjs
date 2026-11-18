@@ -6,7 +6,8 @@ import { get } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { execFileSync } from 'node:child_process';
 import { createPerformanceFixture } from '../scripts/performance-fixture.mjs';
-import { createNativeLoadFixture, readNativeLoadFixture, attachNativeLoadResource, startNativeLoadServer, storedZip } from '../scripts/performance-load-fixture.mjs';
+import { createNativeLoadFixture, readNativeLoadFixture, attachNativeLoadResource, attachNativeLoadResources, MAX_NATIVE_UPDATE_FIXTURES, startNativeLoadServer, storedZip } from '../scripts/performance-load-fixture.mjs';
+import { beginUiaNativeStage } from '../scripts/native-uia-loads.mjs';
 
 function request(url, headers = {}) {
   return new Promise((done, fail) => { const req = get(url, { headers, agent: false }, response => { const chunks = []; response.on('data', chunk => chunks.push(chunk)); response.once('end', () => done({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks) })); }); req.once('error', fail); });
@@ -48,4 +49,49 @@ test('native update load setup replaces only a fresh generated tool and preserve
   finally { db.close(); }
   await assert.rejects(attachNativeLoadResource(dataset, fixture), /already changed/);
   console.log(`Prepared synthetic catalogue only: ${dataset.root}`);
+});
+
+test('sampled update fixtures atomically bind distinct pristine synthetic tools without changing the catalogue scale', { skip: process.platform !== 'win32' }, async () => {
+  const parent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
+  await mkdir(parent, { recursive: true });
+  const work = await mkdtemp(join(parent, 'sampled-update-test-'));
+  const dataset = await createPerformanceFixture(work, 'generated-catalogue', 100);
+  const fixtures = await Promise.all([1, 2].map(fileCount => createNativeLoadFixture(undefined, { fileCount, bytesPerFile: 64 })));
+  await assert.rejects(attachNativeLoadResources(dataset, []), /1–12 independent/);
+  await assert.rejects(attachNativeLoadResources(dataset, Array(MAX_NATIVE_UPDATE_FIXTURES + 1).fill(fixtures[0])), /1–12 independent/);
+  await assert.rejects(attachNativeLoadResources(dataset, [fixtures[0], fixtures[0]]), /distinct roots and scope IDs/);
+
+  // If the second row changed, attaching the first one must roll back, too.
+  const db = new DatabaseSync(dataset.dbPath);
+  try {
+    const payload = db.prepare('SELECT payload FROM resource_catalog WHERE id=?');
+    const record = id => JSON.parse(payload.get(id).payload);
+    const revise = db.prepare('UPDATE resource_catalog SET revision=? WHERE id=?');
+    revise.run(2, 'perf-tool-001');
+    await assert.rejects(attachNativeLoadResources(dataset, fixtures), /already changed/);
+    assert.equal(record('perf-tool-000').name, 'Perf Tool 000');
+    assert.equal(record('perf-tool-000').installation, null);
+    revise.run(1, 'perf-tool-001');
+    const untouched = payload.get('perf-tool-002').payload;
+    const seeds = await attachNativeLoadResources(dataset, fixtures);
+    for (const [index, seed] of seeds.entries()) {
+      const fixture = fixtures[index], suffix = `00${index}`;
+      assert.deepEqual(seed, { resourceId: `perf-tool-${suffix}`, resourceRevision: 1, rootPath: fixture.currentRoot,
+        fixtureScopeId: fixture.scopeId, totalTools: 100, toolName: `Perf Update Fixture ${suffix}`,
+        fixturePath: join(fixture.root, 'load-fixture.json'), fileCount: fixture.nextArchive.files.length, archiveSha256: fixture.nextArchive.sha256 });
+      const row = record(seed.resourceId);
+      assert.equal(row.name, seed.toolName);
+      assert.equal(row.rootPath, fixture.currentRoot);
+      assert.equal(row.installation.archiveSha256, fixture.oldArchive.sha256);
+      assert.equal(row.installation.updateState, null);
+      assert.deepEqual(row.actions, []);
+    }
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM resource_catalog').get().n, 100);
+    assert.equal(payload.get('perf-tool-002').payload, untouched);
+    await assert.rejects(attachNativeLoadResources(dataset, fixtures), /already changed/);
+
+    const app = { identity: { dataDirectory: dataset.dataDir }, call: () => assert.fail('Invalid seeds must be refused before calling the native app') };
+    await assert.rejects(beginUiaNativeStage(app, dataset, seeds[0].fixturePath, seeds[1]), /exact seeded resource and archive/);
+    await assert.rejects(beginUiaNativeStage(app, dataset, seeds[0].fixturePath, seeds[0]), /standard 4098-file/);
+  } finally { db.close(); }
 });

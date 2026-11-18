@@ -12,7 +12,7 @@ import { assertNoUserManager } from './native-uia-client.mjs';
 
 // Reuse this project's synthetic fixture and CDP protocol approach. This is an
 // independent short diagnostic. It cannot replace failed native acceptance.
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const candidateRoot = resolve(fileURLToPath(new URL('../outputs/v1-validation/detached-task-summary-allocation-20261109/', import.meta.url)));
 const executable = join(candidateRoot, 'agent-resource-manager.exe');
 const buildInfoPath = join(candidateRoot, 'candidate-build-info.json');

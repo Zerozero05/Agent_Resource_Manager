@@ -4,12 +4,13 @@ import { readFile, access } from 'node:fs/promises';
 import { createElement, act } from 'react';
 import { JSDOM } from 'jsdom';
 import ts from 'typescript';
+import type { WindowWorkspace, WorkspacePane } from '../src/workspace.ts';
 
 // Exercise WorkspaceApp's real close handshake; only native IPC and unrelated panes are replaced.
 const data = (code: string) => `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`;
 const native = data('export const invoke=(command,args)=>globalThis.workspaceCloseTest.invoke(command,args); export const isTauri=()=>true; export const listen=(name,callback)=>globalThis.workspaceCloseTest.listen(name,callback); export const getCurrentWindow=()=>globalThis.workspaceCloseTest.window;');
 const taskStub = data('export const useTasks=()=>globalThis.workspaceCloseTest.tasks; export const terminalTask=()=>false;');
-const shellStub = data(`import {createElement} from ${JSON.stringify(import.meta.resolve('react'))}; export const WorkspaceShell=props=>createElement('div',null,createElement('button',{onClick:props.onShowHelp},'帮助'),props.onToggleSidebar&&createElement('button',{'aria-label':props.sidebarExpanded?'收起侧栏':'展开侧栏','aria-expanded':props.sidebarExpanded,disabled:props.shortcutsBlocked,onClick:props.onToggleSidebar},'侧栏'),...props.panes.map(pane=>{const node=props.renderPane(pane,true,true); globalThis.workspaceCloseTest.session=node.props.value; return node;}));`);
+const shellStub = data(`import {createElement} from ${JSON.stringify(import.meta.resolve('react'))}; export const WorkspaceShell=props=>{globalThis.workspaceCloseTest.panes=props.panes;return createElement('div',null,createElement('button',{onClick:props.onShowHelp},'帮助'),props.onToggleSidebar&&createElement('button',{'aria-label':props.sidebarExpanded?'收起侧栏':'展开侧栏','aria-expanded':props.sidebarExpanded,disabled:props.shortcutsBlocked,onClick:props.onToggleSidebar},'侧栏'),...props.panes.map(pane=>{const node=props.renderPane(pane,true,true); globalThis.workspaceCloseTest.session=node.props.value; return node;}));};`);
 const emptyPane = data('export default function SessionApp(){return null}');
 const emptyControl = data('export function CheckControl(){return null}');
 const modules = new Map<string, Promise<string>>();
@@ -44,16 +45,17 @@ const host = document.getElementById('root')!;
 let unmount = () => {};
 let restoreClock = () => {};
 afterEach(async () => { await act(async () => unmount()); unmount = () => {}; restoreClock(); restoreClock = () => {}; });
-async function mount(failSave = false, options: { snapshot?: Record<string, unknown>; basicMode?: boolean; taskResult?: (attempt: number) => { snapshot?: Record<string, unknown>; error?: string } } = {}) {
+async function mount(failSave = false, options: { snapshot?: Record<string, unknown>; workspace?: WindowWorkspace; basicMode?: boolean; readPaneRuntime?: (paneId: string) => Record<string, unknown>; taskResult?: (attempt: number) => { snapshot?: Record<string, unknown>; error?: string } } = {}) {
   const calls: Record<string, unknown>[] = [], listeners = new Map<string, (event: unknown) => void>();
   const taskCalls: { action: string; args: Record<string, unknown>; foreground: boolean }[] = [];
   const readReplies: (() => Promise<unknown> | unknown)[] = [];
   let managerSnapshot = options.snapshot || { skills: [], sources: [], connections: [], settings: {}, stateRevision: 1 };
-  const workspace = { revision: 1, windows: [{ label: 'main', activePaneId: 'home', panes: [{ id: 'home', kind: 'home', state: {} }] }] };
+  const workspace = { revision: 1, windows: [options.workspace || { label: 'main', activePaneId: 'home', panes: [{ id: 'home', kind: 'home', state: {} }] }] };
   const reply = { windowLabel: 'main', workspace, closing: false, nativeCloseRequested: false };
   let destroyed = 0;
   const fixture = {
-    session: undefined as unknown as { requestStorageRestart: (id: string) => Promise<void>; managerSnapshot: { stateRevision?: number; settings?: { marker?: string }; maintenance?: { automaticAllowed?: boolean } }; acceptSnapshot: (snapshot: unknown) => void },
+    panes: [] as WorkspacePane[],
+    session: undefined as unknown as { pane: WorkspacePane; requestStorageRestart: (id: string) => Promise<void>; managerSnapshot: { stateRevision?: number; settings?: { marker?: string }; maintenance?: { automaticAllowed?: boolean } }; acceptSnapshot: (snapshot: unknown) => void },
     tasks: { tasks: [], run: async (_label: string, action: string, args: Record<string, unknown>, _origin: unknown, foreground: boolean) => {
       if (!options.snapshot) throw new Error('Window closure must not run a resource task');
       taskCalls.push({ action, args, foreground });
@@ -68,7 +70,7 @@ async function mount(failSave = false, options: { snapshot?: Record<string, unkn
       assert.equal(command, 'manager_request'); const request = args.request; calls.push(request);
       switch (request.action) {
         case 'get_state': return readReplies.length ? readReplies.shift()!() : managerSnapshot;
-        case 'workspace_get_pane_runtime': return { runtime: {} };
+        case 'workspace_get_pane_runtime': return { runtime: options.readPaneRuntime?.(String(request.paneId)) ?? {} };
         case 'workspace_save': if (failSave) throw new Error('synthetic save failure'); return reply;
         case 'workspace_close_intent': return { final: true, closeId: 'fixed-close' };
         case 'workspace_finish_close': return { ready: true };
@@ -82,7 +84,7 @@ async function mount(failSave = false, options: { snapshot?: Record<string, unkn
   assert(calls.some(call => call.action === 'workspace_ready'));
   return { calls, taskCalls, listeners, queueRead: (read: () => Promise<unknown> | unknown) => readReplies.push(read), setSnapshot: (next: Record<string, unknown>) => { managerSnapshot = next; }, updateSnapshot: (next: Record<string, unknown>) => {
     managerSnapshot = next; listeners.get('state-changed')?.({ payload: { stateRevision: next.stateRevision } });
-  }, destroyed: () => destroyed, session: () => fixture.session, nativeClose: () => {
+  }, destroyed: () => destroyed, session: () => fixture.session, panes: () => fixture.panes, nativeClose: () => {
     reply.nativeCloseRequested = true;
     let prevented = false;
     listeners.get('native-close')?.({ preventDefault: () => { prevented = true; } });
@@ -103,6 +105,52 @@ test('home sidebar registration reaches the outer toolbar without changing saved
   assert.equal(toolbar()?.getAttribute('aria-expanded'), 'false'); await click(toolbar()!); assert.equal(toggled, 2);
   await act(async () => businessDispose()); assert(toolbar()); await act(async () => nextDispose()); assert.equal(toolbar(), null);
   assert.equal(fixture.calls.length, before); assert.equal(fixture.taskCalls.length, 0);
+});
+
+test('restored detail labels follow current Skill and cached alias without changing pane identity or saving navigation', async () => {
+  const { managementDataCache } = await import(await moduleURL(new URL('../src/management-data.ts', import.meta.url)));
+  const detail: WorkspacePane = { id: 'detail', skillId: 'renamed-skill', kind: 'detail', title: 'Old display', state: { section: 'files', scrollTop: 240 } };
+  const operation: WorkspacePane = { id: 'upload', skillId: detail.skillId, kind: 'operation', title: 'Review upload', state: { operation: 'preview' } };
+  const workspace: WindowWorkspace = { label: 'main', activePaneId: detail.id, panes: [{ id: 'home', kind: 'home', state: {} }, operation, detail] };
+  const snapshot = (stateRevision: number, displayName?: string) => ({ stateRevision, sources: [], connections: [], settings: {}, skills: displayName ? [{ id: detail.skillId, name: 'same-skill', displayName }] : [] });
+  const fixture = await mount(false, { workspace, snapshot: snapshot(1) });
+  assert.equal(fixture.panes().at(-1), detail, 'keep the saved label while the current skill is unavailable');
+  const before = fixture.calls.length;
+  await act(async () => fixture.updateSnapshot(snapshot(2, 'New display')));
+  assert.deepEqual(fixture.panes().at(-1), { ...detail, title: 'New display' });
+  assert.equal(fixture.session().pane, fixture.panes().at(-1), 'active detail receives the same current label for its toolbar');
+  assert.equal(fixture.panes()[1], operation, 'the operation keeps its independent title');
+  await act(async () => managementDataCache.accept({ revision: 1, skillAnnotations: [{ skillId: detail.skillId, revision: 1, alias: 'Personal name', notes: '' }], savedViews: [] }));
+  assert.deepEqual(fixture.panes().at(-1), { ...detail, title: 'Personal name' });
+  await act(async () => managementDataCache.accept({ revision: 2, skillAnnotations: [], savedViews: [] }));
+  assert.deepEqual(fixture.panes().at(-1), { ...detail, title: 'New display' });
+  assert.equal(detail.title, 'Old display', 'the restored navigation record is untouched');
+  assert.deepEqual(fixture.calls.slice(before), [{ action: 'get_state' }]);
+  assert.deepEqual(fixture.taskCalls, []);
+});
+
+test('a failed pane read does not prevent another pane in the same snapshot from restoring on retry', async () => {
+  let failSecondRead = true;
+  const firstPane: WorkspacePane = { id: 'detail-first', skillId: 'first', kind: 'detail', state: {} };
+  const secondPane: WorkspacePane = { id: 'detail-second', skillId: 'second', kind: 'detail', state: {} };
+  const fixture = await mount(false, { readPaneRuntime: id => {
+    if (id === secondPane.id && failSecondRead) throw new Error('synthetic unavailable pane draft');
+    return id === firstPane.id ? { scrollTop: 177 } : {};
+  } });
+  const workspace = { revision: 2, windows: [{ label: 'main', activePaneId: firstPane.id,
+    panes: [...fixture.panes(), firstPane, secondPane] }] };
+  const publish = () => fixture.listeners.get('workspace-changed')!({ payload: workspace });
+  const callStart = fixture.calls.length;
+  await act(async () => publish());
+  assert.deepEqual(fixture.panes().map(pane => pane.id), ['home']);
+  assert.match(host.textContent || '', /synthetic unavailable pane draft/);
+
+  failSecondRead = false;
+  await act(async () => publish());
+  assert.deepEqual(fixture.panes().map(pane => pane.id), ['home', firstPane.id, secondPane.id]);
+  assert.doesNotMatch(host.textContent || '', /正在恢复页面/);
+  assert.deepEqual(fixture.calls.slice(callStart).map(call => [call.action, call.paneId]),
+    [firstPane.id, secondPane.id, firstPane.id, secondPane.id].map(id => ['workspace_get_pane_runtime', id]));
 });
 
 test('state events share one in-flight read and preserve a subsequent snapshot after a burst', async () => {

@@ -12,7 +12,7 @@ import { NativeUiaSession } from './native-uia-client.mjs';
 // edits task history, or runs export_configuration to make the fixture pass.
 const FORMAT = 'agent-resource-manager-native-task-results-v1';
 const CONFIGURATION_FORMAT = 'agent-resource-manager-native-configuration-v1';
-const validation = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation';
+const validation = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation';
 const dataParent = join(validation, 'manager-data');
 const resourceParent = join(validation, 'resources');
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, flag, index, all) => flag.startsWith('--') ? [...pairs, [flag.slice(2), all[index + 1]]] : pairs, []));
@@ -138,7 +138,7 @@ async function interfaceState(app, operation, temporary, expectedLabel) {
   assert.ok(['home', 'home-ready', 'history-scope', 'history-ready', 'inspect-history', 'read-results'].includes(operation));
   if (operation === 'read-results') {
     const observer = fileURLToPath(new URL('observe-native-result-errors.py', import.meta.url));
-    const python = 'D:\\03_github_projects\\Browser_Tools\\Windows-MCP\\.venv\\Scripts\\python.exe';
+    const python = 'D:\\03_github_projects\\Desktop_Automation\\Windows-MCP\\.venv\\Scripts\\python.exe';
     try {
       const { stdout } = await execute(python, ['-B', observer, '--pid', String(app.identity.pid), '--creation-file-time', String(app.identity.creationFileTime), '--window-handle', String(app.identity.windowHandle)], {
         windowsHide: true,

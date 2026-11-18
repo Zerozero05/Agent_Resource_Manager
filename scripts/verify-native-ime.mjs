@@ -48,7 +48,7 @@ if (options['existing-stdio-proof'] !== undefined) {
   pinnedTransports = proof.transports;
 }
 await assertNoUserManager({ transportSha256, ...(pinnedTransports ? { pinnedTransports } : {}) });
-const parent = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
+const parent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const fixture = await createPerformanceFixture(parent, options.name || `native-ime-${Date.now()}`, 0);
 const reportPath = join(fixture.root, 'ime-result.json'), driverPath = join(fixture.root, 'ime-driver.json');
 

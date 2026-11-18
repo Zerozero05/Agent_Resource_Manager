@@ -7,7 +7,7 @@ import { createPerformanceFixture, FIXTURE_FORMAT } from './performance-fixture.
 import { NativeUiaSession } from './native-uia-client.mjs';
 
 const format = 'agent-resource-manager-native-frame-v3';
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const options = Object.fromEntries(process.argv.slice(2).reduce((entries, arg, index, args) => arg.startsWith('--') ? [...entries, [arg.slice(2), args[index + 1]]] : entries, []));
 if (Object.hasOwn(options, 'transport-file-sha256') && (typeof options['transport-file-sha256'] !== 'string' || !/^[a-f0-9]{64}$/i.test(options['transport-file-sha256']))) throw new Error('--transport-file-sha256 requires one exact SHA256 digest.');
 const requestedTransportSha256 = options['transport-file-sha256']?.toLowerCase();

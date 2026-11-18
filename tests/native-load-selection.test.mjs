@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { join, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PERFORMANCE_POLICY as policy, backgroundLoadVerdict, localInteractionVerdict } from '../scripts/performance-policy.mjs';
 
@@ -10,6 +11,7 @@ const validation = source.slice(source.indexOf('function validateLoadSelection('
 const select = new Function(`${validation}; return validateLoadSelection;`)();
 const selectInteraction = new Function(`${validation}; return validateInteractionSelection;`)();
 const transportDigest = new Function(`${validation}; return transportDigest;`)();
+const selectSampling = new Function(`${validation}; return validateOverlapSampling;`)();
 const workloads = source.slice(source.indexOf('async function loadInteractions('), source.indexOf('\nasync function cycle('));
 const makeWorkloads = new Function('dependencies', `
   const { loadKind, options, report, check, waitTasks, resolve, readFile, digest,
@@ -23,6 +25,25 @@ const statusEnd = source.indexOf('\n  }\n} catch (error)', statusStart);
 assert.ok(statusStart >= 0 && statusEnd > statusStart);
 const finalize = new Function('report', 'suite', 'loadKind', 'options', 'passedLoadsStatus', 'interactionKind', 'passedInteractionStatus',
   source.slice(statusStart, statusEnd) + '\nreturn report.status;');
+const samplingSource = source.slice(source.indexOf('async function sampledLoads('), source.indexOf('\nasync function cycle('));
+const sampleSource = source.slice(source.indexOf('async function loadSample('), source.indexOf('\nasync function loadInteractions('));
+const sampledLoadActions = { check: 'check_now', download: 'apply_resource_download', update: 'apply_resource_update_stage' };
+const makeSampledLoads = new Function('dependencies', `
+  const { policy, report, backgroundLoadVerdict, ownedForeground, interaction,
+    waitNativeTask, inputCondition, emit, sleep, Date, performance, sampledLoadActions } = dependencies;
+  ${sampleSource}
+  ${samplingSource}
+  return sampledLoads;
+`);
+const sampledSetupSource = source.slice(source.indexOf('function exactOfficialDownload('), source.indexOf('\nasync function downloadRestartContinue('));
+const pinnedConstants = source.slice(source.indexOf('const officialDownload = '), source.indexOf('await mkdir(approved'));
+const makeSampledSetup = new Function('dependencies', `
+  const { lstat, realpath, mkdtemp, join, resolve, basename, approvedResourceParent, report, emit, digest,
+    beginUiaNativeDownload, sampledLoadActions, readNativeLoadFixture, attachNativeLoadResources, beginUiaNativeStage } = dependencies;
+  ${pinnedConstants}
+  ${sampledSetupSource}
+  return { officialDownload, officialDownloadSha256, exactOfficialDownload, sampledDownload, prepareSampledStages, sampledStage };
+`);
 const interactionSource = source.slice(source.indexOf('async function interactionRun('), source.indexOf('\nasync function loadSample('));
 const makeInteractionRun = new Function('dependencies', `
   const { interactionKind, check, interaction, recordBackground } = dependencies;
@@ -153,6 +174,280 @@ test('single-kind success is explicitly partial-limited and cannot be reported a
   assert.equal(finalize({ startup: {}, loadVerdict: { update: { status: 'incomplete' } } }, 'loads', 'update', {}, partialStatus), 'incomplete');
   assert.equal(finalize({ startup: {}, loadVerdict: { update: { status: 'failed' } } }, 'loads', 'update', {}, partialStatus), 'failed');
   assert.equal(finalize({ startup: {}, ...value.report }, 'loads', 'update', { 'concurrent-observation': true }, partialStatus), 'diagnostic-only-concurrent-observation');
+});
+
+test('complete suite cannot pass on small background smoke samples alone', () => {
+  const passed = { status: 'passed' };
+  const base = { startup: { verdict: { cold: passed, warm: passed } }, stability: { verdict: passed },
+    interactionVerdict: { search: passed, filter: passed, tab: passed, document: passed } };
+  const loads = Object.fromEntries(['check', 'download', 'update'].map(kind => [kind, { status: 'passed' }]));
+  const status = (loadVerdict, suite = 'all') => finalize({ ...base, loadVerdict }, suite, undefined, {}, 'passed-background-loads-only');
+  assert.equal(status(loads), 'measured-gates-passed-load-samples-incomplete');
+  assert.equal(status(loads, 'loads'), 'passed-background-loads-only');
+  assert.equal(status({ ...loads, update: { status: 'incomplete' } }), 'measured-gates-passed-load-coverage-incomplete');
+  const complete = Object.fromEntries(Object.keys(loads).map(kind => [kind, { ...loads[kind], sampledOverlap: passed }]));
+  assert.equal(status(complete), 'passed');
+  for (const statusName of ['failed', 'invalid']) {
+    assert.equal(status({ ...complete, download: { ...loads.download, sampledOverlap: { status: statusName } } }), 'failed');
+  }
+  assert.equal(status({ ...complete, download: { ...complete.download, status: 'failed' } }), 'failed');
+});
+
+test('sampled overlap admits one explicit synchronous workload and only its own required specification', () => {
+  const sample = { 'sample-overlap': 'true' };
+  const download = { ...sample, 'download-spec': 'download.json' };
+  const update = { ...sample, 'stage-fixture': 'last.json' };
+  const choose = (options, suite, kind, stages = [], downloads = 0) => selectSampling(options, suite, kind, stages, downloads);
+  assert.equal(choose({}, 'loads', 'check'), false);
+  assert.equal(choose(sample, 'loads', 'check'), true);
+  assert.equal(choose(download, 'loads', 'download', [], 1), true);
+  assert.equal(choose(update, 'loads', 'update', ['first.json', 'last.json']), true);
+  for (const value of [true, false, 'false', '']) {
+    assert.throws(() => choose({ 'sample-overlap': value }, 'loads', 'check'), /sample-overlap true/);
+  }
+  assert.throws(() => choose(sample, 'loads', undefined), /one explicit --load-kind/);
+  assert.throws(() => choose(sample, 'all', 'check'), /requires --suite loads/);
+  assert.throws(() => choose({ ...sample, 'concurrent-observation': true }, 'loads', 'check'), /synchronous observation/);
+  for (const [kind, arg] of [['check', 'download-spec'], ['check', 'stage-fixture'], ['update', 'download-spec'], ['download', 'stage-fixture']]) {
+    assert.throws(() => choose({ ...sample, [arg]: 'chosen' }, 'loads', kind), /only the selected workload specification/);
+  }
+  for (const count of [0, 2]) assert.throws(() => choose(download, 'loads', 'download', [], count), /one explicit pinned/);
+  assert.throws(() => choose({ ...download, 'download-spec': true }, 'loads', 'download', [], 1), /one explicit pinned/);
+  for (const paths of [[], ['last.json'], ['first.json', true], Array(13).fill('other.json')]) {
+    assert.throws(() => choose(update, 'loads', 'update', paths), /two to twelve separate/);
+  }
+  assert.throws(() => choose({}, 'loads', 'update', ['first.json', 'last.json']), /limited to sampled update/);
+  const script = fileURLToPath(new URL('../scripts/verify-uia-performance.mjs', import.meta.url));
+  for (const [args, error] of [
+    [['--load-kind', 'check', '--sample-overlap'], /sample-overlap true/],
+    [['--load-kind', 'download', '--sample-overlap', 'true', '--download-spec', 'one.json', '--download-spec', 'two.json'], /one explicit pinned/],
+    [['--load-kind', 'update', '--sample-overlap', 'true', '--stage-fixture', 'one.json', '--stage-fixture'], /two to twelve separate/],
+    [['--load-kind', 'update', '--stage-fixture', 'one.json', '--stage-fixture', 'two.json'], /limited to sampled update/],
+  ]) {
+    const invalid = spawnSync(process.execPath, [script, '--suite', 'loads', ...args], { windowsHide: true, timeout: 10000, encoding: 'utf8' });
+    assert.equal(invalid.status, 1);
+    assert.equal(invalid.stdout, '');
+    assert.match(invalid.stderr, error);
+  }
+});
+
+function sampledHarness({ kind = 'check', retireDuringInput = false, noRunningWindow = false, wrongReceipt = false, replayTask = false,
+  measuresPerTask = kind === 'download' ? 400 : kind === 'update' ? 50 : 5 } = {}) {
+  let now = 10000, active, sequential = 0, search = '', filtered = false, document = null, home = true, measurements = 0;
+  const report = { loadSelection: { scope: `sampled-${kind}-only` } };
+  const identity = { pid: 123, windowHandle: 456, creationFileTime: '789' };
+  const inputCondition = 'native-ui-input-to-painted-result';
+  const event = (op, fields) => {
+    if (op === 'search') {
+      assert.equal(home, true); assert.equal(filtered, false); assert.notEqual(search, fields.index);
+      search = fields.index;
+    } else if (op === 'clear') { assert.equal(home, true); assert.notEqual(search, ''); search = ''; }
+    else if (op === 'filter') { assert.equal(home, true); assert.equal(search, ''); assert.notEqual(filtered, fields.github); filtered = fields.github; }
+    else if (op === 'openDocument') { assert.equal(home, true); assert.equal(search, fields.index); assert.equal(document, null); document = fields.index; home = false; }
+    else if (op === 'closeDocument') { assert.equal(document, fields.index); document = null; home = true; }
+    else if (op === 'tab') { assert.equal(document, 0); assert.notEqual(home, fields.home); home = fields.home; }
+    else assert.fail(op);
+  };
+  const completed = [], taskStarts = [];
+  const finish = () => { active.status = 'succeeded'; active.finishedAt = new globalThis.Date(now).toISOString(); };
+  const complete = id => {
+    assert.equal(active.id, id);
+    now += 4;
+    if (active.status !== 'succeeded') { active.startedAt ||= new globalThis.Date(now).toISOString(); finish(); }
+    completed.push(active);
+    return active;
+  };
+  const app = { identity, call: async (op, fields) => {
+    now += 4;
+    if (op === 'task') {
+      assert.equal(fields.taskId, active.id);
+      if (active.status === 'queued' && !noRunningWindow) { active.status = 'running'; active.startedAt = new globalThis.Date(now).toISOString(); }
+      return { task: { ...active } };
+    }
+    if (op === 'windowIdentity') return { capturedHandle: identity.windowHandle, currentMainHandle: identity.windowHandle, uiaProcessId: identity.pid, foregroundHandle: identity.windowHandle };
+    event(op, fields);
+  } };
+  const run = makeSampledLoads({
+    policy, report, inputCondition, Date: { now: () => now }, performance: { now: () => now - 10000 },
+    backgroundLoadVerdict, sampledLoadActions,
+    ownedForeground: (value, expected) => value.foregroundHandle === expected.windowHandle && value.uiaProcessId === expected.pid,
+    interaction: async (_app, op, fields, measured, deadline) => {
+      assert.equal(active.status, 'running');
+      assert.equal(measured, true);
+      now += 4; // The final owned-window observation precedes its deadline check.
+      if (now - 10000 >= deadline) return null;
+      event(op, fields);
+      const start = now += 4;
+      if (retireDuringInput) finish();
+      now += 120;
+      if (++active.measured === measuresPerTask && !retireDuringInput) finish();
+      measurements++;
+      return { ...identity, condition: inputCondition, foregroundBefore: true, foregroundAfter: true,
+        category: op === 'openDocument' ? 'document' : op, durationMs: 120, startedAtUtcMs: start, finishedAtUtcMs: now };
+    },
+    waitNativeTask: async (_app, id) => complete(id),
+    emit: async () => {}, sleep: async ms => { now += ms; },
+  });
+  const startTask = async index => {
+    assert.equal(completed.length, index, 'Finish and verify the exact prior task before starting the next');
+    assert.ok(!active || completed.at(-1) === active);
+    sequential++;
+    const taskId = `${kind}-${replayTask ? 1 : sequential}`;
+    const resourceId = kind === 'update' ? `perf-tool-${String(index).padStart(3, '0')}` : undefined;
+    active = { id: taskId, action: sampledLoadActions[kind], status: 'queued', measured: 0, resourceId };
+    taskStarts.push({ index, taskId, resourceId });
+    return { kind, taskId, resourceId, ...(kind !== 'check' && { finish: async () => {
+      complete(taskId);
+      return wrongReceipt ? undefined : { taskId, complete: true };
+    } }) };
+  };
+  return { report, completed, taskStarts, measures: () => measurements, run: (limits, maximumTasks = kind === 'download' ? 1 : kind === 'update' ? 12 : 96) =>
+    run(app, kind, startTask, maximumTasks, { maximumAttempts: 560, maximumMeasurementMs: 720000, maximumQueuedObservationMs: 8, longTaskCategoryBurst: 5, ...limits }) };
+}
+
+test('sampled checks collect four balanced sets from real transitions and serialize successful task completion', async () => {
+  const value = sampledHarness();
+  await value.run();
+  assert.equal(value.report.sampledLoad.stopReason, 'sample-count');
+  assert.equal(value.measures(), 400);
+  assert.equal(value.completed.length, 80);
+  assert.deepEqual(Object.values(value.report.loadVerdict.check.sampledOverlap.categories).map(category => category.count), [100, 100, 100, 100]);
+  assert.equal(finalize({ startup: {}, ...value.report }, 'loads', 'check', {}, 'passed-sampled-native-check-only'), 'passed-sampled-native-check-only');
+});
+
+test('sampled checks skip tasks without a running observation and preserve rejected early completions', async () => {
+  const queued = sampledHarness({ noRunningWindow: true });
+  await queued.run({}, 2);
+  assert.equal(queued.measures(), 0);
+  assert.equal(queued.completed.length, 2);
+  assert.equal(queued.report.sampledLoad.stopReason, 'task-budget');
+  const retired = sampledHarness({ retireDuringInput: true });
+  await retired.run({ maximumAttempts: 2 });
+  assert.equal(retired.measures(), 2);
+  assert.equal(retired.report.sampledLoad.stopReason, 'attempt-budget');
+  assert.equal(retired.report.loadVerdict.check.sampledOverlap.acceptedInputs, 0);
+  assert.equal(retired.report.loadVerdict.check.sampledOverlap.rejected['not-contained-in-running-task'], 2);
+  const timed = sampledHarness();
+  await timed.run({ maximumMeasurementMs: 15 });
+  assert.equal(timed.measures(), 0, 'No new sample enters after the deadline, including finalization');
+  assert.equal(timed.completed.length, 1, 'The active task is still verified before closing');
+  assert.equal(timed.report.sampledLoad.stopReason, 'time-budget');
+  for (const value of [queued, retired, timed]) {
+    assert.equal(finalize({ startup: {}, ...value.report }, 'loads', 'check', {}, 'passed-sampled-native-check-only'), 'native-check-overlap-samples-incomplete');
+  }
+});
+
+test('sampled download and update rotate four real transitions and verify distinct native workloads serially', async () => {
+  for (const [kind, taskCount] of [['download', 1], ['update', 8]]) {
+    const value = sampledHarness({ kind });
+    await value.run();
+    assert.equal(value.report.sampledLoad.stopReason, 'sample-count');
+    assert.equal(value.measures(), 400);
+    assert.equal(value.completed.length, taskCount);
+    assert.equal(new Set(value.completed.map(task => task.id)).size, taskCount);
+    if (kind === 'update') assert.equal(new Set(value.completed.map(task => task.resourceId)).size, taskCount);
+    assert.deepEqual(Object.values(value.report.loadVerdict[kind].sampledOverlap.categories).map(category => category.count), [100, 100, 100, 100]);
+    assert.ok(value.report.loadCoverage.every(record => record.kind === kind));
+    const status = `passed-sampled-native-${kind}-only`;
+    assert.equal(finalize({ startup: {}, ...value.report }, 'loads', kind, {}, status), status);
+  }
+});
+
+test('sampled workloads stop without replay when a real task is short, previously seen or unverified', async () => {
+  const short = sampledHarness({ kind: 'download', measuresPerTask: 2 });
+  await short.run();
+  assert.equal(short.report.sampledLoad.stopReason, 'task-budget');
+  assert.equal(short.taskStarts.length, 1);
+  assert.equal(finalize({ startup: {}, ...short.report }, 'loads', 'download', {}, 'passed-sampled-native-download-only'), 'native-download-overlap-samples-incomplete');
+  const replay = sampledHarness({ kind: 'update', replayTask: true, measuresPerTask: 2 });
+  await assert.rejects(replay.run(), /distinct expected native task/);
+  assert.equal(replay.completed.length, 1);
+  assert.equal(replay.measures(), 2);
+  const unverified = sampledHarness({ kind: 'update', wrongReceipt: true, measuresPerTask: 2 });
+  await assert.rejects(unverified.run(), /verify the exact native task completion/);
+  assert.equal(unverified.taskStarts.length, 1);
+});
+
+test('sampled download uses the pinned official asset once and checks the actual file and task duration', async () => {
+  const approvedResourceParent = resolve('resources');
+  const directory = join(approvedResourceParent, 'native-download-sampled-owned');
+  const report = {}, dataset = { dataDir: 'generated-data' };
+  const startedAt = '2026-11-18T00:00:00.000Z';
+  const task = { id: 'expected-task', action: sampledLoadActions.download, status: 'succeeded', startedAt, finishedAt: '2026-11-18T00:11:02.000Z' };
+  const source = { path: 'pinned-official.json', sha256: 'specification-file-hash' };
+  let archives = 0, taskOp, actualHash, savedSpec;
+  const app = { fixture: dataset, call: async (op, fields) => { taskOp = { op, fields }; return { task }; } };
+  const setup = makeSampledSetup({ join, resolve, approvedResourceParent, sampledLoadActions, report, emit: async () => {},
+    lstat: async path => path === approvedResourceParent ? { isDirectory: () => true, isSymbolicLink: () => false }
+      : { isFile: () => true, isSymbolicLink: () => false, size: 676536 },
+    realpath: async path => path,
+    mkdtemp: async prefix => { assert.equal(prefix, join(approvedResourceParent, 'native-download-sampled-')); return directory; },
+    digest: async () => actualHash,
+    beginUiaNativeDownload: async (target, data, specification) => {
+      archives++;
+      assert.equal(app, target);
+      assert.equal(dataset, data);
+      savedSpec = specification;
+      const targetPath = join(directory, 'fixed-download-agent-reach.zip');
+      const receipt = { taskId: task.id, complete: true, archivePath: targetPath, downloadId: 'fixed-download' };
+      return { ...receipt, targetPath, bytesPerSecond: specification.bytesPerSecond, expectedBytes: specification.assetBytes, finish: async () => receipt };
+    },
+  });
+  const pinned = { repository: 'Panniantong/Agent-Reach', tag: 'v1.6.0', releaseId: 421526768, assetId: 668240314, assetName: 'agent-reach.zip', assetBytes: 676536 };
+  assert.deepEqual(setup.officialDownload, pinned);
+  assert.ok(setup.exactOfficialDownload({ ...pinned, directory: 'old-unused', bytesPerSecond: 16384 }));
+  assert.ok(!setup.exactOfficialDownload({ ...pinned, assetId: 0 }));
+  actualHash = setup.officialDownloadSha256;
+  const load = await setup.sampledDownload(app, source);
+  assert.deepEqual(savedSpec, { ...pinned, directory, bytesPerSecond: 1024 });
+  assert.equal(report.downloadSpecification.sha256, source.sha256);
+  const result = await load.finish();
+  assert.equal(result.sha256, actualHash);
+  assert.equal(result.minimumDurationMs, pinned.assetBytes / 1024 * 1000);
+  assert.deepEqual(taskOp, { op: 'task', fields: { taskId: task.id } });
+  task.finishedAt = '2026-11-18T00:00:41.000Z';
+  await assert.rejects(load.finish(), /selected rate and asset size/);
+  actualHash = 'changed-asset';
+  await assert.rejects(load.finish(), /pinned ordinary asset bytes/);
+  assert.equal(archives, 1);
+});
+
+test('sampled stage binds ordered canonical fixture manifests and refuses changes before invoking the native stage', async () => {
+  const paths = ['first', 'second'].map(directory => resolve(directory, 'load-fixture.json'));
+  const knownHashes = new Map(paths.map((path, index) => [path, `manifest-${index}`]));
+  const dataset = { dataDir: 'generated-data' }, app = {}, starts = [];
+  let attachments = 0, mutateDuringRead;
+  const setup = makeSampledSetup({ resolve, basename, digest: async path => knownHashes.get(path),
+    readNativeLoadFixture: async path => {
+      if (mutateDuringRead === path) knownHashes.set(path, 'changed-during-read');
+      return { manifestPath: path };
+    },
+    attachNativeLoadResources: async (data, fixtures) => {
+      attachments++;
+      assert.equal(data, dataset);
+      return fixtures.map(({ manifestPath }, index) => ({ fixturePath: manifestPath, resourceId: `resource-${index}` }));
+    },
+    beginUiaNativeStage: async (target, data, path, seed) => {
+      assert.equal(target, app);
+      assert.equal(data, dataset);
+      assert.equal(path, seed.fixturePath);
+      starts.push(seed);
+      return seed.resourceId;
+    },
+  });
+  await assert.rejects(setup.prepareSampledStages(dataset, [paths[0], paths[0]]), /canonical load-fixture.json paths without repetition/);
+  await assert.rejects(setup.prepareSampledStages(dataset, [paths[0], resolve('second', 'copy.json')]), /canonical load-fixture.json paths without repetition/);
+  mutateDuringRead = paths[1];
+  await assert.rejects(setup.prepareSampledStages(dataset, paths), /changed during preparation/);
+  assert.equal(attachments, 0);
+  mutateDuringRead = undefined;
+  knownHashes.set(paths[1], 'manifest-1');
+  const seeds = await setup.prepareSampledStages(dataset, paths);
+  assert.deepEqual(seeds.map(seed => seed.manifestSha256), ['manifest-0', 'manifest-1']);
+  assert.equal(await setup.sampledStage(app, dataset, seeds[0]), 'resource-0');
+  knownHashes.set(paths[1], 'later-change');
+  await assert.rejects(setup.sampledStage(app, dataset, seeds[1]), /changed since its binding/);
+  assert.deepEqual(starts, [seeds[0]]);
 });
 
 test('partial selection preserves normal shutdown, fixed-harness checks and explicit result scope', () => {

@@ -12,9 +12,9 @@ import { NativeUiaSession } from './native-uia-client.mjs';
 // After preparation every template mutation must use the actual native UI.
 const FORMAT = 'agent-resource-manager-native-templates-v1';
 const DRIVER_FORMAT = 'agent-resource-manager-native-performance-v1';
-const validation = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation';
+const validation = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation';
 const dataParent = join(validation, 'manager-data'), resourceParent = join(validation, 'resources');
-const rustc = 'D:\\03_github_projects\\Agent_Resource_Manager\\dev\\environment\\rust\\toolchain\\bin\\rustc.exe';
+const rustc = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\dev\\environment\\rust\\toolchain\\bin\\rustc.exe';
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, flag, index, all) => flag.startsWith('--') ? [...pairs, [flag.slice(2), all[index + 1]]] : pairs, []));
 const phase = args.phase;
 if (process.argv.includes('--help')) {
@@ -93,7 +93,7 @@ async function compile(fixture) {
   assert.equal(process.platform, 'win32'); assert.ok(same(await realpath(rustc), rustc));
   const linker = process.env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER;
   assert.equal(typeof linker, 'string', 'Activate the existing project compiler environment before this explicit compile phase.');
-  assert.ok(inside(linker, 'D:\\03_github_projects\\Agent_Resource_Manager\\dev\\environment\\msvc-portable') && same(await realpath(linker), linker));
+  assert.ok(inside(linker, 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\dev\\environment\\msvc-portable') && same(await realpath(linker), linker));
   const temporary = join(fixture.root, 'compiler-temp'); await mkdir(temporary);
   const command = [fixture.sourcePath, '--crate-name', 'native_template_probe', '--edition=2021', '-C', 'debuginfo=0', '-C', `linker=${linker}`, '-C', 'link-arg=/DEBUG:NONE', '-o', fixture.executablePath];
   const { stdout, stderr } = await execute(rustc, command, { windowsHide: true, timeout: 120000, maxBuffer: 1024 * 1024, env: { ...process.env, TEMP: temporary, TMP: temporary } });

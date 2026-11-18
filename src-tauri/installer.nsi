@@ -75,6 +75,7 @@ ${StrLoc}
 !define UNINSTALLERSIGNCOMMAND "{{uninstaller_sign_cmd}}"
 !define ESTIMATEDSIZE "{{estimated_size}}"
 !define STARTMENUFOLDER "{{start_menu_folder}}"
+!define CURRENT_USER_DEFAULT_INSTALL_DIR "D:\03_github_projects\Agent_Management\Agent_Resource_Manager\app"
 
 Var PassiveMode
 Var UpdateMode
@@ -559,14 +560,14 @@ Function .onInit
         StrCpy $INSTDIR "$PROGRAMFILES\${PRODUCTNAME}"
       ${EndIf}
     !else if "${INSTALLMODE}" == "currentUser"
-      StrCpy $INSTDIR "D:\03_github_projects\Agent_Resource_Manager\app"
+      StrCpy $INSTDIR "${CURRENT_USER_DEFAULT_INSTALL_DIR}"
     !endif
 
     Call RestorePreviousInstallLocation
     ; Keep explicit /D and an existing installation choice. Resolve the fresh
     ; install before SetOutPath can create any application directory.
     !if "${INSTALLMODE}" == "currentUser"
-      ${If} $INSTDIR == "D:\03_github_projects\Agent_Resource_Manager\app"
+      ${If} $INSTDIR == "${CURRENT_USER_DEFAULT_INSTALL_DIR}"
         IfFileExists "D:\*.*" skill_manager_default_ready
         IfSilent skill_manager_missing_drive_silent
         StrCpy $INSTDIR ""

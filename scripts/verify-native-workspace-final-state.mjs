@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { NativeUiaSession } from './native-uia-client.mjs';
 import { createPerformanceFixture, FIXTURE_FORMAT } from './performance-fixture.mjs';
 
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const format = 'agent-resource-manager-native-workspace-final-state-v1';
 const digest = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 const json = value => JSON.stringify(value, null, 2) + '\n';

@@ -11,7 +11,7 @@ import { createPerformanceFixture, FIXTURE_FORMAT } from './performance-fixture.
 import { ownedForeground } from './performance-policy.mjs';
 
 const format = 'agent-resource-manager-github-combo-diagnostic-v1';
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const expectedExe = 'b8eab75020d4ebac7ea10fa96cdc1255ab68f3f242f34d4078c6c52ed6532f73';
 const source = { repository: 'Panniantong/Agent-Reach', tag: 'v1.6.0', releaseId: 421526768, assetId: 668240314, assetName: 'agent-reach.zip', assetBytes: 676536 };
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, flag, index, all) => flag.startsWith('--') ? [...pairs, [flag.slice(2), all[index + 1]]] : pairs, []));

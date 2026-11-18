@@ -10,7 +10,7 @@ import { createPerformanceFixture, FIXTURE_FORMAT } from './performance-fixture.
 // No backend mutation shortcut: even package preparation and candidate commit
 // are submitted by exactly one invocation of their real native UI controls.
 const FORMAT = 'agent-resource-manager-native-packages-v1';
-const VALIDATION = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation';
+const VALIDATION = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation';
 const MANAGER_DATA = join(VALIDATION, 'manager-data');
 const RESOURCE_DATA = join(VALIDATION, 'resources');
 const VERSIONS = ['0.0.82', '0.0.83'];

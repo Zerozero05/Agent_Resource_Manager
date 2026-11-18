@@ -12,11 +12,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { createPerformanceFixture } from './performance-fixture.mjs';
 import { PERFORMANCE_POLICY, freezeConvergenceBounds, stabilityVerdict } from './performance-policy.mjs';
 import { IDLE_OBSERVER, idleObservation } from './diagnose-native-idle-memory.mjs';
-const approved = 'D:/03_github_projects/Agent_Resource_Manager/validation/manager-data';
+import { assertNoUserManager } from './native-uia-client.mjs';
+const approved = 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data';
 const sourceRoot = fileURLToPath(new URL('../', import.meta.url));
-const executable = join(sourceRoot, 'outputs/v1-validation/detached-task-summary-allocation-20261109/agent-resource-manager.exe');
+const executable = join(sourceRoot, 'outputs/v1-validation/detached-workspace-restore-retry-20261118/agent-resource-manager.exe');
 const buildInfo = join(dirname(executable), 'candidate-build-info.json');
-const candidateSha256 = 'd0b6551f5fd11125ec6f548b7239643f9076a6ccec0ccf54f6afca15e8ce87e0';
+const candidateSha256 = '9436a75a4cf40316f80702e43c7b4da35067ec9e16a0ce592846599433e9b1aa';
+const buildInfoSha256 = '0bdcc16ff13fffa08045b791abcb93897b24c91153675127c6fddd8dbc1c0028';
+const transportSha256 = 'f9dfe387f6900925808cdd16b9785f29b96e90c40b554b828b17557f99bd846f';
 const helper = fileURLToPath(new URL('native-visual-input.ps1', import.meta.url));
 const sourceFiles = ['verify-native-visual-stability.mjs', 'native-visual-input.ps1', 'performance-policy.mjs', 'performance-fixture.mjs', 'diagnose-native-idle-memory.mjs', 'native-uia-client.mjs', 'verify-native-uia.ps1'].map(name => fileURLToPath(new URL(name, import.meta.url)));
 const format = 'agent-resource-manager-native-visual-stability-v1';
@@ -136,15 +139,15 @@ function protectedData(dataset) {
         db.close();
     }
 }
-async function candidate() { const info = JSON.parse(await readFile(buildInfo, 'utf8')); assert.equal(info.buildMode, 'release'); assert.equal(info.executableSha256, candidateSha256); assert.equal(info.diagnosticOnly === true, false); assert.equal(await digest(executable), candidateSha256); }
+async function candidate() { const bytes = await readFile(buildInfo); assert.equal(hash(bytes), buildInfoSha256); const info = JSON.parse(bytes.toString('utf8')); assert.equal(info.buildMode, 'release'); assert.equal(info.executableSha256, candidateSha256); assert.equal(info.diagnosticOnly === true, false); assert.equal(await digest(executable), candidateSha256); }
 async function prepare() {
     await candidate();
-    await mkdir(approved, { recursive: true });
+    await ordinary(approved);
     const root = await mkdtemp(join(approved, 'native-visual-'));
     const dataset = await createPerformanceFixture(root, 'fixture', 100), observer = join(root, 'memory-observer.ps1');
     const observerSource = visualObserverSource();
     await writeFile(observer, observerSource, { flag: 'wx' });
-    const descriptor = { format, root, dataset, candidateSha256, buildInfoSha256: await digest(buildInfo), observer, observerSha256: hash(observerSource), sources: await sources(), runtimeFiles: await runtimeFiles(dataset), createdAt: new Date().toISOString() };
+    const descriptor = { format, root, dataset, candidateSha256, transportSha256, buildInfoSha256: await digest(buildInfo), observer, observerSha256: hash(observerSource), sources: await sources(), runtimeFiles: await runtimeFiles(dataset), createdAt: new Date().toISOString() };
     const path = join(root, 'visual-dataset.json');
     await writeFile(path, json(descriptor), { flag: 'wx' });
     console.log(json({ status: 'prepared-no-gui-run', descriptor: path, referencesRequired: true, visualReviewAndPilotRequired: true }));
@@ -154,6 +157,8 @@ async function descriptorAt(path) {
     await ordinary(path);
     const descriptor = JSON.parse(await readFile(path, 'utf8'));
     assert.equal(descriptor.format, format);
+    assert.equal(descriptor.candidateSha256, candidateSha256);
+    assert.equal(descriptor.transportSha256, transportSha256);
     assert.ok(inside(descriptor.root, approved) && basename(descriptor.root).startsWith('native-visual-') && same(path, join(descriptor.root, 'visual-dataset.json')));
     assert.equal(descriptor.dataset.skillCount, 1000);
     assert.equal(descriptor.dataset.toolCount, 100);
@@ -277,7 +282,7 @@ async function references(descriptor) {
     try {
         process.env.TEMP = env.TEMP;
         process.env.TMP = env.TMP;
-        app = await NativeUiaSession.launch({ executable, sha256: candidateSha256, dataDir: descriptor.dataset.dataDir, reportPath: join(descriptor.root, 'reference-driver.json') });
+        app = await NativeUiaSession.launch({ executable, sha256: candidateSha256, transportSha256, dataDir: descriptor.dataset.dataDir, reportPath: join(descriptor.root, 'reference-driver.json') });
         visual = await VisualSession.attach(app.identity, descriptor, env);
         await visual.call('prepareForeground');
         ref.frame = visual.identity;
@@ -452,14 +457,12 @@ async function run(descriptor, pilot) {
     await writeFile(join(root, name + '-owner.json'), json({ referenceSha256: hash(refBytes) }), { flag: 'wx' });
     await mkdir(join(root, 'temp'), { recursive: true });
     const env = environment(root);
-    const report = { format, mode: name, status: 'running', startedAt: new Date().toISOString(), candidateSha256, descriptorPath: join(root, 'visual-dataset.json'), datasetFingerprint: descriptor.dataset.dataFingerprint, referenceSha256: hash(refBytes), approvalSha256: hash(approvalBytes), visualApproval: approval, policy: PERFORMANCE_POLICY, visualPolicy, measurementsUseAccessibility: false, capture: 'foreground-owned-CopyFromScreen', calibration: [], samples: [], cycles: [], checks: [], actions: [], normalExit: false, limitations: ['Visual state checks cover frozen visible ROIs, not hidden AX/DOM counts. Unicode search injection is not IME evidence. Previous UIA convergence failure remains retained. Normal Quit happens after sampling.'] };
+    const report = { format, mode: name, status: 'running', startedAt: new Date().toISOString(), candidateSha256, transportSha256, descriptorPath: join(root, 'visual-dataset.json'), datasetFingerprint: descriptor.dataset.dataFingerprint, referenceSha256: hash(refBytes), approvalSha256: hash(approvalBytes), visualApproval: approval, policy: PERFORMANCE_POLICY, visualPolicy, measurementsUseAccessibility: false, capture: 'foreground-owned-CopyFromScreen', calibration: [], samples: [], cycles: [], checks: [], actions: [], normalExit: false, limitations: ['Visual state checks cover frozen visible ROIs, not hidden AX/DOM counts. Unicode search injection is not IME evidence. Previous UIA convergence failure remains retained. Normal Quit happens after sampling.'] };
     const save = () => writeFile(reportPath, json(report));
     let child, exit, identity, visual, baseline;
     try {
-        const command = `@(Get-CimInstance Win32_Process -Filter "Name='agent-resource-manager.exe' OR Name='skill-manager.exe'").Count|ConvertTo-Json -Compress`;
-        const pending = execute('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { env, windowsHide: true, timeout: 10000 });
-        pending.child.stdin.end();
-        assert.equal(JSON.parse((await pending).stdout), 0);
+        const ownership = await assertNoUserManager({ transportSha256 });
+        assert.ok(ownership.managers.every(process => process.role === 'mcpTransport'), 'Only verified formal MCP transports may already exist.');
         child = spawn(executable, ['--data-dir', descriptor.dataset.dataDir], { env, cwd: dirname(executable), stdio: 'ignore' });
         child.on('exit', (code, signal) => { exit = { code, signal }; });
         await new Promise((done, reject) => { child.once('spawn', done); child.once('error', reject); });

@@ -1,7 +1,7 @@
-import { readFile, stat } from 'node:fs/promises';
+import { lstat, readFile, stat } from 'node:fs/promises';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readNativeLoadFixture } from './performance-load-fixture.mjs';
+import { MAX_NATIVE_UPDATE_FIXTURES, readNativeLoadFixture } from './performance-load-fixture.mjs';
 
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 const active = task => ['queued', 'running'].includes(task.status);
@@ -42,24 +42,68 @@ async function goSkills(app) { await app.call('invokeName', { name: 'Skills', sc
 
 /** Uses the real local update form and its explicit confirmation. The ZIP has
  * generated text only; the current root and content must remain unchanged. */
-export async function beginUiaNativeStage(app, dataset, fixturePath) {
+export async function beginUiaNativeStage(app, dataset, fixturePath, seed) {
   const fixture = await readNativeLoadFixture(fixturePath);
   if (resolve(app.identity.dataDirectory).toLowerCase() !== resolve(dataset.dataDir).toLowerCase() || dataset.skillCount !== 1000 || dataset.toolCount !== 100) throw new Error('Native update load requires the exact isolated 1000/100 dataset.');
-  await goTools(app); await app.call('setField', { name: '搜索工具', value: 'Perf Update Fixture' });
-  await invoke(app, 'Perf Update Fixture'); await invoke(app, '更新运行版本');
+  if (seed !== undefined && (!seed || typeof seed !== 'object')) throw new Error('Sampled native update requires an exact fixture seed.');
+  const samePath = (left, right) => typeof left === 'string' && typeof right === 'string' && resolve(left).toLowerCase() === resolve(right).toLowerCase();
+  const toolName = seed?.toolName ?? 'Perf Update Fixture';
+  // A never-used destination is required; production also validates its independence.
+  const destination = join(fixture.candidateParent, 'native-uia-v2');
+  const selected = fixture.nextArchive.files;
+  if (seed) {
+    const suffix = /^perf-tool-(\d{3})$/.exec(seed.resourceId)?.[1];
+    if (suffix === undefined || Number(suffix) >= MAX_NATIVE_UPDATE_FIXTURES || toolName !== `Perf Update Fixture ${suffix}`
+      || seed.resourceRevision !== 1 || seed.fixtureScopeId !== fixture.scopeId || seed.totalTools !== 100
+      || !samePath(seed.rootPath, fixture.currentRoot) || !samePath(seed.fixturePath, fixturePath)
+      || seed.archiveSha256 !== fixture.nextArchive.sha256 || seed.fileCount !== selected.length) throw new Error('Native update load does not match its exact seeded resource and archive.');
+    if (selected.length !== 4098 || fixture.limits.fileCount !== selected.length
+      || selected[0]?.path !== 'LICENSE' || selected[1]?.path !== 'bin/tool.txt'
+      || fixture.oldArchive.files.length !== 2 || fixture.oldArchive.files[0]?.path !== 'LICENSE' || fixture.oldArchive.files[1]?.path !== 'bin/tool.txt'
+      || selected.slice(2).some((file, index) => file.path !== `data/payload-${String(index).padStart(5, '0')}.bin` || file.bytes !== 4096 || file.role !== 'runtime')) {
+      throw new Error('Sampled native update requires the standard 4098-file generated workload.');
+    }
+    const existing = await lstat(destination).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    if (existing) throw new Error('The sampled native update candidate path has already been used.');
+  }
+  await goTools(app); await app.call('setField', { name: '搜索工具', value: toolName });
+  await invoke(app, toolName); await invoke(app, '更新运行版本');
   await setField(app, '候选版本 ZIP', fixture.nextArchive.path);
   await waitNativeTask(app, (await actionTask(app, '读取文件清单', 'resource_package_inspect')).id);
-  await app.call('setField', { name: '固定版本', value: 'v2', scope: '更新 Perf Update Fixture' });
-  // A never-used destination is required; production validates its independence.
-  const destination = join(fixture.candidateParent, 'native-uia-v2');
+  await app.call('setField', { name: '固定版本', value: 'v2', scope: `更新 ${toolName}` });
   await setField(app, '候选保存目录（必须为未使用的新目录）', destination);
   await invoke(app, '全选文件');
   const previewTask = await actionTask(app, '预览候选版本', 'preview_resource_update');
   const preview = (await waitNativeTask(app, previewTask.id)).result;
-  if (!preview?.canApply || resolve(preview.targetPath).toLowerCase() !== resolve(destination).toLowerCase() || resolve(preview.originalPath).toLowerCase() !== resolve(fixture.currentRoot).toLowerCase()) throw new Error('Native update preview did not confirm the exact generated current/candidate scope.');
+  if (!preview?.canApply || !samePath(preview.targetPath, destination) || !samePath(preview.originalPath, fixture.currentRoot)) throw new Error('Native update preview did not confirm the exact generated current/candidate scope.');
+  if (seed && (preview.kind !== 'resourceUpdateStage' || preview.version !== 'v2'
+    || preview.resourceId !== seed.resourceId || preview.resourceRevision !== seed.resourceRevision || !samePath(preview.archivePath, fixture.nextArchive.path)
+    || Object.keys(preview.files ?? {}).length !== selected.length || selected.some(file => preview.files[file.path] !== file.role)
+    || preview.selectedBytes !== selected.reduce((total, file) => total + file.bytes, 0))) throw new Error('Native update preview does not match the exact seeded update workload.');
   const task = await actionTask(app, '确认准备这些文件', 'apply_resource_update_stage');
   await goSkills(app);
-  return { kind: 'update', taskId: task.id, action: task.action, initialStatus: task.status, generatedScope: fixture.root, destination, startedAt: task.startedAt, async finish() { const result = (await waitNativeTask(app, task.id)).result; if (!result?.staged || result.switched || !result.complete || resolve(result.resource.rootPath).toLowerCase() !== resolve(fixture.currentRoot).toLowerCase()) throw new Error('The native stage result did not preserve the original runtime.'); for (const file of fixture.oldArchive.files) { const bytes = await readFile(join(fixture.currentRoot, file.path)); if (createHash('sha256').update(bytes).digest('hex') !== file.installedSha256) throw new Error('Generated original runtime changed during candidate preparation.'); } return { taskId: task.id, complete: true, staged: true, switched: false, destination }; } };
+  const workload = seed ? { resourceId: seed.resourceId, fixtureScopeId: seed.fixtureScopeId, fileCount: selected.length } : {};
+  return { kind: 'update', taskId: task.id, action: task.action, initialStatus: task.status, generatedScope: fixture.root, destination, startedAt: task.startedAt, ...workload, async finish() {
+    const result = (await waitNativeTask(app, task.id)).result;
+    if (!result?.staged || result.switched || !result.complete || !samePath(result.resource?.rootPath, fixture.currentRoot)) throw new Error('The native stage result did not preserve the original runtime.');
+    if (seed) {
+      const candidate = result.resource.installation?.updateState?.candidate;
+      if (result.switched !== false || result.resource.id !== seed.resourceId || result.resource.version !== 'v1'
+        || candidate?.complete !== true || candidate.validation != null || candidate.version !== 'v2'
+        || !samePath(candidate.root, destination) || !samePath(candidate.archivePath, fixture.nextArchive.path)
+        || candidate.archiveSha256 !== seed.archiveSha256 || candidate.files?.length !== selected.length) throw new Error('The native stage result did not return the exact unverified candidate.');
+      const expected = new Map(selected.map(file => [file.path, file]));
+      for (const file of candidate.files) {
+        const wanted = expected.get(file.path);
+        if (file.role !== wanted?.role || file.installedSha256 !== wanted?.installedSha256 || !expected.delete(file.path)) throw new Error('The native stage receipt does not match the selected generated file fingerprints.');
+      }
+    }
+    for (const file of fixture.oldArchive.files) {
+      const bytes = await readFile(join(fixture.currentRoot, file.path));
+      if (createHash('sha256').update(bytes).digest('hex') !== file.installedSha256) throw new Error('Generated original runtime changed during candidate preparation.');
+    }
+    return { taskId: task.id, complete: true, staged: true, switched: false, destination, ...workload };
+  } };
 }
 
 /** Only official GitHub release metadata and the normal native confirmation are

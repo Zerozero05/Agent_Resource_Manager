@@ -3,7 +3,7 @@ param([switch]$Run, [switch]$CompileOnly)
 $ErrorActionPreference = 'Stop'
 if ($Run -and $CompileOnly) { throw 'Choose either compilation or an actual run.' }
 $fixture = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\resources\native-dragon-playback-8xPwcs'
-$original = 'D:\03_github_projects\Agent_Management\Dragon_Codex_Boot'
+$original = 'D:\03_github_projects\Interface_Tools\Dragon_Codex_Boot'
 $temporary = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data\native-entrypoints-0heGph\native-temp'
 $expectedHash = '38a16c973f44a413b4b175f5470592574c172a9232ff03c7ccccbf4d886fde31'
 $previousTemp, $previousTmp = $env:TEMP, $env:TMP

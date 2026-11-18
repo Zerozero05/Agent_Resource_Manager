@@ -7,7 +7,7 @@ import { storedZip } from './performance-load-fixture.mjs';
 // Generated text only. No installed tool, private database, registry value,
 // client directory, trusted probe or production update receipt is copied.
 const format = 'agent-resource-manager-native-lifecycle-v1';
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation';
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation';
 const options = Object.fromEntries(process.argv.slice(2).reduce((pairs, arg, index, args) => arg.startsWith('--') ? [...pairs, [arg.slice(2), args[index + 1]]] : pairs, []));
 const accessibilityInput = process.argv.includes('--accessibility-input');
 const foregroundSelection = process.argv.includes('--foreground-select');

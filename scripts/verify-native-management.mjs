@@ -9,7 +9,7 @@ import { NativeUiaSession } from './native-uia-client.mjs';
 // management mutations must come from real controls; SQLite is read-only.
 const FORMAT = 'agent-resource-manager-native-management-v1';
 const DRIVER_FORMAT = 'agent-resource-manager-native-performance-v1';
-const managerRoot = 'D:\\03_github_projects\\Agent_Resource_Manager';
+const managerRoot = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager';
 const dataParent = join(managerRoot, 'validation', 'manager-data');
 const resourceParent = join(managerRoot, 'validation', 'resources');
 const hash = value => createHash('sha256').update(value).digest('hex');

@@ -202,7 +202,10 @@ export class NativeUiaSession {
       else if (value.id !== undefined) {
         const pending = this.pending.get(value.id); if (!pending) return;
         this.pending.delete(value.id); clearTimeout(pending.timer);
-        if (value.ok) pending.resolve(value.value); else {
+        if (value.ok) {
+          if (pending.op === 'releaseClient' && value.value?.released === true) this.clientReleased = true;
+          pending.resolve(value.value);
+        } else {
           this.operationError ??= value.error;
           pending.reject(this.rejectAll(new Error(`Native UIA ${pending.op}: ${value.error}`)));
           this.endInput();
@@ -234,7 +237,8 @@ export class NativeUiaSession {
     this.inputEnded = true;
     try { this.child.stdin.end(); } catch (error) { this.rejectAll(error); }
   }
-  static async launch({ executable, dataDir, reportPath, sha256, transportSha256 = sha256, pinnedTransports, pwsh = 'pwsh.exe', privateUi = false, accessibilityInput = false, concurrentObservation = false, basicMode = false, workbenchOnlyReadiness = false, keyboardInput = false, driverMemoryDiagnostic = false }) {
+  static async launch({ executable, dataDir, reportPath, sha256, transportSha256 = sha256, pinnedTransports, pwsh = 'pwsh.exe', privateUi = false, accessibilityInput = false, concurrentObservation = false, basicMode = false, workbenchOnlyReadiness = false, keyboardInput = false, driverMemoryDiagnostic = false, releaseDiagnosticClient = false }) {
+    if (releaseDiagnosticClient && (!driverMemoryDiagnostic || !accessibilityInput || privateUi || keyboardInput || concurrentObservation || basicMode)) throw new Error('Client release requires the explicit synchronous normal-mode memory diagnostic.');
     if (sha256 !== undefined && (typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(sha256))) throw new Error('Native launch requires a verified candidate SHA256 when provided.');
     if (typeof basicMode !== 'boolean') throw new Error('Native basic mode requires an explicit boolean.');
     if (typeof workbenchOnlyReadiness !== 'boolean') throw new Error('Functional workbench-only readiness requires an explicit boolean.');
@@ -254,6 +258,7 @@ export class NativeUiaSession {
     if (workbenchOnlyReadiness) arguments_.push('-WorkbenchOnlyReadiness');
     if (keyboardInput) arguments_.push('-KeyboardInput');
     if (driverMemoryDiagnostic) arguments_.push('-DriverMemoryDiagnostic');
+    if (releaseDiagnosticClient) arguments_.push('-ReleaseDiagnosticClient');
     if (sha256 !== undefined) {
       const transports = (pinnedTransports ?? []).map(pin => Object.fromEntries(pinFields.map(field => [field, pin[field]])));
       const encoded = Buffer.from(JSON.stringify({ candidateSha256: transportSha256.toLowerCase(), transports }), 'utf8').toString('base64');
@@ -267,14 +272,18 @@ export class NativeUiaSession {
     session.accessibilityInput = accessibilityInput;
     session.keyboardInput = keyboardInput;
     session.driverMemoryDiagnostic = driverMemoryDiagnostic;
+    session.releaseDiagnosticClient = releaseDiagnosticClient;
     const deadline = setTimeout(() => { session.rejectAll(new Error('Native UIA readiness exceeded sixty seconds. The driver was asked to close normally.')); session.endInput(); }, 60000);
     try { await session.ready; return session; } finally { clearTimeout(deadline); }
   }
   call(op, fields = {}, timeoutMs = 20000) {
+    if (this.clientReleased) return Promise.reject(new Error('The diagnostic client handed off the application; no further UIA operation is allowed.'));
+    if (this.releaseAttempted && op !== 'releaseClient') return Promise.reject(new Error('Diagnostic client handoff has started; no further UIA operation is allowed.'));
     if (this.failure) return Promise.reject(this.failure);
     if (this.exited) return Promise.reject(new Error('The owned native UIA driver is no longer running.'));
     if (this.inputEnded || this.child.stdin.writableEnded || this.child.stdin.destroyed || this.child.stdin.writable === false) return Promise.reject(this.rejectAll(new Error('The owned native UIA driver input pipe is closed; no command was sent or replayed.')));
     if (['driverMemory', 'collectDriverMemory'].includes(op) && (this.driverMemoryDiagnostic !== true || this.accessibilityInput !== true || this.keyboardInput || this.privateUi)) return Promise.reject(new Error('Driver memory diagnostics require an explicitly enabled non-private accessibility-only session without keyboard input.'));
+    if (op === 'releaseClient' && (this.releaseDiagnosticClient !== true || this.driverMemoryDiagnostic !== true || this.accessibilityInput !== true || this.keyboardInput || this.privateUi || this.pending.size)) return Promise.reject(new Error('Client release requires an enabled diagnostic with no pending input or request.'));
     if (this.privateUi && ['snapshot', 'names', 'screenshot', 'comboState'].includes(op)) return Promise.reject(new Error('Whole-interface observations are disabled for the private UI session.'));
     if (op === 'keyboardSelectPopupCombo') {
       if (this.privateUi || this.keyboardInput !== true || this.accessibilityInput !== true) return Promise.reject(new Error('Popup combo keyboard selection requires an explicitly enabled non-private functional keyboard session.'));
@@ -320,7 +329,21 @@ export class NativeUiaSession {
       } catch (error) { this.rejectAll(error); this.endInput(); }
     });
   }
+  async releaseClient(handoff) {
+    if (!handoff || handoff.controllerPid !== process.pid || !Number.isSafeInteger(handoff.observerPid) || handoff.observerPid <= 0 || !/^[0-9]+$/.test(handoff.observerCreationFileTime) || handoff.pid !== this.identity?.pid || handoff.creationFileTime !== this.identity?.creationFileTime || handoff.windowHandle !== this.identity?.windowHandle) throw new Error('A ready independent observer must own this exact diagnostic application before release.');
+    if (this.releaseAttempted || this.failure || this.exited || this.inputEnded || this.releaseDiagnosticClient !== true || this.driverMemoryDiagnostic !== true || this.accessibilityInput !== true || this.keyboardInput || this.privateUi || this.pending.size) throw new Error('Client release is unavailable or an input/request is still pending.');
+    this.releaseAttempted = true;
+    const value = await this.call('releaseClient', handoff);
+    this.clientReleased = true;
+    if (value?.released !== true || ['pid', 'creationFileTime', 'windowHandle', 'controllerPid', 'observerPid', 'observerCreationFileTime'].some(key => value[key] !== handoff[key])) throw new Error('Diagnostic client release acknowledgement changed identity. External public Quit remains required.');
+    this.endInput();
+    let timer;
+    const result = await Promise.race([this.closed, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Released diagnostic client did not exit naturally. No process was stopped.')), 10000); })]).finally(() => clearTimeout(timer));
+    if (this.failure || result.code !== 0 || result.driverReport?.status !== 'diagnostic-client-released' || result.driverReport?.clientReleasedForExternalObservation !== true) throw this.failure ?? new Error('The diagnostic client did not confirm its normal release.');
+    return result;
+  }
   async quit() {
+    if (this.releaseAttempted || this.clientReleased) throw new Error('Application cleanup belongs to the independent observer and public normal Quit after client release.');
     if (!this.exited && !this.failure && !this.operationError) {
       try { await this.call('quit'); } catch (error) { this.rejectAll(error); }
     }

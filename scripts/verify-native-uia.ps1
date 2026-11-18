@@ -14,7 +14,8 @@ param(
     [switch]$BasicMode,
     [switch]$WorkbenchOnlyReadiness,
     [switch]$KeyboardInput,
-    [switch]$DriverMemoryDiagnostic
+    [switch]$DriverMemoryDiagnostic,
+    [switch]$ReleaseDiagnosticClient
 )
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
@@ -23,6 +24,7 @@ if($WorkbenchOnlyReadiness -and $Mode -ne 'bridge'){throw 'Workbench-only readin
 if($KeyboardInput -and $Mode -ne 'bridge'){throw 'Keyboard input is restricted to the explicit functional bridge mode.'}
 if($KeyboardInput -and $PrivateUi){throw 'Keyboard input is unavailable for a private UI session.'}
 if($DriverMemoryDiagnostic -and ($Mode -ne 'bridge' -or -not $AccessibilityInput -or $KeyboardInput -or $PrivateUi)){throw 'Driver memory diagnostics require an explicitly enabled non-private accessibility-only bridge session without keyboard input.'}
+if($ReleaseDiagnosticClient -and (-not $DriverMemoryDiagnostic -or $ConcurrentObservation -or $BasicMode)){throw 'Client release requires the explicit synchronous normal-mode memory diagnostic.'}
 $readinessMode=if($WorkbenchOnlyReadiness){'workbench-only-functional-bridge'}else{'strict-skill-list'}
 [Console]::InputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$OutputEncoding=[Text.UTF8Encoding]::new($false)
 Add-Type -AssemblyName UIAutomationClient
@@ -1404,6 +1406,18 @@ public sealed class NativeUiMeasurement : IDisposable {
     object after=DriverMemory();
     return new {diagnosticOnly=true,appGcRequested=false,before=before,after=after};
   }
+  public object ValidateClientRelease(int controllerPid,int observerPid,string observerCreated) {
+    RequireDriverMemoryDiagnostic();Identity(false);
+    if(FocusDiagnosticOnly||ConcurrentObservation||observerPid<=0||controllerPid<=0||observerPid==process.Id||String.IsNullOrEmpty(observerCreated))throw new InvalidOperationException("Diagnostic client release is unavailable in this session.");
+    IntPtr snapshot=CreateToolhelp32Snapshot(2,0);
+    if(snapshot==new IntPtr(-1))throw new InvalidOperationException("Client handoff ownership unavailable.");
+    Dictionary<int,int> parents=new Dictionary<int,int>();
+    try{PROCESSENTRY entry=new PROCESSENTRY{size=(uint)Marshal.SizeOf(typeof(PROCESSENTRY))};if(Process32First(snapshot,ref entry))do{parents[(int)entry.pid]=(int)entry.parent;}while(Process32Next(snapshot,ref entry));}finally{CloseHandle(snapshot);}
+    using(Process driver=Process.GetCurrentProcess())using(Process observer=Process.GetProcessById(observerPid))using(Process controller=Process.GetProcessById(controllerPid)) {
+      if(observerPid==driver.Id||!parents.ContainsKey(driver.Id)||parents[driver.Id]!=controllerPid||!parents.ContainsKey(observerPid)||parents[observerPid]!=controllerPid||observer.HasExited||controller.HasExited||controller.StartTime>driver.StartTime||controller.StartTime>observer.StartTime||observer.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()!=observerCreated||!observer.ProcessName.Equals("pwsh",StringComparison.OrdinalIgnoreCase)||!controller.ProcessName.Equals("node",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Client handoff is not owned by this live diagnostic controller.");
+    }
+    return new{released=true,pid=Pid,creationFileTime=CreationFileTime,windowHandle=Handle,controllerPid=controllerPid,observerPid=observerPid,observerCreationFileTime=observerCreated};
+  }
   public void Dispose(){process.Dispose();}
 }
 '@
@@ -1449,7 +1463,7 @@ $report.basicModeRequested=[bool]$BasicMode
 $report.workbenchOnlyReadinessRequested=[bool]$WorkbenchOnlyReadiness
 $report.readinessMode=$readinessMode
 $versionInfo=[Diagnostics.FileVersionInfo]::GetVersionInfo([IO.Path]::GetFullPath($Executable));$report.productVersion=$versionInfo.ProductVersion;$report.fileVersion=$versionInfo.FileVersion
-$session=$null;$ready=$false
+$session=$null;$ready=$false;$clientReleased=$false
 try {
     $session=[NativeUiMeasurement]::new([IO.Path]::GetFullPath($Executable),$DataDirectory,$temporary,[bool]$AccessibilityInput,[bool]$BasicMode,[bool]$KeyboardInput,[bool]$DriverMemoryDiagnostic)
     $session.ConcurrentObservation=[bool]$ConcurrentObservation
@@ -1474,6 +1488,13 @@ try {
                 if($request.op -in @('keyboardShortcut','keyboardEdit','keyboardField','keyboardIme','prepareKeyboardForeground') -and ($PrivateUi -or -not $KeyboardInput)){throw 'Keyboard operations require an explicitly enabled non-private functional session.'}
                 if($request.op -in @('driverMemory','collectDriverMemory') -and (-not $DriverMemoryDiagnostic -or $Mode -ne 'bridge' -or -not $AccessibilityInput -or $KeyboardInput -or $PrivateUi)){throw 'Driver memory diagnostics require an explicitly enabled non-private accessibility-only bridge session without keyboard input.'}
                 $value=switch($request.op){
+                    'releaseClient' {
+                        if(-not $ReleaseDiagnosticClient -or $PrivateUi -or $KeyboardInput -or -not $AccessibilityInput -or -not $DriverMemoryDiagnostic){throw 'Diagnostic client release was not explicitly enabled.'}
+                        if($request.pid -ne $session.Pid -or [string]$request.creationFileTime -cne $session.CreationFileTime -or $request.windowHandle -ne $session.Handle){throw 'Client handoff application identity changed.'}
+                        $handoff=$session.ValidateClientRelease([int]$request.controllerPid,[int]$request.observerPid,[string]$request.observerCreationFileTime)
+                        $report.clientHandoff=$handoff;$report.clientReleasedForExternalObservation=$true;$report.ownedProcessStillRunning=$true;$clientReleased=$true
+                        $handoff
+                    }
                     'search' {if($request.index -lt 0 -or $request.index -gt 999){throw 'Synthetic Skill index outside fixture.'};$session.Search([int]$request.index)}
                     'clear' {$session.Clear();@{cleared=$true}}
                     'filter' {$session.Filter([bool]$request.github)}
@@ -1555,10 +1576,10 @@ try {
                     default {throw 'Unknown native test operation; no product action was invoked.'}
                 }
                 [pscustomobject]@{id=$request.id;ok=$true;value=$value}|ConvertTo-Json -Depth 12 -Compress|Write-Output
-                if($request.op -eq 'quit'){break}
+                if($request.op -eq 'quit' -or $clientReleased){break}
             }catch{$bridgeException=$_.Exception.GetBaseException();$bridgeError=$bridgeException.Message;if(-not $bridgeError){$bridgeError='Native UI Automation provider failed ('+$bridgeException.GetType().Name+', '+$bridgeException.HResult+').'};[pscustomobject]@{id=$request.id;ok=$false;error=$bridgeError}|ConvertTo-Json -Compress|Write-Output;throw}
         }
-        if(-not $report.closedNormally){$report.closedNormally=$session.Quit()}
+        if(-not $report.closedNormally -and -not $clientReleased){$report.closedNormally=$session.Quit()}
     } elseif ($Mode -ne 'startup') {
         $count=if($Mode -eq 'probe'){2}else{100}
         for($i=0;$i -lt $count;$i++){ $report.samples+= $session.Search($i) }
@@ -1569,9 +1590,9 @@ try {
         $session.CloseDocument('Perf Skill 0000')
         for($i=0;$i -lt $count;$i++){ $null=$session.Search($i+10);$report.samples+=$session.OpenDocument($i+10);$session.CloseDocument(('Perf Skill {0:0000}' -f ($i+10))) }
     }
-    if(-not $report.closedNormally){$report.closedNormally=$session.Quit()}
-    if(-not $report.closedNormally){throw 'The owned test application did not close through its existing normal quit entry.'}
-    $report.status=if($session.FocusDiagnosticOnly){'owned-focus-diagnostic-only'}elseif($Mode -eq 'probe'){'diagnostic-only'}elseif($Mode -eq 'startup'){'startup-observed'}else{'measurements-collected'}
+    if(-not $report.closedNormally -and -not $clientReleased){$report.closedNormally=$session.Quit()}
+    if(-not $report.closedNormally -and -not $clientReleased){throw 'The owned test application did not close through its existing normal quit entry.'}
+    $report.status=if($clientReleased){'diagnostic-client-released'}elseif($session.FocusDiagnosticOnly){'owned-focus-diagnostic-only'}elseif($Mode -eq 'probe'){'diagnostic-only'}elseif($Mode -eq 'startup'){'startup-observed'}else{'measurements-collected'}
 } catch {
     $report.status='failed-or-blocked';$report.error=$_.Exception.GetBaseException().Message;$report.errorType=$_.Exception.GetBaseException().GetType().Name;$report.errorCode=$_.Exception.GetBaseException().HResult
     $startupFailure=$_.Exception.GetBaseException()
@@ -1586,7 +1607,7 @@ try {
     $report.errorChain=$exceptionChain
     if($session -and $report.lastOperation -eq 'selectCombo'){$report.lastComboStage=$session.LastComboStage}
     if($session -and $report.lastOperation -eq 'search'){$report.requestedSearchValue=$session.RequestedSearchValue}
-    if($session -and -not $session.Exited){
+    if($session -and -not $session.Exited -and -not $clientReleased){
       if($session.InputPending){$report.inputStillPending=$true;$report.closeError='No diagnostics or exit input was sent while the prior native input was pending.'}
       else {
         if(-not $PrivateUi){

@@ -13,6 +13,192 @@ fn profile_documents_during_local_check() {
     profile_documents(true);
 }
 
+#[test]
+#[ignore = "manual backend update contention diagnosis; requires a fresh isolated fixture"]
+fn profile_documents_during_resource_stage() {
+    use serde_json::{json, Value};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::Duration,
+    };
+
+    fn canonical(path: &Path) -> PathBuf {
+        let physical = crate::local::canonical(path).unwrap();
+        let text = physical.to_str().unwrap();
+        PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text))
+    }
+
+    let manager_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .unwrap();
+    let validation = canonical(&manager_root.join("validation"));
+    let data_root = validation.join("manager-data");
+    let resources_root = validation.join("resources");
+    let run_root = canonical(Path::new(&std::env::var("ARM_STAGE_PROFILE_ROOT").unwrap()));
+    let fixture_root = canonical(Path::new(
+        &std::env::var("ARM_STAGE_PROFILE_FIXTURE").unwrap(),
+    ));
+    assert_eq!(run_root.parent(), Some(data_root.as_path()));
+    assert_eq!(fixture_root.parent(), Some(resources_root.as_path()));
+    assert!(run_root
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("backend-document-stage-"));
+    assert!(fixture_root
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("native-load-"));
+    let dataset_root = canonical(&run_root.join("document-stage-fixture"));
+    assert_eq!(dataset_root.parent(), Some(run_root.as_path()));
+    let data = canonical(&dataset_root.join("data"));
+    assert_eq!(data.parent(), Some(dataset_root.as_path()));
+    let plan: Value =
+        serde_json::from_slice(&fs::read(fixture_root.join("load-fixture.json")).unwrap()).unwrap();
+    assert_eq!(plan["syntheticOnly"], true);
+    assert_eq!(plan["format"], "agent-resource-manager-native-load-v1");
+    assert_eq!(plan["limits"]["fileCount"], 4098);
+    assert_eq!(plan["limits"]["unpackedBytes"], 16_777_333);
+    let live = fixture_root.join("current-runtime");
+    let package = fixture_root.join("v2.zip");
+    let candidate_parent = canonical(&fixture_root.join("candidates"));
+    assert_eq!(canonical(&live), live);
+    assert_eq!(canonical(&package), package);
+    assert_eq!(candidate_parent, fixture_root.join("candidates"));
+    let destination = candidate_parent.join("backend-diagnostic-v2");
+    assert!(!destination.exists());
+    let original_files = ["LICENSE", "bin/tool.txt"].map(|entry| {
+        let path = live.join(entry);
+        assert!(canonical(&path).starts_with(&live));
+        let sha256 = crate::resource_files::fingerprint(&path).unwrap().sha256;
+        (path, sha256)
+    });
+    assert_eq!(
+        crate::resource_files::fingerprint(&package).unwrap().sha256,
+        plan["nextArchive"]["sha256"].as_str().unwrap()
+    );
+    let _network = crate::network::test_configuration_guard();
+    let manager =
+        crate::initialize_manager(crate::storage::Storage::isolated(data), false).unwrap();
+    assert_eq!(manager.state.skills.len(), 1000);
+    assert!(manager.state.sources.is_empty() && manager.state.connections.is_empty());
+    let service = crate::tasks::TaskSystem::new(manager).unwrap();
+    let skills = service.snapshot().unwrap()["skills"].clone();
+    let execute = |request| service.execute(request, crate::dispatch_local).unwrap();
+    let initial = execute(json!({"action":"resource_list"}));
+    assert_eq!(initial["resources"].as_array().unwrap().len(), 100);
+    let initial_resource = &initial["resources"][initial["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|r| r["id"] == "perf-tool-000")
+        .unwrap()];
+    assert_eq!(initial_resource["version"], "v1");
+    assert_eq!(initial_resource["rootPath"], json!(live));
+    assert_eq!(initial_resource["actions"], json!([]));
+    let preview = execute(
+        json!({"action":"preview_resource_update","id":"perf-tool-000",
+        "expectedRevision":initial_resource["revision"],"archivePath":package,"destinationPath":destination,
+        "version":"v2","selectedFiles":plan["operations"]["update"]["selectedFiles"],
+        "fileRoles":plan["operations"]["update"]["fileRoles"]}),
+    );
+    assert_eq!(preview["canApply"], true);
+
+    let read = |index| {
+        let skill = format!("perf-skill-{index:04}");
+        let expected =
+            fs::read_to_string(dataset_root.join("skills").join(&skill).join("SKILL.md")).unwrap();
+        let start = Instant::now();
+        let actual = execute(json!({"action":"get_document","skillId":skill,"version":"latest"}));
+        let duration = start.elapsed();
+        assert_eq!(actual["markdown"], expected);
+        assert_eq!(actual["source"], "本地运行文件");
+        assert_eq!(actual["documentPath"], "SKILL.md");
+        assert!(actual["readGeneration"].is_u64() && actual["localFingerprint"].is_string());
+        duration.as_secs_f64() * 1000.0
+    };
+    let first_idle = read(0);
+    let idle: Vec<f64> = (1..101).map(read).collect();
+    let task = execute(json!({"action":"start_task","request":{
+        "action":"apply_resource_update_stage","previewId":preview["id"]}}));
+    let id = task["task"]["id"].as_str().unwrap();
+    let status = || execute(json!({"action":"get_task","taskId":id}))["task"].clone();
+    let began = Instant::now();
+    while !destination.join("LICENSE").is_file() {
+        assert!(
+            began.elapsed() < Duration::from_secs(15),
+            "No stage file activity"
+        );
+        let observed = status();
+        assert!(
+            matches!(observed["status"].as_str(), Some("queued" | "running")),
+            "Stage stopped before copying: {}",
+            observed["error"]
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut active = Vec::new();
+    for index in 101..202 {
+        if status()["status"] != "running" {
+            break;
+        }
+        let elapsed = read(index);
+        if status()["status"] != "running" {
+            break;
+        }
+        active.push(elapsed);
+    }
+    assert!(!active.is_empty(), "No completed overlapping reads");
+    let first_active = active.remove(0);
+    let finished = loop {
+        let observed = status();
+        if observed["status"] != "running" {
+            break observed;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(90),
+            "Stage did not finish in time"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(finished["status"], "succeeded");
+    let result = &finished["result"];
+    assert_eq!(result["complete"], true);
+    assert_eq!(result["staged"], true);
+    assert_eq!(result["switched"], false);
+    assert_eq!(result["resource"]["rootPath"], json!(live));
+    assert_eq!(result["resource"]["version"], "v1");
+    assert_eq!(result["receipt"]["files"].as_array().unwrap().len(), 4098);
+    for (path, hash) in original_files {
+        assert_eq!(
+            crate::resource_files::fingerprint(&path).unwrap().sha256,
+            hash
+        );
+    }
+    assert!(
+        service.snapshot().unwrap()["skills"] == skills,
+        "The exposed Skill rows changed during read and stage"
+    );
+    let durations = |mut items: Vec<f64>| {
+        items.sort_by(f64::total_cmp);
+        json!({"count":items.len(),"p95Ms":items.get((items.len()*95).div_ceil(100).saturating_sub(1)),
+            "maximumMs":items.last()})
+    };
+    println!(
+        "backend-document-stage {}",
+        json!({
+            "noGui":true, "noNativePerformanceClaim":true, "stageTask":id,
+            "skills":1000, "tools":100, "files":4098, "firstIdleReadMs":first_idle,
+            "idleSubsequent":durations(idle), "firstActiveNewDocumentMs":first_active,
+            "stageActiveSubsequent":durations(active),"latestStageObservedMs":began.elapsed().as_secs_f64()*1000.0,
+            "preservedLiveFilesAndSkillRows":true,"candidateStagedNotSwitched":true
+        })
+    );
+}
+
 fn profile_documents(concurrent_check: bool) {
     let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()

@@ -8,7 +8,7 @@ import { NativeUiaSession } from './native-uia-client.mjs';
 import { createPerformanceFixture, FIXTURE_FORMAT } from './performance-fixture.mjs';
 
 const format = 'agent-resource-manager-native-keyboard-v1';
-const parent = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
+const parent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, flag, index, all) => flag.startsWith('--') ? [...pairs, [flag.slice(2), all[index + 1]]] : pairs, []));
 const digest = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 const json = value => JSON.stringify(value, null, 2) + '\n';

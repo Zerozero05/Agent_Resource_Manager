@@ -10,7 +10,7 @@ import { NativeUiaSession } from './native-uia-client.mjs';
 import { createPerformanceFixture, FIXTURE_FORMAT } from './performance-fixture.mjs';
 
 const format = 'agent-resource-manager-native-workspace-v1';
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation';
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation';
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, arg, index, all) => arg.startsWith('--') ? [...pairs, [arg.slice(2), all[index + 1]]] : pairs, []));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const digest = async path => hash(await readFile(path));

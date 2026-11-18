@@ -9,7 +9,8 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { options, inside, validBox, validateReferences, requiredStates, requiredRegions, visualPolicy, cycleActions, visualObserverSource, VisualSession } from '../scripts/verify-native-visual-stability.mjs';
 import { IDLE_OBSERVER } from '../scripts/diagnose-native-idle-memory.mjs';
-const root = 'D:/03_github_projects/Agent_Resource_Manager/validation/manager-data/native-visual-pure';
+const validation = 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data';
+const root = validation + '/native-visual-pure';
 const descriptor = { root, dataset: { dataFingerprint: 'fixed' } };
 for (const [label, file, argumentName] of [
     ['frame', 'verify-native-frame.mjs', 'options'],
@@ -62,6 +63,38 @@ for (const [label, file, argumentName] of [
         assert.match(launches[0], /\btransportSha256\b/);
     });
 }
+test('native tools reject a missing, invalid or duplicate transport digest before preparing fixtures', async () => {
+    const script = fileURLToPath(new URL('../scripts/verify-native-tools.mjs', import.meta.url));
+    const execute = promisify(execFile);
+    const flag = '--transport-file-sha256';
+    for (const args of [[flag], [flag, ''], [flag, 'g'.repeat(64)], [flag, 'a'.repeat(63)], [flag, 'a'.repeat(64), flag, 'b'.repeat(64)]]) {
+        await assert.rejects(execute(process.execPath, [script, '--prepare', ...args], { windowsHide: true, timeout: 5000 }), error => {
+            assert.equal(error.code, 1); assert.equal(error.stdout, '');
+            assert.match(error.stderr, /transport-file-sha256 requires one exact SHA256 digest/);
+            return true;
+        });
+    }
+    const runner = await readFile(script, 'utf8');
+    const validation = runner.indexOf('transportFlags > 1');
+    assert.ok(validation >= 0 && validation < runner.indexOf('await mkdir(approved'));
+});
+
+test('native tools keep the candidate digest separate from an explicitly supplied transport digest', async () => {
+    const script = fileURLToPath(new URL('../scripts/verify-native-tools.mjs', import.meta.url));
+    const execute = promisify(execFile);
+    for (const args of [['--help'], ['--help', '--transport-file-sha256', 'A'.repeat(64)]]) {
+        const result = await execute(process.execPath, [script, ...args], { windowsHide: true, timeout: 5000 });
+        assert.match(result.stdout, /transport-file-sha256 <64hex>/);
+    }
+    const runner = await readFile(script, 'utf8');
+    assert.match(runner, /const requestedTransportSha256 = transportInput\?\.toLowerCase\(\);/);
+    assert.match(runner, /const transportSha256 = requestedTransportSha256 \|\| report\.candidate\.sha256;/);
+    assert.match(runner, /report\.transportFileSha256 = transportSha256;/);
+    const launches = runner.match(/NativeUiaSession\.launch\(\{[^\n]+\}\)/g);
+    assert.equal(launches?.length, 1);
+    assert.match(launches[0], /sha256: report\.candidate\.sha256, transportSha256,/);
+});
+
 test('appearance transport CLI rejects missing or malformed digests before preparation or candidate reads', async () => {
     const script = fileURLToPath(new URL('../scripts/verify-native-appearance-copy.mjs', import.meta.url));
     const execute = promisify(execFile);
@@ -120,7 +153,7 @@ test('visual requests use one JSON line for the PowerShell ReadLine protocol', a
 });
 function reference() {
     const boxes = { 'result-table': [100, 140, 600, 400], 'result-count': [100, 70, 440, 56], 'result-title': [110, 170, 160, 30], 'closed-tab-slot': [160, 15, 100, 30], 'active-document-tab': [160, 15, 100, 30] };
-    return { format: 'agent-resource-manager-native-visual-stability-v1', root, datasetFingerprint: 'fixed', candidateSha256: 'd0b6551f5fd11125ec6f548b7239643f9076a6ccec0ccf54f6afca15e8ce87e0', semanticReferencePhaseCompleted: true, capture: 'foreground-owned-CopyFromScreen', frame: { left: 60, top: 60, width: 1296, height: 889, dpi: 96 }, policy: visualPolicy,
+    return { format: 'agent-resource-manager-native-visual-stability-v1', root, datasetFingerprint: 'fixed', candidateSha256: '9436a75a4cf40316f80702e43c7b4da35067ec9e16a0ce592846599433e9b1aa', semanticReferencePhaseCompleted: true, capture: 'foreground-owned-CopyFromScreen', frame: { left: 60, top: 60, width: 1296, height: 889, dpi: 96 }, policy: visualPolicy,
         controls: Object.fromEntries(['search', 'clear', 'github', 'all', 'openDocument', 'homeTab', 'documentTab', 'closeDocument', 'check'].map(name => [name, { x: 30, y: 30 }])),
         states: Object.fromEntries(requiredStates.map(name => [name, { semanticConfirmedByNativeDriver: true, rois: requiredRegions(name).map(region => ({ ...region, box: [...(boxes[region.role] || [100, 140, 50, 30])], path: root + '/references/' + name + '-' + region.role + '.png', sha256: 'a'.repeat(64) })) }])) };
 }
@@ -256,7 +289,7 @@ test('foreground preparation uses one guarded temporary queue attachment and det
     const method = helper.slice(helper.indexOf('  public object PrepareForeground()'), helper.indexOf('  public object Identity()'));
     assert.ok(method.includes('finally {') && method.includes('AttachThreadInput(currentThread,foregroundThread,false)'));
     assert.doesNotMatch(method, /SendInput|inputTick\s*=|SetFocus|BringWindowToTop|Automation/);
-    const temporary = await mkdtemp('D:/03_github_projects/Agent_Resource_Manager/validation/manager-data/native-visual-pure-');
+    const temporary = await mkdtemp(validation + '/native-visual-pure-');
     const path = join(temporary, 'foreground-contract.ps1');
     const program = `Add-Type -TypeDefinition @'
 using System;
@@ -348,7 +381,7 @@ ${method}
     assert.equal(cases.get('repeat').trace.filter(value => value === 'activate').length, 1);
 });
 test('Windows helper and read-only observer compile without opening or observing any target window', { skip: process.platform !== 'win32' }, async () => {
-    const temporary = await mkdtemp('D:/03_github_projects/Agent_Resource_Manager/validation/manager-data/native-visual-pure-');
+    const temporary = await mkdtemp(validation + '/native-visual-pure-');
     const env = { ...process.env, TEMP: temporary, TMP: temporary };
     const execute = promisify(execFile);
     const helper = fileURLToPath(new URL('../scripts/native-visual-input.ps1', import.meta.url));

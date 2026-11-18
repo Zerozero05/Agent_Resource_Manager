@@ -9,13 +9,21 @@ import { fileURLToPath } from 'node:url';
 import { NativeUiaSession } from './native-uia-client.mjs';
 import { createPerformanceFixture } from './performance-fixture.mjs';
 
-const args = Object.fromEntries(process.argv.slice(2).reduce((out, item, i, all) => item.startsWith('--') ? [...out, [item.slice(2), all[i + 1]?.startsWith('--') || !all[i + 1] ? true : all[i + 1]]] : out, []));
+const argumentTokens = process.argv.slice(2);
+const args = Object.fromEntries(argumentTokens.reduce((out, item, i, all) => item.startsWith('--') ? [...out, [item.slice(2), all[i + 1]?.startsWith('--') || !all[i + 1] ? true : all[i + 1]]] : out, []));
+const transportFlag = '--transport-file-sha256';
+const transportInput = args['transport-file-sha256'];
+const transportFlags = argumentTokens.filter(token => token === transportFlag).length;
+if (transportFlags > 1 || (transportFlags && (typeof transportInput !== 'string' || !/^[a-f0-9]{64}$/i.test(transportInput)))) {
+  throw new Error('--transport-file-sha256 requires one exact SHA256 digest.');
+}
+const requestedTransportSha256 = transportInput?.toLowerCase();
 if (args.help) {
-  console.log('Prepare: --prepare. Native acceptance: --candidate <release exe> --candidate-build-info <json> [--prepared <report.json>]. Uses only generated data plus explicitly adopted existing tool roots, real GUI confirmations and fixed read-only task observations. No login changes, installations or Dragon launch.');
+  console.log('Prepare: --prepare. Native acceptance: --candidate <release exe> --candidate-build-info <json> [--prepared <report.json>] [--transport-file-sha256 <64hex>]. The transport digest defaults to the candidate digest. Uses only generated data plus explicitly adopted existing tool roots, real GUI confirmations and fixed read-only task observations. No login changes, installations or Dragon launch.');
   process.exit(0);
 }
-const approved = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
-const roots = { agentReach: 'D:\\03_github_projects\\Agent-Reach', edgeControl: 'D:\\03_github_projects\\Browser_Tools\\Playwright-MCP', dragonCodexBoot: 'D:\\03_github_projects\\DragonCodexBoot-0.2.0-win-x64-with-video' };
+const approved = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
+const roots = { agentReach: 'D:\\03_github_projects\\Web_Tools\\Agent_Reach', edgeControl: 'D:\\03_github_projects\\Web_Tools\\Playwright-MCP', dragonCodexBoot: 'D:\\03_github_projects\\Interface_Tools\\Dragon_Codex_Boot' };
 const names = { agentReach: 'Agent Reach', edgeControl: 'Playwright MCP', dragonCodexBoot: 'DragonCodexBoot' };
 const scope = { mutations: 'Only the generated management database receives catalogue, task and evidence records; tool-native command bookkeeping may update its own health observations.', browser: 'Use existing Edge extension/profile; no browser navigation, login, account change, credential extraction or user browser shutdown is requested.', dragon: 'Metadata adoption only. No launcher execution or integration change.', evidence: 'Actual single action result only; version/doctor/channels do not prove all platform reads, and MCP initialize does not prove a tool result.', privacy: 'No browser contents, tool stdout/stderr, environment values, token or URL lists are persisted.' };
 const sleep = ms => new Promise(done => setTimeout(done, ms));
@@ -125,10 +133,12 @@ if (args.prepare) { console.log(JSON.stringify({ status: 'prepared', reportPath,
 let app;
 try {
   report.candidate = await provenance();
+  const transportSha256 = requestedTransportSha256 || report.candidate.sha256;
+  report.transportFileSha256 = transportSha256;
   report.harness = await Promise.all(['verify-native-tools.mjs', 'native-uia-client.mjs', 'verify-native-uia.ps1', 'performance-fixture.mjs'].map(async name => ({ name, sha256: await hash(fileURLToPath(new URL(name, import.meta.url))) })));
   report.staticBefore = await rootHashes(); report.processesBefore = await processes(report.output); report.startedAt = new Date().toISOString();
   report.status = 'running';
-  app = await NativeUiaSession.launch({ executable: report.candidate.path, sha256: report.candidate.sha256, dataDir: report.fixture.dataDir, reportPath: join(report.output, 'native-driver.json'), privateUi: true, accessibilityInput: true });
+  app = await NativeUiaSession.launch({ executable: report.candidate.path, sha256: report.candidate.sha256, transportSha256, dataDir: report.fixture.dataDir, reportPath: join(report.output, 'native-driver.json'), privateUi: true, accessibilityInput: true });
   assert.equal(app.privateUi, true, 'Private native observations must be enforced by the driver.');
   assert.equal(app.identity.executableSha256, report.candidate.sha256); assert.equal(resolve(app.identity.dataDirectory).toLowerCase(), resolve(report.fixture.dataDir).toLowerCase());
   report.native = { pid: app.identity.pid, creationFileTime: app.identity.creationFileTime, executableSha256: app.identity.executableSha256, dataDirectory: app.identity.dataDirectory };

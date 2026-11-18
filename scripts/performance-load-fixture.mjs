@@ -1,15 +1,19 @@
 import { createServer } from 'node:http';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdir, mkdtemp, writeFile, readFile, appendFile, lstat, realpath } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, readFile, appendFile, lstat, realpath, readdir } from 'node:fs/promises';
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { FIXTURE_FORMAT } from './performance-fixture.mjs';
 
 export const LOAD_FIXTURE_FORMAT = 'agent-resource-manager-native-load-v1';
 export const VALIDATION_RESOURCE_PARENT = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\resources';
+export const MAX_NATIVE_UPDATE_FIXTURES = 12;
 const crcTable = Uint32Array.from({ length: 256 }, (_, index) => { let crc = index; for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1; return crc >>> 0; });
 function crc32(bytes) { let crc = 0xffffffff; for (const byte of bytes) crc = crcTable[(crc ^ byte) & 255] ^ (crc >>> 8); return (crc ^ 0xffffffff) >>> 0; }
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+const pathKey = path => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
+const reservedToolId = index => `perf-tool-${String(index).padStart(3, '0')}`;
+const updateToolName = id => `Perf Update Fixture ${id.slice(-3)}`;
 
 /** Stored ZIP files are deliberate: exercise real streaming and filesystem work,
  * not enormous compression ratios, external executables or installer scripts. */
@@ -70,32 +74,81 @@ export async function readNativeLoadFixture(path) {
   return fixture;
 }
 
-/** Seed only one existing generated row while the native application is stopped.
- * It supplies a static local baseline for the real update-stage business path.
- * No ownership or version evidence about user resources is ever fabricated. */
-export async function attachNativeLoadResource(dataset, fixture) {
+/** Seed existing generated rows while the native application is stopped.
+ * A batch is committed together, after all of its fixture inputs are checked. */
+async function attachLoadFixtures(dataset, fixtures, batch) {
   if (dataset.format !== FIXTURE_FORMAT || dataset.syntheticOnly !== true || dataset.toolCount !== 100) throw new Error('Use the exact generated 100-tools performance dataset.');
-  const owner = JSON.parse(await readFile(join(dataset.root, 'fixture-owner.json'), 'utf8'));
-  if (owner.format !== FIXTURE_FORMAT || owner.syntheticOnly !== true) throw new Error('No synthetic dataset ownership marker.');
-  if (dataset.dbPath !== join(dataset.root, 'data', 'manager.sqlite3') || dataset.toolsRoot !== join(dataset.root, 'tools') || (await lstat(dataset.dbPath)).isSymbolicLink() || !(await lstat(dataset.dbPath)).isFile()) throw new Error('The exact generated database is required.');
-  await readNativeLoadFixture(join(fixture.root, 'load-fixture.json'));
+  if (!Array.isArray(fixtures) || fixtures.length < 1 || fixtures.length > MAX_NATIVE_UPDATE_FIXTURES) throw new Error('Select 1–12 independent native load fixtures.');
+  const ownerPath = join(dataset.root, 'fixture-owner.json');
+  const owner = JSON.parse(await readFile(ownerPath, 'utf8'));
+  if (owner.format !== FIXTURE_FORMAT || owner.syntheticOnly !== true || pathKey(await realpath(ownerPath)) !== pathKey(ownerPath)) throw new Error('No synthetic dataset ownership marker.');
+  if (dataset.dbPath !== join(dataset.root, 'data', 'manager.sqlite3') || dataset.toolsRoot !== join(dataset.root, 'tools')
+    || !(await lstat(dataset.dbPath)).isFile() || pathKey(await realpath(dataset.dbPath)) !== pathKey(dataset.dbPath)) throw new Error('The exact generated database is required.');
+
+  const inputs = [], roots = new Set(), scopes = new Set();
+  for (const fixture of fixtures) {
+    const fixturePath = join(fixture.root, 'load-fixture.json');
+    const verified = await readNativeLoadFixture(fixturePath);
+    const root = pathKey(await realpath(verified.root));
+    if (roots.has(root) || scopes.has(verified.scopeId)) throw new Error('Native update fixtures must have distinct roots and scope IDs.');
+    if (batch) {
+      const within = relative(VALIDATION_RESOURCE_PARENT, root);
+      if (pathKey(verified.root) !== root
+        || pathKey(await realpath(fixturePath)) !== pathKey(fixturePath)
+        || (process.platform === 'win32' && (!within || within.startsWith('..') || isAbsolute(within)))
+        || verified.oldArchive.path !== join(verified.root, 'v1.zip') || verified.nextArchive.path !== join(verified.root, 'v2.zip')
+        || (await readdir(verified.candidateParent)).length) {
+        throw new Error('A sampled update requires a fresh canonical fixture root with its original ZIP paths and empty candidate directory.');
+      }
+      const baseline = verified.oldArchive.files;
+      if (baseline.length !== 2 || baseline[0].path !== 'LICENSE' || baseline[0].role !== 'license'
+        || baseline[1].path !== 'bin/tool.txt' || baseline[1].role !== 'runtime') throw new Error('Sampled update baseline is not the generated two-file local runtime.');
+      for (const file of baseline) {
+        const path = join(verified.currentRoot, file.path);
+        if (!(await lstat(path)).isFile() || pathKey(await realpath(path)) !== pathKey(path)
+          || sha256(await readFile(path)) !== file.installedSha256) throw new Error('The generated sampled-update baseline changed.');
+      }
+    }
+    roots.add(root);
+    scopes.add(verified.scopeId);
+    inputs.push({ fixture: verified, fixturePath });
+  }
+
   const db = new DatabaseSync(dataset.dbPath);
   try {
+    db.exec('BEGIN IMMEDIATE;');
     const state = JSON.parse(db.prepare('SELECT payload FROM app_state WHERE id=1').get().payload);
-    const rows = db.prepare('SELECT id FROM resource_catalog').all();
-    if (rows.length !== 100 || rows.some(row => !/^perf-tool-\d{3}$/.test(row.id)) || state.skills.length !== 1000 || state.sources.length || state.connections.length || state.skills.some(skill => !/^perf-skill-\d{4}$/.test(skill.id) || skill.localPath !== join(dataset.root, 'skills', skill.id))) throw new Error('Only a fresh, wholly generated performance database may receive the load fixture.');
-    const value = db.prepare('SELECT payload FROM resource_catalog WHERE id=?').get('perf-tool-000');
-    if (!value) throw new Error('The reserved generated tool is missing.');
-    const record = JSON.parse(value.payload);
-    if (record.revision !== 1 || record.installation || record.repository || record.actions.length || record.rootPath !== join(dataset.toolsRoot, 'perf-tool-000')) throw new Error('The generated tool has already changed; never replace a live or user record.');
-    const at = '2026-10-30T00:00:00Z';
-    record.rootPath = fixture.currentRoot; record.name = 'Perf Update Fixture'; record.kind = 'portable'; record.version = 'v1'; record.ownership = 'managedFiles'; record.managementScope = 'ownedFiles';
-    record.installation = { schemaVersion: 1, installedAt: at, archivePath: fixture.oldArchive.path, archiveSha256: fixture.oldArchive.sha256, sourceRepository: null, sourceVersion: 'v1', downloadSource: null, files: fixture.oldArchive.files.map(({ bytes, ...file }) => file), systemEntries: [], status: 'installed', error: null, pendingRepair: null, retainedRepairFiles: [], updateState: null, removalState: null, resourceManifest: null };
-    record.updatePolicy = { mode: 'manual', intervalHours: 24, pinnedVersion: null, skippedVersions: [] };
-    const key = process.platform === 'win32' ? record.rootPath.replaceAll('/', '\\').toLowerCase() : record.rootPath;
-    db.prepare('UPDATE resource_catalog SET root_key=?,payload=? WHERE id=? AND revision=1').run(key, JSON.stringify(record), record.id);
-    return { resourceId: record.id, resourceRevision: record.revision, rootPath: record.rootPath, fixtureScopeId: fixture.scopeId, totalTools: db.prepare('SELECT COUNT(*) AS n FROM resource_catalog').get().n };
+    const rows = db.prepare('SELECT id,revision,payload FROM resource_catalog ORDER BY id').all();
+    if (rows.length !== 100 || rows.some((row, index) => row.id !== reservedToolId(index)) || state.skills.length !== 1000 || state.sources.length || state.connections.length || state.skills.some(skill => !/^perf-skill-\d{4}$/.test(skill.id) || skill.localPath !== join(dataset.root, 'skills', skill.id))) throw new Error('Only a fresh, wholly generated performance database may receive the load fixture.');
+    const update = db.prepare('UPDATE resource_catalog SET root_key=?,payload=? WHERE id=? AND revision=1');
+    const seeds = inputs.map(({ fixture, fixturePath }, index) => {
+      const row = rows[index], record = JSON.parse(row.payload);
+      if (row.revision !== 1 || record.id !== row.id || record.revision !== 1 || record.installation || record.repository || record.actions.length || record.rootPath !== join(dataset.toolsRoot, row.id)) throw new Error('The generated tool has already changed; never replace a live or user record.');
+      if (batch && (record.name !== `Perf Tool ${row.id.slice(-3)}` || record.version !== '1.0.0'
+        || record.ownership !== 'external' || record.managementScope !== 'register')) throw new Error('The reserved generated tool is not pristine.');
+      record.rootPath = fixture.currentRoot;
+      record.name = batch ? updateToolName(row.id) : 'Perf Update Fixture';
+      record.kind = 'portable';
+      record.version = 'v1';
+      record.ownership = 'managedFiles';
+      record.managementScope = 'ownedFiles';
+      record.installation = { schemaVersion: 1, installedAt: '2026-10-30T00:00:00Z', archivePath: fixture.oldArchive.path, archiveSha256: fixture.oldArchive.sha256, sourceRepository: null, sourceVersion: 'v1', downloadSource: null, files: fixture.oldArchive.files.map(({ bytes, ...file }) => file), systemEntries: [], status: 'installed', error: null, pendingRepair: null, retainedRepairFiles: [], updateState: null, removalState: null, resourceManifest: null };
+      record.updatePolicy = { mode: 'manual', intervalHours: 24, pinnedVersion: null, skippedVersions: [] };
+      if (update.run(pathKey(record.rootPath), JSON.stringify(record), record.id).changes !== 1) throw new Error('The reserved generated tool changed during setup.');
+      const seed = { resourceId: record.id, resourceRevision: record.revision, rootPath: record.rootPath, fixtureScopeId: fixture.scopeId, totalTools: rows.length };
+      return batch ? { ...seed, toolName: record.name, fixturePath, fileCount: fixture.nextArchive.files.length, archiveSha256: fixture.nextArchive.sha256 } : seed;
+    });
+    db.exec('COMMIT;');
+    return seeds;
   } finally { db.close(); }
+}
+
+export async function attachNativeLoadResource(dataset, fixture) {
+  return (await attachLoadFixtures(dataset, [fixture], false))[0];
+}
+
+export function attachNativeLoadResources(dataset, fixtures) {
+  return attachLoadFixtures(dataset, fixtures, true);
 }
 
 export async function startNativeLoadServer(fixture, { chunkBytes = 65536, chunkDelayMs = 0 } = {}) {

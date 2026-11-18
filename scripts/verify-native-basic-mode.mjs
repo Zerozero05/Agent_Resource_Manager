@@ -12,7 +12,7 @@ import { NativeUiaSession } from './native-uia-client.mjs';
 // It is not a corrupt database, nor is a stored basicMode flag used as evidence.
 const FORMAT = 'agent-resource-manager-native-basic-mode-v1';
 const DRIVER_FORMAT = 'agent-resource-manager-native-performance-v1';
-const validation = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation';
+const validation = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation';
 const dataParent = join(validation, 'manager-data'), resourceParent = join(validation, 'resources');
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, flag, index, all) => flag.startsWith('--') ? [...pairs, [flag.slice(2), all[index + 1]]] : pairs, []));
 const phase = args.phase;

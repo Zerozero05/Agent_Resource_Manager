@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -14,11 +14,13 @@ import { acknowledgeCloseRound, bridgeMessage, pendingCloseRound, readCloseBound
 import type { StartupStatus } from './startup';
 import type { MaintenanceState } from './MaintenanceSettings';
 import { observeMaintenanceClock } from './maintenance-clock';
+import { managementDataCache } from './management-data';
 
 type Transfer = { id: string; paneId: string; sourceWindowLabel: string; targetWindowLabel: string };
 type CloseMode = 'windows' | 'quit' | 'migration';
 type CloseRequest = { closeId: string; round?: string; mode?: CloseMode; preserveRuntime?: boolean };
 type WorkspaceReply = { windowLabel: string; workspace: WorkspaceNavigation; nativeCloseRequested?: boolean; closing?: boolean; closingMode?: CloseMode; ownedCloseId?: string | null; closeRequest?: CloseRequest | null };
+type SkillTitle = { id: string; name?: string; displayName?: string; alias?: string };
 const api = <T,>(action: string, args: Record<string, unknown> = {}) => invoke<T>('manager_request', { request: { action, ...args } });
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -51,6 +53,12 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
   const [workspace, setWorkspace] = useState<WorkspaceNavigation>({ revision: -1, windows: [{ label, panes: [createHomePane(label === 'main' ? 'home' : `home:${label}`)], activePaneId: label === 'main' ? 'home' : `home:${label}` }] });
   const current = useRef(workspace); current.current = workspace;
   const [managerSnapshot, setManagerSnapshot] = useState<unknown>();
+  const skillAnnotations = useSyncExternalStore(managementDataCache.subscribe, () => managementDataCache.getSnapshot().data?.skillAnnotations);
+  const skills = (managerSnapshot as { skills?: SkillTitle[] } | undefined)?.skills;
+  const skillTitles = useMemo(() => {
+    const aliases = new Map(skillAnnotations?.map(({ skillId, alias }) => [skillId, alias]));
+    return new Map(skills?.map(skill => [skill.id, (aliases.get(skill.id) ?? skill.alias) || skill.displayName || skill.name]));
+  }, [skills, skillAnnotations]);
   const managerRevision = useRef(-1);
   const maintenanceSignature = useRef<string | undefined>(undefined);
   const pendingClockRead = useRef<Promise<void> | undefined>(undefined);
@@ -181,17 +189,21 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
       const targets = incoming.filter(item => item.targetWindowLabel === label);
       const panes = [...(owner?.panes || []), ...targets.map(item => next.windows.find(window => window.label === item.sourceWindowLabel)?.panes.find(pane => pane.id === item.paneId)).filter((pane): pane is WorkspacePane => !!pane)];
       const values: Record<string, SessionDraft> = {};
+      const transferIds = new Map<string, string>();
       const localPaneIds = new Set(panes.map(pane => pane.id));
-      for (const id of loaded.current) if (!localPaneIds.has(id)) { loaded.current.delete(id); loadedTransfers.current.delete(id); }
       for (const pane of panes) {
         const transfer = targets.find(item => item.paneId === pane.id);
         const refreshTransfer = transfer && loadedTransfers.current.get(pane.id) !== transfer.id;
         if (loaded.current.has(pane.id) && !refreshTransfer) continue;
         const result = await retryBridgeRead(() => api<{ runtime?: SessionDraft }>('workspace_get_pane_runtime', { paneId: pane.id }), { active: () => mounted.current });
-        values[pane.id] = result.runtime || {}; loaded.current.add(pane.id);
-        if (transfer) loadedTransfers.current.set(pane.id, transfer.id);
+        values[pane.id] = result.runtime || {};
+        if (transfer) transferIds.set(pane.id, transfer.id);
       }
       if (!mounted.current || next.revision < current.current.revision) return;
+      // Keep the loaded markers and drafts in sync if any pane read fails.
+      for (const id of loaded.current) if (!localPaneIds.has(id)) { loaded.current.delete(id); loadedTransfers.current.delete(id); }
+      for (const id of Object.keys(values)) loaded.current.add(id);
+      for (const [id, transferId] of transferIds) loadedTransfers.current.set(id, transferId);
       setDrafts(previous => ({ ...Object.fromEntries(Object.entries(previous).filter(([id]) => localPaneIds.has(id))), ...values }));
       current.current = next; setWorkspace(next);
     }).catch(cause => { if (mounted.current) setError(errorText(cause)); });
@@ -470,7 +482,12 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
   const incoming = transfers.filter(transfer => transfer.targetWindowLabel === label);
   const incomingPanes = incoming.map(transfer => workspace.windows.find(window => window.label === transfer.sourceWindowLabel)?.panes.find(pane => pane.id === transfer.paneId)).filter((pane): pane is WorkspacePane => !!pane);
   const ownerPanes = owner?.panes || [createHomePane(label === 'main' ? 'home' : `home:${label}`)];
-  const panes = [...ownerPanes, ...incomingPanes.filter(pane => !ownerPanes.some(item => item.id === pane.id))];
+  // Saved labels are a fallback until the current Skill has loaded. Updating the
+  // visible title must not replace the pane or write its saved navigation.
+  const panes = [...ownerPanes, ...incomingPanes.filter(pane => !ownerPanes.some(item => item.id === pane.id))].map(pane => {
+    const title = pane.kind === 'detail' && pane.skillId ? skillTitles.get(pane.skillId) : undefined;
+    return title && title !== pane.title ? { ...pane, title } : pane;
+  });
   useEffect(() => {
     if (!incoming.length) return;
     let cancelled = false;

@@ -9,7 +9,7 @@ import { NativeUiaSession } from './native-uia-client.mjs';
 import { createPerformanceFixture, FIXTURE_FORMAT } from './performance-fixture.mjs';
 
 const FORMAT = 'agent-resource-manager-native-task-retention-v1';
-const ROOT = 'D:\\03_github_projects\\Agent_Resource_Manager\\validation\\manager-data';
+const ROOT = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const POLICY = Object.freeze({ warmupChecks: 10, measuredChecks: 120, batchChecks: 30, sampleEveryChecks: 5, idleSamples: 5, idleIntervalMs: 2000, taskDeadlineMs: 60000, expectedSchedulingKeys: 2002 });
 const options = {};
 const allowed = new Set(['phase', 'prepared', 'variant', 'candidate', 'candidate-build-info', 'existing-stdio-proof', 'transport-file-sha256', 'help']);
