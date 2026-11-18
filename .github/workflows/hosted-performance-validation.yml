@@ -1,0 +1,134 @@
+name: Verify hosted Windows update overlap with sufficient independent tasks
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  CANDIDATE_RUN_ID: '44341382564'
+  CANDIDATE_SOURCE: c6bd6821066b90fb0db5fdefd0792bc8cf828e53
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_c6bd6821066b90fb0db5fdefd0792bc8cf828e53
+jobs:
+  candidate:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-update-sampling-c6bd682' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Wait for the exact development build
+        shell: pwsh
+        run: |
+          for ($tick = 0; $tick -lt 88; $tick++) {
+            $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
+                $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push') { throw 'Wrong candidate build identity.' }
+            if ($run.status -ceq 'completed') {
+              if ($run.conclusion -cne 'success') { throw 'The exact Windows build failed.' }
+              $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+              if ($LASTEXITCODE -ne 0 -or @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired }).Count -ne 1) {
+                throw 'The exact Windows candidate artifact is missing.'
+              }
+              exit 0
+            }
+            Start-Sleep -Seconds 15
+          }
+          throw 'Timed out waiting for the bound build.'
+  measure:
+    needs: candidate
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [update]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      SUITE: ${{ matrix.suite }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Verify runner and pinned executables
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no existing manager in the isolated runner.' }
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }
+          $exe = Join-Path $candidate 'agent-resource-manager.exe'
+          $source = Join-Path $candidate 'BUILD_INFO.json'
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($info.executableSha256 -cne $digest -or $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or
+              $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or $info.workflowRunAttempt -ne 1 -or
+              $info.repository -cne $env:GITHUB_REPOSITORY -or $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the executable.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+          Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
+      - name: Measure the scheduled native workload
+        run: |
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          if (Test-Path -LiteralPath $root) { throw 'Expected a fresh native measurement directory.' }
+          $arguments = @('--suite', 'loads', '--load-kind', $env:SUITE, '--sample-overlap', 'true', '--accessibility-input',
+            '--candidate', (Join-Path $candidate 'agent-resource-manager.exe'),
+            '--candidate-build-info', (Join-Path $candidate 'BUILD_INFO.native-validation.json'))
+          $generated = & node --input-type=module -e "import {createNativeLoadFixture, MAX_NATIVE_UPDATE_FIXTURES} from './scripts/performance-load-fixture.mjs'; import {join} from 'node:path'; const manifestPaths=[]; for(let index=0;index<MAX_NATIVE_UPDATE_FIXTURES;index++){ const f=await createNativeLoadFixture(); manifestPaths.push(join(f.root,'load-fixture.json')); } console.log(JSON.stringify(manifestPaths));"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not prepare independent synthetic update fixtures.' }
+          $manifests = @($generated | ConvertFrom-Json)
+          if ($manifests.Count -ne 36 -or @($manifests | Sort-Object -Unique).Count -ne 36) { throw 'The exact update fixture count was not created.' }
+          foreach ($manifest in $manifests) { $arguments += @('--stage-fixture', $manifest) }
+          & node scripts/verify-uia-performance.mjs @arguments
+          exit $LASTEXITCODE
+      - name: Preserve reports and check the scheduled result
+        if: ${{ always() }}
+        run: |
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          $outputs = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue)
+          if ($outputs.Count -ne 1) { throw 'Expected one isolated measurement directory.' }
+          $out = $outputs[0].FullName
+          $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-native-performance-evidence')
+          Get-ChildItem -LiteralPath $out -File | Where-Object {
+            $_.Name -in @('report.json','observations.jsonl','policy-before-run.json','convergence-bounds-before-loop.json') -or
+            $_.Name -like '*-driver.json'
+          } | Copy-Item -Destination $evidence.FullName
+          $reportPath = Join-Path $out 'report.json'
+          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          if ($report.suite -cne 'loads' -or $report.candidate.source -cne $env:CANDIDATE_SOURCE -or
+              $report.harnessChangedDuringRun -ne $false -or $report.nativeErrors.Count -ne 0 -or $report.error) { throw 'The exact native workload did not finish cleanly.' }
+          $events = Get-Content -LiteralPath (Join-Path $out 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
+          $exits = @($events | Where-Object { $_.kind -ceq 'native-normal-exit' -and $_.closedNormally -eq $true })
+          $summary = [ordered]@{suite=$env:SUITE; executableSha256=$report.candidate.sha256
+            reportSha256=(Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            normalExits=$exits.Count}
+          $score = $report.loadVerdict.($env:SUITE).sampledOverlap
+          $summary.status = $report.status
+          $summary.overlap = $score
+          $summary | ConvertTo-Json -Depth 10 -Compress
+          if ($exits.Count -ne 1 -or $report.loadSelection.scope -cne ("sampled-$env:SUITE-only") -or
+              $report.status -cne ("passed-sampled-native-$env:SUITE-only") -or $score.status -cne 'passed') {
+            throw 'The selected workload did not meet the existing overlap policy.'
+          }
+          foreach ($name in @('search','filter','tab','document')) {
+            if ($score.categories.$name.count -lt 100 -or $score.categories.$name.status -cne 'passed' -or
+                $score.categories.$name.limitedTolerance.status -cne 'passed') { throw "Insufficient or failed overlap samples for $name." }
+          }
+      - name: Upload only measurement evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        with:
+          name: Agent_Resource_Manager_native_${{ matrix.suite }}_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-native-performance-evidence/
+          if-no-files-found: warn
+          retention-days: 14
