@@ -1,37 +1,27 @@
-name: Verify hosted Windows check overlap and original stability
+name: Verify hosted Windows original stability for 65b14b9
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44369125710'
-  CANDIDATE_SOURCE: 371eb5dea6d902dbc7ef75666f366570e05970c0
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_371eb5dea6d902dbc7ef75666f366570e05970c0
-  CANDIDATE_ARTIFACT_ID: '14459231544'
-  CANDIDATE_SHA256: f33c6722446e8069414fb04c85c411e8a3c5c06999e93f3ebadcf27d42b779e9
+  CANDIDATE_RUN_ID: '44394986153'
+  CANDIDATE_SOURCE: 65b14b96b7243e0339b3eb5f2fd4f92ae1898df6
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_65b14b96b7243e0339b3eb5f2fd4f92ae1898df6
+  CANDIDATE_ARTIFACT_ID: '14470108635'
+  CANDIDATE_SHA256: '090dc7a9e4298b0153baee53c2f2f8329a2dc1a95708b4a9cfbf840e2d46ab91'
 jobs:
   measure:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-check-stability-371eb5d' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-stability-65b14b9' }}
     runs-on: windows-latest
     timeout-minutes: 55
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suite: check
-            measurementTimeout: 20
-          - suite: stability
-            measurementTimeout: 47
     defaults:
       run:
         shell: pwsh
-    env:
-      SUITE: ${{ matrix.suite }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - name: Verify hosted runner and exact candidate provenance
@@ -68,24 +58,19 @@ jobs:
           $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
           $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
           Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
-      - name: Measure the selected native workload
-        timeout-minutes: ${{ matrix.measurementTimeout }}
+      - name: Measure the original native stability protocol
+        timeout-minutes: 47
         run: |
           $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
           $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
           if (Test-Path -LiteralPath $root) { throw 'Expected a fresh native measurement directory.' }
-          $arguments = @('--accessibility-input',
+          $arguments = @('--accessibility-input', '--suite', 'stability',
             '--candidate', (Join-Path $candidate 'agent-resource-manager.exe'),
             '--candidate-build-info', (Join-Path $candidate 'BUILD_INFO.native-validation.json'))
-          if ($env:SUITE -ceq 'check') {
-            $arguments += @('--suite', 'loads', '--load-kind', 'check', '--sample-overlap', 'true')
-          } else {
-            $arguments += @('--suite', 'stability')
-          }
           $PSNativeCommandUseErrorActionPreference = $false
           & node scripts/verify-uia-performance.mjs @arguments
           exit $LASTEXITCODE
-      - name: Preserve raw synthetic evidence and evaluate the selected workload
+      - name: Preserve raw synthetic evidence and evaluate native stability
         if: ${{ always() }}
         run: |
           $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
@@ -123,44 +108,20 @@ jobs:
               $exits[0].pid -ne $driver.pid -or $exits[0].creationFileTime -cne $driver.creationFileTime) {
             throw 'The native evidence did not bind the expected candidate, synthetic dataset, strict startup and normal exit.'
           }
-          if ($env:SUITE -ceq 'check') {
-            $PSNativeCommandUseErrorActionPreference = $false
-            $recomputed = & node scripts/verify-sampled-load-evidence.mjs $env:CANDIDATE_SHA256 $reportPath
-            $replayExit = $LASTEXITCODE
-            $recomputed | Set-Content -LiteralPath (Join-Path $evidence.FullName 'check-replay.json') -Encoding utf8NoBOM
-            $replay = $recomputed | ConvertFrom-Json
-            $check = $replay.workloads.check
-            $summary = [ordered]@{suite='check'; replayExit=$replayExit; completedTasks=$check.completedTasks
-              acceptedInputs=$check.sampleOverlap.acceptedInputs; originalP95=$check.originalP95; limitedTolerance=$check.limitedTolerance}
-            $summary | ConvertTo-Json -Compress
-            if ($replayExit -ne 2 -or $replay.status -cne 'incomplete' -or $replay.reasons.Count -ne 0 -or
-                @($replay.missingWorkloads).Count -ne 2 -or 'download' -cnotin $replay.missingWorkloads -or
-                'update' -cnotin $replay.missingWorkloads -or $check.sampleOverlap.acceptedInputs -ne 400) {
-              throw 'Check-only replay did not independently verify exactly 400 overlaps.'
-            }
-            foreach ($name in @('search','filter','tab','document')) {
-              if ($check.sampleOverlap.categories.$name.count -ne 100) { throw "Expected exactly 100 verified $name overlaps." }
-            }
-            if ($check.originalP95 -cne 'passed' -or $check.limitedTolerance -cne 'passed') {
-              throw 'Check was measured but did not pass both existing thresholds. See its independent replay.'
-            }
-            if ($report.status -cne 'passed-sampled-native-check-only') { throw 'The independent result and the original check result disagree.' }
-          } else {
-            $summary = [ordered]@{suite='stability'; executableSha256=$report.candidate.sha256; normalExits=$exits.Count
-              reportSha256=(Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash.ToLowerInvariant()
-              samples=$report.stability.samples.Count; durationMs=$report.stability.samples[-1].elapsedMs
-              verdict=$report.stability.verdict; finalRoleObservation=$report.finalStabilityRoles}
-            $summary | ConvertTo-Json -Depth 10 -Compress
-            if ($report.suite -cne 'stability' -or $summary.samples -ne 61 -or $summary.durationMs -lt 1800000 -or
-                $report.stability.idleCalibration.Count -ne 11 -or $report.stability.warmupCycles -ne 5 -or
-                $report.stability.verdict.status -cne 'passed') { throw 'Stability did not meet the existing policy.' }
-          }
+          $summary = [ordered]@{suite='stability'; executableSha256=$report.candidate.sha256; normalExits=$exits.Count
+            reportSha256=(Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            samples=$report.stability.samples.Count; durationMs=$report.stability.samples[-1].elapsedMs
+            verdict=$report.stability.verdict; finalRoleObservation=$report.finalStabilityRoles}
+          $summary | ConvertTo-Json -Depth 10 -Compress
+          if ($report.suite -cne 'stability' -or $summary.samples -ne 61 -or $summary.durationMs -lt 1800000 -or
+              $report.stability.idleCalibration.Count -ne 11 -or $report.stability.warmupCycles -ne 5 -or
+              $report.stability.verdict.status -cne 'passed') { throw 'Stability did not meet the existing policy.' }
           exit 0
       - name: Upload only synthetic measurement evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_native_${{ matrix.suite }}_${{ github.run_id }}_${{ github.run_attempt }}
+          name: Agent_Resource_Manager_native_stability_${{ github.run_id }}_${{ github.run_attempt }}
           path: ${{ runner.temp }}/arm-native-performance-evidence/
           if-no-files-found: warn
           retention-days: 14
