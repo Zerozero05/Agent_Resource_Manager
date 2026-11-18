@@ -11,7 +11,7 @@ env:
   CANDIDATE_SHA256: f8e240df74644942c929cc8d0ad699e1369c7a51cedab662620e8152c4ab41af
 jobs:
   measure:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-detail-isolation-3f703b1' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-detail-isolation-3f703b1-r2' }}
     runs-on: windows-latest
     timeout-minutes: 27
     defaults:
@@ -31,6 +31,9 @@ jobs:
           if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
               -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
               -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
+          if ($env:ImageVersion -cne '20261103.298.1') {
+            throw "The selected runner image ($env:ImageVersion) differs from the same-candidate hosted startup evidence. No candidate was downloaded or started."
+          }
           if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no existing manager in the isolated runner.' }
           if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'Exact candidate artifact ID and independent EXE SHA-256 must be pinned before download.'
@@ -79,16 +82,58 @@ jobs:
               $record.exitCode = $LASTEXITCODE
               $new = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notin $before })
               if ($new.Count -ne 1) { throw 'Expected one new native diagnostic directory.' }
+              $missing = @()
               foreach ($name in @('report.json','observations.jsonl','policy-before-run.json','candidate-mixed-1000-100-driver.json','mixed-native-fixture/dataset.json')) {
                 $source = Join-Path $new[0].FullName $name
                 if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $target.FullName }
+                else { $missing += $name }
               }
-              $report = Get-Content -LiteralPath (Join-Path $target.FullName 'report.json') -Raw | ConvertFrom-Json
-              $driver = Get-Content -LiteralPath (Join-Path $target.FullName 'candidate-mixed-1000-100-driver.json') -Raw | ConvertFrom-Json
-              $events = Get-Content -LiteralPath (Join-Path $target.FullName 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
+              $record['missingEvidence'] = $missing
+              $report = if ('report.json' -notin $missing) {
+                Get-Content -LiteralPath (Join-Path $target.FullName 'report.json') -Raw | ConvertFrom-Json
+              }
+              $driver = if ('candidate-mixed-1000-100-driver.json' -notin $missing) {
+                Get-Content -LiteralPath (Join-Path $target.FullName 'candidate-mixed-1000-100-driver.json') -Raw | ConvertFrom-Json
+              }
+              $events = if ('observations.jsonl' -notin $missing) {
+                Get-Content -LiteralPath (Join-Path $target.FullName 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
+              }
               $exits = @($events | Where-Object { $_.kind -ceq 'native-normal-exit' -and $_.closedNormally -eq $true })
               $record.closedNormally = $exits.Count -eq 1 -and $driver.closedNormally -eq $true -and
                 $exits[0].pid -eq $driver.pid -and $exits[0].creationFileTime -ceq $driver.creationFileTime
+              if ($record.exitCode -ne 0) {
+                $record['harnessError'] = $report.error
+                $record['driverFailure'] = [ordered]@{error=$driver.error; type=$driver.errorType; lastOperation=$driver.lastOperation;
+                  lastSelector=$driver.lastSelector; cleanupError=$driver.closeError; managerStillRunning=$driver.ownedProcessStillRunning}
+                if ($driver.ownedProcessStillRunning -eq $true -and $driver.pid -gt 0 -and $driver.creationFileTime) {
+                  try {
+                    $owner = Get-Process -Id $driver.pid -ErrorAction Stop
+                    if ($owner.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() -ceq $driver.creationFileTime) {
+                      $snapshot = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CreationDate)
+                      $family = [Collections.Generic.HashSet[int]]::new()
+                      [void]$family.Add([int]$driver.pid)
+                      do {
+                        $added = $false
+                        foreach ($processRow in $snapshot) {
+                          if ($family.Contains([int]$processRow.ParentProcessId) -and $processRow.CreationDate -ge $owner.StartTime -and
+                              $family.Add([int]$processRow.ProcessId)) { $added = $true }
+                        }
+                      } while ($added)
+                      $survivor = Get-Process -Id $driver.pid -ErrorAction Stop
+                      if ($survivor.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() -ceq $driver.creationFileTime) {
+                        $record['postFailureProcessSnapshot'] = [ordered]@{observedAt=[DateTime]::UtcNow.ToString('o');
+                          members=@($snapshot | Where-Object { $family.Contains([int]$_.ProcessId) } |
+                            Select-Object ProcessId,ParentProcessId,Name,CreationDate)}
+                      }
+                    }
+                  } catch {
+                    $record['postFailureProcessSnapshotError'] = $_.Exception.Message
+                  }
+                }
+                $cause = if ($driver.error) { $driver.error } elseif ($report.error) { $report.error } else { 'No error text was recorded.' }
+                throw "Native diagnostic exited with code $($record.exitCode). $cause"
+              }
+              if ($missing.Count -ne 0) { throw "Diagnostic evidence is incomplete: $($missing -join ', ')." }
               $tabCount = if ($variant -ceq 'retain-document') { 1 } else { 0 }
               $branchPhase = if ($tabCount -eq 1) { 'retain-document-return-home' } else { 'close-document' }
               $phases = @('cycle-start','search-skill','clear-skill-search','filter-github','filter-all','search-document',
