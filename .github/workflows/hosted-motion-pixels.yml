@@ -11,7 +11,7 @@ env:
   CANDIDATE_SHA256: f8e240df74644942c929cc8d0ad699e1369c7a51cedab662620e8152c4ab41af
 jobs:
   motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-pixels-3f703b1' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-pixels-3f703b1-r2' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:
@@ -31,6 +31,9 @@ jobs:
           if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
               -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
             throw 'The visual diagnostic requires an isolated interactive GitHub-hosted Windows VM.'
+          }
+          if ($env:ImageVersion -cne '20261103.298.1') {
+            throw "The selected runner image ($env:ImageVersion) differs from the same-candidate hosted startup evidence. No candidate was downloaded or started."
           }
           if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[a-f0-9]{64}$') {
             throw 'Pin the independently verified artifact ID and executable SHA256 before measurement.'

@@ -169,6 +169,7 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
     # Existing pipe guard checks that its exact launched owner is ready with this isolated database.
     $session.ReadObservation('task_list') | Out-Null
     $report.native = [ordered]@{ pid=$session.Pid; creationFileTime=$session.CreationFileTime; windowHandle=$session.Handle }
+    $report.phase = 'settings-motion-control'
     $session.ClickNamed('设置','主要导航')
     if (-not @($session.InspectNamed('设置分类') | Where-Object { -not $_.offscreen }).Count) {
         $session.ClickNamed('设置分类：常规',$null)
