@@ -898,18 +898,24 @@ public sealed class NativeUiMeasurement : IDisposable {
   AutomationElement Unique(string name,ControlType type,string scopeName=null){
     AutomationElement result=null;
     Wait(()=>{
-      AutomationElement scope=root;
-      if(!String.IsNullOrEmpty(scopeName)){
-        AutomationElementCollection scopes=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,scopeName));
-        if(scopes.Count>1)throw new InvalidOperationException("Functional scope is ambiguous: "+scopeName+" (matches "+scopes.Count+").");
-        if(scopes.Count==0)return false;
-        scope=scopes[0];
+      try{
+        AutomationElement scope=root;
+        if(!String.IsNullOrEmpty(scopeName)){
+          AutomationElementCollection scopes=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,scopeName));
+          if(scopes.Count>1)throw new InvalidOperationException("Functional scope is ambiguous: "+scopeName+" (matches "+scopes.Count+").");
+          if(scopes.Count==0)return false;
+          scope=scopes[0];
+        }
+        AutomationElementCollection matches=scope.FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.NameProperty,name),new PropertyCondition(AutomationElement.ControlTypeProperty,type)));
+        if(matches.Count>1)throw new InvalidOperationException("Functional selector is ambiguous: "+name+" (matches "+matches.Count+").");
+        if(matches.Count==0)return false;
+        result=matches[0];
+        return result.Current.IsEnabled;
+      }catch(ElementNotAvailableException){
+        // A render can replace the node during lookup, before any action is issued.
+        result=null;
+        return false;
       }
-      AutomationElementCollection matches=scope.FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.NameProperty,name),new PropertyCondition(AutomationElement.ControlTypeProperty,type)));
-      if(matches.Count>1)throw new InvalidOperationException("Functional selector is ambiguous: "+name+" (matches "+matches.Count+").");
-      if(matches.Count==0)return false;
-      result=matches[0];
-      return result.Current.IsEnabled;
     },"Exact owned functional control did not become available and enabled: "+name);
     return result;
   }
