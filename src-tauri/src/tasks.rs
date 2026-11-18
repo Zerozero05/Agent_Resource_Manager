@@ -928,6 +928,10 @@ impl TaskSystem {
             dispatch,
             crate::resource_automation::engine::dispatch_step as Dispatch,
         );
+        // The local dispatcher reads documentation without saving state or
+        // touching approvals. Other dispatchers retain their merge semantics.
+        let local_document_read = request["action"] == "get_document"
+            && std::ptr::fn_addr_eq(dispatch, crate::dispatch_local as Dispatch);
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Value, String> {
                 let _resources = self.acquire(&id, resources, foreground, &cancel)?;
@@ -994,15 +998,17 @@ impl TaskSystem {
                     let include_previews = request["action"] != "get_document";
                     let hook = Arc::new(WorkerHook {
                         service: Arc::downgrade(&self),
-                        base: Mutex::new(WorkerBase {
-                            state: manager.state.clone(),
-                            previews: if include_previews {
-                                manager.previews.clone()
-                            } else {
-                                HashMap::new()
-                            },
-                            undo: manager.management_undo.clone(),
-                            redo: manager.management_redo.clone(),
+                        base: (!local_document_read).then(|| {
+                            Mutex::new(WorkerBase {
+                                state: manager.state.clone(),
+                                previews: if include_previews {
+                                    manager.previews.clone()
+                                } else {
+                                    HashMap::new()
+                                },
+                                undo: manager.management_undo.clone(),
+                                redo: manager.management_redo.clone(),
+                            })
                         }),
                         action: request["action"].as_str().unwrap_or_default().to_owned(),
                         request: request.clone(),
@@ -1050,7 +1056,9 @@ impl TaskSystem {
                 );
                 // A consumed preview stays consumed on failure. Management history
                 // is already committed with its state by the writer.
-                hook.publish_ephemeral(&worker)?;
+                if !local_document_read {
+                    hook.publish_ephemeral(&worker)?;
+                }
                 let mut value = result?;
                 // A verified download receipt is a completed write. Cancellation
                 // arriving after its final commit must not disguise that result.
@@ -1581,7 +1589,7 @@ struct WorkerBase {
 }
 struct WorkerHook {
     service: Weak<TaskSystem>,
-    base: Mutex<WorkerBase>,
+    base: Option<Mutex<WorkerBase>>,
     action: String,
     request: Value,
     cancel: Arc<AtomicBool>,
@@ -1869,7 +1877,12 @@ impl ManagerRuntime for WorkerHook {
             .service
             .upgrade()
             .ok_or("Task service is unavailable")?;
-        let mut base = self.base.lock().map_err(|_| "Task merge lock failed")?;
+        let mut base = self
+            .base
+            .as_ref()
+            .ok_or("说明读取不能保存管理状态")?
+            .lock()
+            .map_err(|_| "Task merge lock failed")?;
         validate_observations(&base.state, &worker.state, &self.action)?;
         let mut manager = service
             .manager
@@ -2098,7 +2111,12 @@ impl WorkerHook {
             .service
             .upgrade()
             .ok_or("Task service is unavailable")?;
-        let base = self.base.lock().map_err(|_| "Task merge lock failed")?;
+        let base = self
+            .base
+            .as_ref()
+            .ok_or("说明读取不能发布预览")?
+            .lock()
+            .map_err(|_| "Task merge lock failed")?;
         let mut manager = service
             .manager
             .lock()
@@ -5500,6 +5518,31 @@ mod tests {
     }
 
     #[test]
+    fn local_document_read_does_not_trim_unrelated_previews() {
+        let (_dir, service, markdown) = document_fixture_with_large_preview();
+        let before = {
+            let mut manager = service.manager.lock().unwrap();
+            for index in 0..33 {
+                manager.previews.insert(
+                    format!("export-{index}"),
+                    json!({"kind":"export_plan","createdAt":index}),
+                );
+            }
+            manager.previews.clone()
+        };
+        let result = service
+            .execute(
+                json!({"action":"get_document","skillId":"one"}),
+                crate::dispatch_local,
+            )
+            .unwrap();
+        assert_eq!(result["markdown"], markdown);
+        assert!(result["readGeneration"].is_u64());
+        assert_eq!(service.manager.lock().unwrap().previews, before);
+        assert!(service.list().unwrap().is_empty());
+    }
+
+    #[test]
     fn concurrent_previews_are_retained_and_consumption_is_single_use_even_on_failure() {
         let (_dir, service) = fixture();
         let a = start(
@@ -7764,12 +7807,12 @@ mod tests {
             let cancel = Arc::new(AtomicBool::new(false));
             let hook = WorkerHook {
                 service: Arc::downgrade(&service),
-                base: Mutex::new(WorkerBase {
+                base: Some(Mutex::new(WorkerBase {
                     state: service.manager.lock().unwrap().state.clone(),
                     previews: HashMap::new(),
                     undo: vec![],
                     redo: vec![],
-                }),
+                })),
                 action: "resource_invoke".into(),
                 request: json!({"action":"resource_invoke","id":id,"actionId":"test"}),
                 cancel: cancel.clone(),

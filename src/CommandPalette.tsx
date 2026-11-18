@@ -5,7 +5,7 @@ import { commandShortcut, queryCommands, type Command } from './commands';
 import './command-palette.css';
 
 export function CommandPalette({ commands, active = true, loading = false, notice = '', onOpen, onOpenChange, onChoose }: {
-  commands: readonly Command[]; active?: boolean; loading?: boolean; notice?: string;
+  commands: readonly Command[] | (() => readonly Command[]); active?: boolean; loading?: boolean; notice?: string;
   onOpen?: () => void; onOpenChange?: (open: boolean) => void; onChoose: (command: Command) => void;
 }) {
   const [open, setOpen] = useState(false), [query, setQuery] = useState('');
@@ -15,7 +15,12 @@ export function CommandPalette({ commands, active = true, loading = false, notic
   const activeRef = useRef(active); activeRef.current = active;
   const callbacks = useRef({ onOpen, onOpenChange, onChoose }); callbacks.current = { onOpen, onOpenChange, onChoose };
   const id = useId(), titleId = `${id}:title`, listId = `${id}:results`;
-  const matches = useMemo(() => queryCommands(commands, query), [commands, query]);
+  const showing = active && open;
+  const commandList = useMemo(() => {
+    if (!showing) return undefined;
+    return typeof commands === 'function' ? commands() : commands;
+  }, [commands, showing]);
+  const matches = useMemo(() => commandList ? queryCommands(commandList, query) : [], [commandList, query]);
   const visible = matches.slice(0, 60);
   const current = visible.find(command => command.id === selected) || visible[0];
   const currentIndex = current ? visible.indexOf(current) : -1;
@@ -52,7 +57,7 @@ export function CommandPalette({ commands, active = true, loading = false, notic
   useEffect(() => {
     if (open && currentIndex >= 0) panel.current?.querySelector<HTMLElement>(`[data-command-index="${currentIndex}"]`)?.scrollIntoView?.({ block: 'nearest' });
   }, [open, current?.id, currentIndex]);
-  const popup = open && <div className="command-palette-backdrop" onPointerDown={event => { if (event.target === event.currentTarget) setOpen(false); }}>
+  const popup = showing && <div className="command-palette-backdrop" onPointerDown={event => { if (event.target === event.currentTarget) setOpen(false); }}>
     <div className="command-palette" ref={panel} role="dialog" aria-modal="true" aria-labelledby={titleId} onKeyDown={event => {
       if (event.defaultPrevented || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || composing.current) return;
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setOpen(false); return; }

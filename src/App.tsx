@@ -309,7 +309,9 @@ export default function SessionApp() {
   const basicMode = state.startup?.basicMode === true || document.documentElement.dataset.basicMode === 'true';
   const management = useSyncExternalStore(managementDataCache.subscribe, managementDataCache.getSnapshot);
   const displaySkills = useMemo(() => {
-    const annotations = new Map(management.data?.skillAnnotations.map(item => [item.skillId, item]));
+    const skillAnnotations = management.data?.skillAnnotations;
+    if (!skillAnnotations?.length) return state.skills;
+    const annotations = new Map(skillAnnotations.map(item => [item.skillId, item]));
     return state.skills.map(skill => {
       const annotation = annotations.get(skill.id);
       return annotation ? { ...skill, alias: annotation.alias, notes: annotation.notes } : skill;
@@ -421,7 +423,7 @@ export default function SessionApp() {
     return result;
   }, [runTask, pane.id]);
   useEffect(() => { if (state.stateRevision !== undefined) resourceCommandCatalogue.invalidate(state.stateRevision); }, [state.stateRevision]);
-  const paletteCommands = useMemo(() => buildCommands(displaySkills, resourceCatalogue.resources, { readOnly: basicMode }), [displaySkills, resourceCatalogue.resources, basicMode]);
+  const getPaletteCommands = useCallback(() => buildCommands(displaySkills, resourceCatalogue.resources, { readOnly: basicMode }), [displaySkills, resourceCatalogue.resources, basicMode]);
   const managementAction = useCallback<ManagementAction>(async (label, action, args) => {
     const result = await runTask<ManagementData>(label, action, args, { paneId: pane.id });
     managementDataCache.accept(result);
@@ -824,21 +826,23 @@ export default function SessionApp() {
   const categories = state.settings.categories || [];
   const resolvedCategoryColors = useMemo(() => categoryColors(categories), [categories]);
   const categoryTitle = categoryFilter === 'all' ? '全部 Skills' : categoryFilter === 'favorites' ? '收藏' : categoryFilter === 'uncategorized' ? '未分类' : categories.find(category => category.id === categoryFilter)?.name || '分类已不存在';
-  const categoryTotal = state.skills.filter(skill => categoryFilter === 'all' || (categoryFilter === 'favorites' ? skill.favorite : categoryFilter === 'uncategorized' ? !skill.categoryId : skill.categoryId === categoryFilter)).length;
+  const librarySkills = isHome ? displaySkills : EMPTY.skills;
+  const categoryTotal = categoryFilter === 'all' ? librarySkills.length : librarySkills.filter(skill => categoryFilter === 'favorites' ? skill.favorite : categoryFilter === 'uncategorized' ? !skill.categoryId : skill.categoryId === categoryFilter).length;
   const libraryQueryKey = JSON.stringify([query, filter, statusFilter, librarySort, libraryPageSize, categoryFilter, readingRefresh]);
-  const candidates = useMemo(() => queryLibrary(displaySkills, { query, sourceFilter: filter, statusFilter, sort: librarySort, categoryFilter }), [displaySkills, query, filter, statusFilter, librarySort, categoryFilter]);
-  const reading = useMemo(() => reconcileLibraryReading(readingRef.current, displaySkills.map(skill => skill.id), candidates.map(skill => skill.id), libraryQueryKey), [displaySkills, candidates, libraryQueryKey]);
-  useLayoutEffect(() => { if (ready) readingRef.current = reading; }, [ready, reading]);
+  const candidates = useMemo(() => queryLibrary(librarySkills, { query, sourceFilter: filter, statusFilter, sort: librarySort, categoryFilter }), [librarySkills, query, filter, statusFilter, librarySort, categoryFilter]);
+  const reading = useMemo(() => reconcileLibraryReading(readingRef.current, librarySkills.map(skill => skill.id), candidates.map(skill => skill.id), libraryQueryKey), [librarySkills, candidates, libraryQueryKey]);
+  useLayoutEffect(() => { if (isHome && ready) readingRef.current = reading; }, [isHome, ready, reading]);
   const matching = useMemo(() => {
-    const byId = new Map(displaySkills.map(skill => [skill.id, skill]));
+    const byId = new Map(librarySkills.map(skill => [skill.id, skill]));
     return reading.ids.flatMap(id => { const skill = byId.get(id); return skill ? [skill] : []; });
-  }, [displaySkills, reading]);
+  }, [librarySkills, reading]);
   const libraryResult = useMemo(() => paginateLibrary(matching, libraryPage, libraryPageSize), [matching, libraryPage, libraryPageSize]);
   const pageSkillIds = useMemo(() => libraryResult.items.map(skill => skill.id), [libraryResult.items]);
   const visibleChecked = checkedSkills.filter(id => pageSkillIds.includes(id));
   const detailVisible = pane.kind === 'detail' ? visited : isHome && view === 'skills' && libraryMode === 'details' && pageSkillIds.includes(selectedId);
   const previousLibraryQuery = useRef(libraryQueryKey);
   useEffect(() => {
+    if (!isHome) return;
     const filtersChanged = previousLibraryQuery.current !== libraryQueryKey;
     previousLibraryQuery.current = libraryQueryKey;
     const requestedIndex = libraryMode === 'details' && view === 'skills' && requestedDetailSkill.current ? matching.findIndex(skill => skill.id === requestedDetailSkill.current) : -1;
@@ -851,7 +855,7 @@ export default function SessionApp() {
       const target = requestedIndex >= 0 ? matching[requestedIndex] : pageItems.find(skill => skill.id === selectedId) || pageItems[0];
       if (target && target.id !== selectedId) { setSelectedId(target.id); setTab('docs'); }
     }
-  }, [libraryQueryKey, libraryPage, libraryPageSize, libraryResult.page, matching, selectedId, libraryMode, view]);
+  }, [isHome, libraryQueryKey, libraryPage, libraryPageSize, libraryResult.page, matching, selectedId, libraryMode, view]);
   useEffect(() => { setCheckedSkills([]); selectionAnchor.current = null; closeFloatingMenu(); }, [libraryQueryKey, closeFloatingMenu]);
   function changeLibraryPage(page: number) { setCheckedSkills([]); selectionAnchor.current = null; closeFloatingMenu(); setLibraryNavigation(value => value + 1); setLibraryPage(page); }
   const exportSkillContext = modal?.kind === 'export' ? state.skills.find(item => item.id === modal.skill.id) || modal.skill : detailVisible ? selected : undefined;
@@ -1637,7 +1641,7 @@ export default function SessionApp() {
       window.dispatchEvent(new CustomEvent('arm-command-focus', { detail: target }));
     }
   }
-  const commandPalette = <CommandPalette commands={paletteCommands} active={session.active && !session.closing} loading={resourceCatalogue.loading} notice={resourceCatalogue.error ? '工具目录读取失败；仍可搜索已读取内容、Skills和设置。' : ''} onOpen={readPaletteResources} onOpenChange={setCommandPaletteOpen} onChoose={chooseCommand} />;
+  const commandPalette = <CommandPalette commands={getPaletteCommands} active={session.active && !session.closing} loading={resourceCatalogue.loading} notice={resourceCatalogue.error ? '工具目录读取失败；仍可搜索已读取内容、Skills和设置。' : ''} onOpen={readPaletteResources} onOpenChange={setCommandPaletteOpen} onChoose={chooseCommand} />;
   if (!isHome) return <div className="session-document" ref={paneRoot} data-session-pane={pane.id} data-read-generation={state.readGeneration ?? 'unknown'}>
     <PaneFrame paneId={pane.id} outline={pane.kind !== 'history'} outlineExpanded={outlineExpanded} onOutlineExpandedChange={setOutlineExpanded} initialScrollTop={Number(session.initialDraft.scrollTop ?? pane.state.scrollTop ?? 0)} onScrollPosition={saveScroll} toolbar={<><strong title={pane.title || 'Skill'}>{pane.title || 'Skill'}</strong><div className="command-palette-toolbar-actions">{commandPalette}<button className="button ghost" onClick={() => sessionRef.current.goHome()}>返回工作台</button></div></>}>
       {management.error && <div className="management-data-error" role="alert">个人管理信息读取失败，已有显示仍保留。<button className="button" disabled={management.loading} onClick={() => void readManagementData().catch(() => undefined)}>重新读取</button></div>}

@@ -123,6 +123,42 @@ test('large local catalogues keep the result DOM bounded and empty queries recov
   await key(input(), 'Enter'); assert(input());
 });
 
+test('a deferred catalogue is built only while open and refreshes without rebuilding on each query', async () => {
+  const chosen: Command[] = [];
+  const builds: number[] = [];
+  const root = createRoot(host); unmount = () => root.unmount();
+  let current = resource;
+  const catalogue = () => {
+    builds.push(current.revision);
+    return buildCommands([], [current]);
+  };
+  const refreshedCatalogue = () => catalogue();
+  const paint = (commands: () => readonly Command[], active = true) => act(async () =>
+    root.render(createElement(CommandPalette, { commands, active, onChoose: (command: Command) => chosen.push(command) })));
+  await paint(catalogue, false);
+  await key(document.getElementById('origin')!, 'k', { ctrlKey: true });
+  await paint(catalogue);
+  assert.deepEqual(builds, []);
+
+  await click(host.querySelector('button')!);
+  await search('搜索视频 阅读助手');
+  assert.equal(document.querySelectorAll('[role="option"]').length, 1);
+  assert.deepEqual(builds, [3]);
+  current = { ...resource, enabled: false, revision: 4 };
+  await paint(refreshedCatalogue);
+  assert.equal(document.querySelector('[role="option"]')?.getAttribute('aria-disabled'), 'true');
+  await key(input(), 'Escape');
+
+  current = { ...resource, revision: 5 };
+  await paint(refreshedCatalogue);
+  assert.deepEqual(builds, [3, 4]);
+  await click(host.querySelector('button')!);
+  await search('搜索视频');
+  await key(input(), 'Enter');
+  assert.deepEqual(builds, [3, 4, 5]);
+  assert.deepEqual(chosen.map(command => command.target), [{ kind: 'resource-action', id: 'reader', actionId: 'find-video', expectedRevision: 5 }]);
+});
+
 test('registered actions search by their name and tool alias and choose only an identified form after IME completes', async () => {
   const chosen: Command[] = [];
   await render(buildCommands([], [resource]), command => chosen.push(command));
