@@ -37,11 +37,16 @@ test('deferred Markdown keeps GFM, custom image/code renderers and safe URL hand
 test('lazy preparation preserves sibling controls and stable heading focus after resolution and rerender', async () => {
   let finish!: (module: typeof markdownModule) => void;
   const DeferredMarkdown = lazy(() => new Promise<typeof markdownModule>(resolve => { finish = resolve; }));
-  const heading = ({ children }: { children?: ReactNode }) => createElement('h2', { id: 'stable-heading', tabIndex: -1 }, children);
+  let headingRenders = 0;
+  const heading = ({ children }: { children?: ReactNode }) => {
+    headingRenders++;
+    return createElement('h2', { id: 'stable-heading', tabIndex: -1 }, children);
+  };
+  const components = { h2: heading };
   const root = createRoot(host); cleanup = () => root.unmount();
   const view = (label: string) => createElement('article', {},
     createElement('button', { id: 'reading-control' }, label),
-    createElement(Suspense, { fallback: createElement('p', { role: 'status' }, '正在准备说明显示…') }, createElement(DeferredMarkdown, { children: '## 标题\n\n正文', components: { h2: heading } })),
+    createElement(Suspense, { fallback: createElement('p', { role: 'status' }, '正在准备说明显示…') }, createElement(DeferredMarkdown, { children: '## 标题\n\n正文', components })),
   );
   await act(async () => root.render(view('刷新说明')));
   const control = host.querySelector<HTMLButtonElement>('button')!; control.focus();
@@ -50,7 +55,9 @@ test('lazy preparation preserves sibling controls and stable heading focus after
   assert.equal(host.querySelector('[role="status"]'), null);
   assert.equal(document.activeElement, control);
   const title = host.querySelector<HTMLElement>('h2')!; title.focus();
+  const rendersBefore = headingRenders;
   await act(async () => root.render(view('说明已刷新')));
   assert.equal(host.querySelector('h2'), title);
   assert.equal(document.activeElement, title);
+  assert.equal(headingRenders, rendersBefore, 'unchanged Markdown does not render again when sibling controls update');
 });

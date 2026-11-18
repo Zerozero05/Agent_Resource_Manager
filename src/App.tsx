@@ -1,9 +1,10 @@
-import { lazy, Suspense, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { createContext, lazy, Suspense, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import type { Components } from 'react-markdown';
 import packageInfo from '../package.json';
 import { comparisonScope, displayStatus, githubFolderUrl, libraryCounts, libraryStatusOptions, statusFilterLabel, needsAttention, paginateLibrary, queryLibrary, rangeSelection, selectionForDrag, statusExplanation, type LibraryStatusFilter } from './library';
 import { usePreferenceQueue, type LayoutPreferences } from './usePreferenceQueue';
@@ -93,6 +94,7 @@ const markdownHeadings = {
   h2: ({ children }: { children?: ReactNode }) => <h2 id={String(children).toLowerCase().replace(/\s+/g, '-')}>{children}</h2>,
   h3: ({ children }: { children?: ReactNode }) => <h3 id={String(children).toLowerCase().replace(/\s+/g, '-')}>{children}</h3>,
 };
+const DocumentAssetReadContext = createContext('');
 
 type View = 'dashboard' | 'resources' | 'skills' | 'tools' | 'changes' | 'clients' | 'settings';
 type Filter = 'all' | 'local' | 'github' | 'linked';
@@ -227,14 +229,15 @@ function DetailDrawer({ children, feedback, onClose, suspended }: { children: Re
   return <div className="library-detail-backdrop"><div ref={panel} className="library-detail-drawer" role="dialog" aria-modal={!suspended} aria-labelledby="library-detail-title"><div className="drawer-heading"><div><span className="eyebrow">SKILL MANAGER</span><h2 id="library-detail-title">Skill 详情</h2></div><button className="icon-button" aria-label="关闭详情" onClick={onClose}><X size={21} /></button></div>{feedback}{children}</div></div>;
 }
 
-function AuthImage({ src, alt, skill, version, documentPath, remoteCommit, localOrigin }: { src?: string; alt?: string; skill: Skill; version: 'installed' | 'latest'; documentPath: string; remoteCommit?: string; localOrigin?: boolean }) {
+function AuthImage({ src, alt, skillId, version, documentPath, remoteCommit, localOrigin }: { src?: string; alt?: string; skillId: string; version: 'installed' | 'latest'; documentPath: string; remoteCommit?: string; localOrigin?: boolean }) {
+  const assetReadKey = useContext(DocumentAssetReadContext);
   const [result, setResult] = useState<{ src?: string; error?: string }>({});
   useEffect(() => { let cancelled = false; setResult({}); if (!src) return;
     if (/^https?:\/\//i.test(src)) { setResult({ src }); return; }
     let path: string; try { path = resolveDocPath(documentPath, src); } catch (error) { setResult({ error: errText(error) }); return; }
-    request<{ dataUrl: string }>('get_doc_asset', { skillId: skill.id, version, path, ...(remoteCommit ? { remoteCommit } : {}), ...(localOrigin ? { origin: 'local' } : {}) }).then(value => { if (!cancelled) setResult({ src: value.dataUrl }); }).catch(error => { if (!cancelled) setResult({ error: errText(error) }); });
+    request<{ dataUrl: string }>('get_doc_asset', { skillId, version, path, ...(remoteCommit ? { remoteCommit } : {}), ...(localOrigin ? { origin: 'local' } : {}) }).then(value => { if (!cancelled) setResult({ src: value.dataUrl }); }).catch(error => { if (!cancelled) setResult({ error: errText(error) }); });
     return () => { cancelled = true; };
-  }, [src, skill.id, version, documentPath, remoteCommit, localOrigin]);
+  }, [src, skillId, version, documentPath, remoteCommit, localOrigin, assetReadKey]);
   return result.error ? <span className="image-error" title={result.error}><CircleAlert size={14} />{alt || '图片无法加载'}</span> : result.src ? <img src={result.src} alt={alt || ''} loading="lazy" onError={() => setResult({ error: '图片无法加载' })} /> : <span className="image-error"><LoaderCircle size={14} className="spin" />{alt || '正在读取图片'}</span>;
 }
 function CodeBlock({ children, onCopy }: { children: ReactNode; onCopy: (text: string) => void }) {
@@ -891,6 +894,11 @@ export default function SessionApp() {
     cacheable: state.readGeneration != null, initialValue: seed('documentCacheKey', '') === docKey ? seed<DocumentResult | undefined>('documentValue', undefined) : undefined,
     load: () => request<DocumentResult>('get_document', { skillId: selected!.id, version, ...(documentPath ? { path: documentPath } : {}), ...(documentCommit ? { remoteCommit: documentCommit } : {}), ...(documentLocal ? { origin: 'local' } : {}) }) });
   const doc = documentState.value, docBusy = documentState.loading, docError = documentState.error;
+  const [documentAssetRefresh, setDocumentAssetRefresh] = useState(0);
+  function refreshDocument() {
+    documentState.refresh();
+    setDocumentAssetRefresh(previous => previous + 1);
+  }
   const selectedInventoryStamp = inventoryReadKey(selected?.id || '', state.readGeneration, selectedContentStamp);
   useEffect(() => {
     if (!selected || !detailVisible || tab !== 'files') return;
@@ -1179,13 +1187,41 @@ export default function SessionApp() {
       if (result.transferResult) setTransferResult({ ...result.transferResult, skillId: original.skillId });
     } else setModal(previous => previous?.kind === 'preview' && previous.preview.id === original.id ? { kind: 'preview', preview: { ...original, canApply: false, warnings: [...(original.warnings || []), '此预览已失效。关闭后检查当前状态，再重新生成预览。'] } } : previous);
   }
-  async function external(url: string) { try { const target = new URL(url); if (!['https:', 'http:'].includes(target.protocol)) throw new Error('仅支持打开 HTTP 或 HTTPS 链接'); await openUrl(target.toString()); notify('success', `已在浏览器打开 ${target.hostname} 链接。`); return true; } catch (error) { notify('error', `无法打开链接：${errText(error)}`); return false; } }
+  const external = useCallback(async (url: string) => { try { const target = new URL(url); if (!['https:', 'http:'].includes(target.protocol)) throw new Error('仅支持打开 HTTP 或 HTTPS 链接'); await openUrl(target.toString()); notify('success', `已在浏览器打开 ${target.hostname} 链接。`); return true; } catch (error) { notify('error', `无法打开链接：${errText(error)}`); return false; } }, [notify]);
   async function openFolder(skill: Skill) { await perform('正在打开文件夹', 'open_folder', { skillId: skill.id }, `已打开 ${skillName(skill)} 的本地文件夹。`); }
   async function createTokenLink() {
     const opened = await external(tokenCreationUrl(tokenRepo, tokenAccess));
     setTokenLinkStatus(opened ? '已交给默认浏览器打开。请在 GitHub 仅选择目标仓库，再生成令牌。' : '浏览器未能打开。请复制创建链接，在浏览器地址栏粘贴打开。');
   }
-  async function copy(text: string) { try { await navigator.clipboard.writeText(text); notify('success', '已复制。'); } catch (error) { notify('error', `复制失败：${errText(error)}`); } }
+  const copy = useCallback(async (text: string) => { try { await navigator.clipboard.writeText(text); notify('success', '已复制。'); } catch (error) { notify('error', `复制失败：${errText(error)}`); } }, [notify]);
+  const documentSkillId = selected?.id;
+  const documentLinkPath = doc?.documentPath || `${selected?.remotePath || ''}/README.md`;
+  const documentLinkSource = doc?.source;
+  const resolvedDocumentCommit = doc?.commit || documentCommit;
+  const documentLinkRef = resolvedDocumentCommit || (version === 'installed' ? selected?.installedCommit || selected?.commit || 'HEAD' : selected?.commit || 'HEAD');
+  const documentComponents = useMemo<Components>(() => {
+    if (!documentSkillId) return markdownHeadings;
+    return {
+      ...markdownHeadings,
+      a: ({ href, children }) => <a href={href || '#'} onClick={event => {
+        event.preventDefault();
+        if (!href) return;
+        if (/^https?:\/\//i.test(href)) { void external(href); return; }
+        if (href.startsWith('#')) { if (paneRoot.current) scrollToPaneAnchor(paneRoot.current, decodeURIComponent(href.slice(1))); return; }
+        try {
+          const path = resolveDocPath(documentLinkPath, href);
+          if (/\.(md|markdown)$/i.test(path)) {
+            setDocumentPath(path);
+            setDocumentCommit(resolvedDocumentCommit);
+          } else if (documentLinkSource && documentLinkSource !== '本地运行文件') {
+            void external(`https://github.com/${documentLinkSource}/blob/${encodeURIComponent(documentLinkRef)}/${path.split('/').map(encodeURIComponent).join('/')}`);
+          } else notify('info', '请在文件页或外部编辑器中打开该文件。');
+        } catch (error) { notify('error', errText(error)); }
+      }}>{children}<ArrowUpRight size={11} className="inline-link-icon" /></a>,
+      img: ({ src, alt }) => <AuthImage src={src} alt={alt} skillId={documentSkillId} version={version} documentPath={documentLinkPath} remoteCommit={resolvedDocumentCommit} localOrigin={documentLocal} />,
+      pre: ({ children }) => <CodeBlock onCopy={copy}>{children}</CodeBlock>,
+    };
+  }, [documentSkillId, documentLinkPath, documentLinkSource, resolvedDocumentCommit, documentLinkRef, version, documentLocal, external, notify, copy]);
   function share(skill: Skill) { const commit = skill.baselineCommit || skill.commit; if (!skill.repo || !commit) { notify('info', '此 Skill 尚无远端固定版本，可导出运行包分享。'); return; } const suffix = skill.remotePath ? `/${skill.remotePath.split('/').map(encodeURIComponent).join('/')}` : ''; void copy(`https://github.com/${skill.repo}/tree/${encodeURIComponent(commit)}${suffix}`); if (skill.private) notify('info', '这是私有仓库链接，接收者需要具备仓库访问权限。'); }
   function resetAutoMatch(skillId: string) { for (const key of autoMatchAttempts.current) if (JSON.parse(key)[0] === skillId) autoMatchAttempts.current.delete(key); }
   function refreshInventory(skillId: string) { inventoryGeneration.current += 1; resetAutoMatch(skillId); for (const cache of [inventoryCache.current, inventoryPending.current]) for (const key of cache.keys()) if (JSON.parse(key)[0] === skillId) cache.delete(key); fileRequestId.current += 1; setFileContent(null); setInventoryRefresh(value => value + 1); }
@@ -1523,16 +1559,11 @@ export default function SessionApp() {
             <div className="detail-actions">{!selected.localPath ? <Button variant="primary" onClick={() => void selectOperation(selected, 'install')} disabled={busy || selected.readOnly}><Download size={15} />下载 Skill</Button> : <>{selected.sourceId && <Button variant="primary" onClick={() => void previewUpdate(selected)} disabled={busy || selected.readOnly}><ArrowDownToLine size={15} />预览更新</Button>}<Button disabled={busy || selected.readOnly} onClick={() => void selectOperation(selected, selected.sourceId ? 'push' : 'upload')}><Upload size={15} />{selected.sourceId ? '上传本地修改' : '上传到 GitHub'}</Button><Button onClick={() => void perform('正在打开编辑器', 'open_local', { skillId: selected.id })} disabled={busy || selected.readOnly}><Code2 size={15} />外部编辑器</Button></>}{selected.localPath && <Button variant="ghost" onClick={() => void exportSkill(selected)} disabled={busy}><Box size={15} />导出</Button>}<Button variant="ghost" aria-haspopup="menu" aria-expanded={floatingMenu?.id === 'detail-more'} disabled={busy} onClick={event => menuToggle(event, detailMoreMenu!)} onKeyDown={event => menuToggle(event, detailMoreMenu!)}><Ellipsis size={15} />更多</Button></div></div>
             <div className="detail-tabs" role="tablist" aria-label="Skill 详情">{([{ id: 'docs', label: '说明', icon: <BookOpen size={15} /> }, { id: 'files', label: '文件', icon: <File size={15} /> }, { id: 'source', label: '来源与连接', icon: <GitBranch size={15} /> }] as const).map(item => <button role="tab" aria-selected={tab === item.id} className={tab === item.id ? 'active' : ''} key={item.id} onClick={() => setTab(item.id)}>{item.icon}{item.label}</button>)}</div>
             <div className="detail-content">
-              {tab === 'docs' && <><div className="document-toolbar"><div className="segmented small"><button className={version === 'latest' ? 'selected' : ''} onClick={() => { setVersion('latest'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>最新说明</button><button disabled={!selected.localPath || !!selected.sourceId && !selected.installedCommit} title={!selected.installedCommit && selected.sourceId ? '没有可核实的历史安装记录' : undefined} className={version === 'installed' ? 'selected' : ''} onClick={() => { setVersion('installed'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>安装版本</button></div><Button variant="ghost" aria-label="刷新说明" disabled={docBusy || documentState.refreshing} onClick={documentState.refresh}><RefreshCw size={14} className={documentState.refreshing ? 'spin' : ''} />{documentState.refreshing ? '正在刷新' : '刷新说明'}</Button>{documentPath && <Button variant="ghost" onClick={() => { setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>返回首页</Button>}</div>
+              {tab === 'docs' && <><div className="document-toolbar"><div className="segmented small"><button className={version === 'latest' ? 'selected' : ''} onClick={() => { setVersion('latest'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>最新说明</button><button disabled={!selected.localPath || !!selected.sourceId && !selected.installedCommit} title={!selected.installedCommit && selected.sourceId ? '没有可核实的历史安装记录' : undefined} className={version === 'installed' ? 'selected' : ''} onClick={() => { setVersion('installed'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>安装版本</button></div><Button variant="ghost" aria-label="刷新说明" disabled={docBusy || documentState.refreshing} onClick={refreshDocument}><RefreshCw size={14} className={documentState.refreshing ? 'spin' : ''} />{documentState.refreshing ? '正在刷新' : '刷新说明'}</Button>{documentPath && <Button variant="ghost" onClick={() => { setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>返回首页</Button>}</div>
               {selected.localPath && selected.sourceId && !selected.installedCommit && <div className="helper-note document-baseline-note"><CircleHelp size={14} /><span>历史安装版本未知。当前比较基准只说明文件匹配，不代表当初的安装版本。</span><button className="text-button" onClick={() => { setVersion('latest'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>阅读最新说明<ArrowUpRight size={12} /></button></div>}
               {documentState.refreshing && <p className="document-read-status" role="status"><LoaderCircle size={14} className="spin" />正在刷新，当前显示已读取版本。</p>}
               {docError && doc && <div className="inline-warning" role="status"><CircleAlert size={14} />{docError} 当前仍显示上次成功读取的版本。</div>}
-              {docBusy ? <Empty icon={<LoaderCircle className="spin" size={25} />} title="正在读取说明" /> : docError && !doc ? <Empty icon={<BookOpen size={26} />} title="暂时无法读取说明"><p className="break-text">{docError}</p>{!selected.sourceId && <p>本地文件仍可在“文件”中查看；关联 GitHub 后可读取远端完整说明。</p>}{selected.sourceId && version === 'installed' && <Button onClick={() => { setVersion('latest'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}><BookOpen size={14} />切换到最新说明</Button>}</Empty> : doc ? <><div className="document-caption"><span>{doc.documentPath || doc.source || 'Skill 文档'}{(doc.commit || documentCommit) && ` · ${(doc.commit || documentCommit)!.slice(0, 12)}`}</span><span>{doc.private && <LockKeyhole size={12} />} {dateText(doc.checkedAt)}</span></div><article className="markdown" data-outline-document={`${doc.documentPath || doc.source || selected.id}:${doc.commit || documentCommit || selected.commit || version}`}><Suspense fallback={<p className="document-read-status" role="status">正在准备说明显示…</p>}><MarkdownRenderer components={{
-                a: ({ href, children }) => <a href={href || '#'} onClick={event => { event.preventDefault(); if (!href) return; if (/^https?:\/\//i.test(href)) { void external(href); return; } if (href.startsWith('#')) { if (paneRoot.current) scrollToPaneAnchor(paneRoot.current, decodeURIComponent(href.slice(1))); return; } try { const path = resolveDocPath(doc.documentPath || `${selected.remotePath || ''}/README.md`, href); if (/\.(md|markdown)$/i.test(path)) { setDocumentPath(path); setDocumentCommit(doc.commit || documentCommit); } else if (doc.source && doc.source !== '本地运行文件') void external(`https://github.com/${doc.source}/blob/${encodeURIComponent(doc.commit || documentCommit || (version === 'installed' ? selected.installedCommit || selected.commit || 'HEAD' : selected.commit || 'HEAD'))}/${path.split('/').map(encodeURIComponent).join('/')}`); else notify('info', '请在文件页或外部编辑器中打开该文件。'); } catch (error) { notify('error', errText(error)); } }}>{children}<ArrowUpRight size={11} className="inline-link-icon" /></a>,
-                img: ({ src, alt }) => <AuthImage src={src} alt={alt} skill={selected} version={version} documentPath={doc.documentPath || `${selected.remotePath || ''}/README.md`} remoteCommit={doc.commit || documentCommit} localOrigin={documentLocal} />,
-                pre: ({ children }) => <CodeBlock onCopy={text => void copy(text)}>{children}</CodeBlock>,
-                ...markdownHeadings,
-              }}>{doc.markdown}</MarkdownRenderer></Suspense></article></> : null}</>}
+              {docBusy ? <Empty icon={<LoaderCircle className="spin" size={25} />} title="正在读取说明" /> : docError && !doc ? <Empty icon={<BookOpen size={26} />} title="暂时无法读取说明"><p className="break-text">{docError}</p>{!selected.sourceId && <p>本地文件仍可在“文件”中查看；关联 GitHub 后可读取远端完整说明。</p>}{selected.sourceId && version === 'installed' && <Button onClick={() => { setVersion('latest'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}><BookOpen size={14} />切换到最新说明</Button>}</Empty> : doc ? <><div className="document-caption"><span>{doc.documentPath || doc.source || 'Skill 文档'}{(doc.commit || documentCommit) && ` · ${(doc.commit || documentCommit)!.slice(0, 12)}`}</span><span>{doc.private && <LockKeyhole size={12} />} {dateText(doc.checkedAt)}</span></div><article className="markdown" data-outline-document={`${doc.documentPath || doc.source || selected.id}:${doc.commit || documentCommit || selected.commit || version}`}><Suspense fallback={<p className="document-read-status" role="status">正在准备说明显示…</p>}><DocumentAssetReadContext.Provider value={`${docKey}:${documentAssetRefresh}`}><MarkdownRenderer components={documentComponents}>{doc.markdown}</MarkdownRenderer></DocumentAssetReadContext.Provider></Suspense></article></> : null}</>}
               {tab === 'files' && <>
                 <div data-outline-key="inventory" data-outline-label="文件清单" data-outline-level="1" className="section-caption file-inventory-toolbar"><span>{files ? `本地 ${files.files.filter(file => localFile(file, selected)).length} 项${files.remoteStatus === 'ok' ? ` · GitHub ${files.files.filter(file => remoteFile(file, selected)).length} 项 · 远端独有 ${files.files.filter(file => !localFile(file, selected) && remoteFile(file, selected)).length} 项` : selected.sourceId ? ' · GitHub 待读取' : ''}` : '正在读取文件范围'}</span><Button variant="ghost" aria-label="刷新文件清单" disabled={busy || fileBusy} onClick={() => refreshInventory(selected.id)}><RefreshCw size={14} />刷新</Button>{selected.localPath && selected.sourceId && <Button variant="ghost" disabled={busy || selected.readOnly} onClick={() => void selectOperation(selected, 'push')}><Upload size={14} />上传本地修改</Button>}</div>
                 {fileError && <div className="inline-error"><CircleAlert size={15} />{fileError}</div>}

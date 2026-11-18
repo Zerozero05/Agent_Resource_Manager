@@ -1,7 +1,8 @@
+import { memo } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type Options } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-// Loaded only when a document is displayed. Callers keep their existing renderers and state.
-export default function MarkdownRenderer(props: Omit<Options, 'remarkPlugins' | 'urlTransform'>) {
+// Reuse the rendered document while its content and custom renderers stay the same.
+export default memo(function MarkdownRenderer(props: Omit<Options, 'remarkPlugins' | 'urlTransform'>) {
   return <ReactMarkdown {...props} remarkPlugins={[remarkGfm]} urlTransform={defaultUrlTransform} />;
-}
+});

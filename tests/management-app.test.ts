@@ -733,6 +733,40 @@ test('standalone Skill documentation defers export selection until needed and ke
   assert.equal(restored.calls.filter(call => call.action === 'workspace_get_export_selection').length, 1, 'restoring an active draft in the description tab resumes its lease');
 });
 
+test('unchanged Skill documentation keeps focused links, images and code across workspace renders', async () => {
+  let assetReads = 0;
+  const state = { ...snapshot(), readGeneration: 1 };
+  const f = await fixture({ state, detailSkillId: 'alpha', nativeRead: (action, request) => {
+    if (action === 'get_doc_asset') return { dataUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=#' + ++assetReads };
+    assert.equal(action, 'get_document');
+    if ((request as { path?: string }).path === 'notes.md') {
+      return { markdown: '相对文档内容', documentPath: 'notes.md', source: '本地运行文件' };
+    }
+    return { markdown: '[相对文档](notes.md)\n\n![本地图片](chart.png)\n\n```txt\nsample\n```', documentPath: 'SKILL.md', source: '本地运行文件' };
+  } });
+  const pane = f.pane();
+  for (let attempt = 0; attempt < 30 && !pane.querySelector('article.markdown img'); attempt++) {
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+  }
+  const link = pane.querySelector<HTMLAnchorElement>('article.markdown a[href="notes.md"]');
+  const image = pane.querySelector('article.markdown img');
+  const copy = pane.querySelector('article.markdown button[aria-label="复制代码"]');
+  assert(link && image && copy);
+  link.focus();
+  await f.updatePaneState({ focusRevision: 1, section: 'docs' });
+  assert(pane.querySelector('article.markdown a[href="notes.md"]') === link);
+  assert(document.activeElement === link);
+  assert(pane.querySelector('article.markdown img') === image);
+  assert(pane.querySelector('article.markdown button[aria-label="复制代码"]') === copy);
+  assert.equal(f.calls.filter(call => call.action === 'get_doc_asset').length, 1);
+  await click(pane.querySelector('button[aria-label="刷新说明"]')!);
+  assert.equal(assetReads, 2);
+  assert.match(pane.querySelector('article.markdown img')?.getAttribute('src') || '', /#2$/);
+  assert(pane.querySelector('article.markdown a[href="notes.md"]') === link);
+  await click(link);
+  assert.match(pane.querySelector('article.markdown')?.textContent || '', /相对文档内容/);
+});
+
 test('historical document relative assets open from the returned document source rather than the rebound Skill repository', async () => {
   const f = await fixture({ state: sourceSnapshot(), draft: { libraryMode: 'details', selectedId: 'alpha', tab: 'docs', version: 'installed' }, nativeRead: action => {
     assert.equal(action, 'get_document'); return { markdown: '[历史图片](images/example.png)', documentPath: 'skills/alpha/README.md', source: 'original/skills', commit: 'installed-sha', checkedAt: '' };

@@ -116,6 +116,7 @@ export function queryLibrary<T extends LibraryItem>(items: readonly T[], options
     if (source === 'local' && !skill.localPath || source === 'github' && !skill.sourceId || source === 'linked' && !(skill.localPath && skill.sourceId)) return false;
     if (status === 'attention' && !needsAttention(skill)) return false;
     if (status !== 'all' && status !== 'attention' && (isStatusGroup(status) ? displayStatus(skill).group !== status : displayStatus(skill).key !== status)) return false;
+    if (!terms.length) return true;
     const searchable = normalize([skill.name, skill.displayName, skill.alias, skill.notes, skill.description, skill.repo, skill.localPath, skill.remotePath, skill.readOnly ? '只读' : ''].filter(Boolean).join(' '));
     return terms.every(term => searchable.includes(term));
   });
