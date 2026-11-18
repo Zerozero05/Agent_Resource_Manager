@@ -19,6 +19,8 @@
 .desktop-workspace input[type=checkbox]:indeterminate::after{width:.5em;height:0;border-left:0;border-bottom:2px solid currentColor;transform:none;opacity:1}
 .desktop-workspace input[type=checkbox]:disabled{border-style:dashed;background:var(--disabled-bg);border-color:var(--control-line);color:var(--disabled-text);cursor:not-allowed}
 .desktop-workspace :is(button,a,input,select,textarea,summary):focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+/* The enclosing label draws the focus ring for these search fields. */
+.desktop-workspace :is(.unified-search,.resource-search)>input:focus{outline:none;box-shadow:none}
 .desktop-workspace :is(.external-file-inclusion,.export-resource-state,.external-export-choice>span){color:var(--text-secondary)}
 .desktop-workspace .external-sources>b{font-weight:550;background:var(--surface);border-color:var(--control-line);color:var(--text-secondary)}
 .desktop-workspace .external-file-inclusion:not(.is-excluded),.desktop-workspace .export-resource.is-included>.export-resource-main>.export-resource-state{color:var(--accent);border-color:var(--accent)}
