@@ -1,14 +1,14 @@
-name: Verify Windows installer lifecycle
+name: Verify Windows installation wizard
 on: create
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: verify-installer-${{ github.ref }}
+  group: verify-installation-wizard-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   package:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/installer-validation-316c0ba7-r2' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/installer-wizard-316c0ba7' }}
     runs-on: windows-latest
     env:
       # The validation ref consumes the existing finalized candidate.
@@ -37,44 +37,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-release.ps1 -CandidateRunId $env:CANDIDATE_RUN_ID -CandidateArtifact $env:CANDIDATE_ARTIFACT -ExpectedExecutableSha256 $env:EXPECTED_EXECUTABLE_SHA256
-      - name: Verify the installed upgrade on a hosted Windows runner
+      - name: Complete the graphical installer in the hosted Windows session
         env:
-          GH_TOKEN: ${{ github.token }}
           VERIFIED_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows') {
-            throw 'The installer lifecycle must run in a fresh GitHub-hosted Windows VM'
-          }
-          $legacyName = 'Skill_Manager_v0.2.11_windows_x64_setup.exe'
-          $legacy = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-legacy-setup')
-          try {
-            gh release download v0.2.11 --repo $env:GITHUB_REPOSITORY --pattern $legacyName --dir $legacy.FullName
-            if ($LASTEXITCODE -ne 0) { throw 'The published v0.2.11 baseline installer could not be downloaded' }
-          } finally {
-            $env:GH_TOKEN = $null
-          }
           $name = "Agent_Resource_Manager_v$($env:VERIFIED_VERSION)_windows_x64_setup.exe"
           $assetDirectory = Join-Path $env:GITHUB_WORKSPACE 'outputs/release-assets'
           $setupLine = @(Get-Content -LiteralPath (Join-Path $assetDirectory 'SHA256SUMS.txt') |
             Where-Object { $_ -cmatch ('^[0-9a-f]{64}  ' + [regex]::Escape($name) + '$') })
           if ($setupLine.Count -ne 1) { throw 'Expected exactly one packaged setup checksum' }
-          $parameters = @{
-            OldSetup = (Join-Path $legacy.FullName $legacyName)
-            OldSetupSha256 = 'd1a439fe476d05736c21bb6ee8c59e0ae0bbdaae54943106b5ec3a0b5dbf76aa'
-            OldExecutableSha256 = '1ca90747eca2ac3229762928d05036724229e910463c28be40925e9b2fb2092f'
-            OldVersion = '0.2.11'
-            CurrentSetup = (Join-Path $assetDirectory $name)
-            CurrentSetupSha256 = $setupLine[0].Substring(0, 64)
-            CurrentExecutableSha256 = $env:EXPECTED_EXECUTABLE_SHA256
-            CurrentVersion = $env:VERIFIED_VERSION
-            TestRoot = (Join-Path $env:RUNNER_TEMP 'arm-installed-upgrade')
-          }
-          ./scripts/verify-installed-upgrade.ps1 @parameters
-      - name: Upload installer lifecycle verification
+          ./scripts/verify-installed-wizard.ps1 -Setup (Join-Path $assetDirectory $name) -SetupSha256 ($setupLine[0].Substring(0, 64)) -ExecutableSha256 $env:EXPECTED_EXECUTABLE_SHA256 -Version $env:VERIFIED_VERSION
+      - name: Upload graphical installation verification
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_installed_upgrade_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arm-installed-upgrade/installed-upgrade-report.json
+          name: Agent_Resource_Manager_installed_wizard_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-installed-wizard/wizard-report.json
           if-no-files-found: warn
           retention-days: 14
