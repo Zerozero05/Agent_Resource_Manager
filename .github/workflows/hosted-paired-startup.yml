@@ -1,0 +1,66 @@
+name: Compare strict Windows GUI startup on the same hosted runner
+on: create
+permissions:
+  contents: read
+  actions: read
+jobs:
+  paired-startup:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-startup-paired-3f703b1' }}
+    runs-on: windows-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify and retrieve the two exact candidates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
+            throw 'This comparison requires an interactive hosted Windows VM.'
+          }
+          $cases = @(
+            @{ name='reference'; run=44369125710; source='371eb5dea6d902dbc7ef75666f366570e05970c0'; artifact=14459231544; sha='f33c6722446e8069414fb04c85c411e8a3c5c06999e93f3ebadcf27d42b779e9' }
+            @{ name='candidate'; run=44380557746; source='3f703b18e92bd765678027404741f7844a9bd94e'; artifact=14465615399; sha='f8e240df74644942c929cc8d0ad699e1369c7a51cedab662620e8152c4ab41af' }
+          )
+          foreach ($case in $cases) {
+            $endpoint = "repos/$env:GITHUB_REPOSITORY/actions/runs/$($case.run)"
+            $run = gh api $endpoint | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $case.source -or $run.run_attempt -ne 1 -or
+                $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push' -or
+                $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
+            $artifact = "Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_$($case.source)"
+            $artifacts = gh api "$endpoint/artifacts" | ConvertFrom-Json
+            $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $artifact -and -not $_.expired })
+            if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $case.artifact) { throw 'Incorrect Windows candidate artifact.' }
+            $target = Join-Path $env:RUNNER_TEMP "arm-startup-$($case.name)"
+            gh run download $case.run --repo $env:GITHUB_REPOSITORY --name $artifact --dir $target
+            if ($LASTEXITCODE -ne 0) { throw 'The pinned Windows artifact could not be read.' }
+            $info = Get-Content -LiteralPath (Join-Path $target 'BUILD_INFO.json') -Raw | ConvertFrom-Json
+            $digest = (Get-FileHash -LiteralPath (Join-Path $target 'agent-resource-manager.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($digest -cne $case.sha -or $info.executableSha256 -cne $digest -or
+                $info.sourceCommit -cne $case.source -or $info.workflowRunId -ne $case.run -or
+                $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
+                $info.version -cne '0.3.0-dev.1') { throw 'Build information does not bind to the pinned executable.' }
+          }
+      - name: Run the strictly matched native startup observations
+        timeout-minutes: 4
+        run: |
+          $reference = Join-Path $env:RUNNER_TEMP 'arm-startup-reference/agent-resource-manager.exe'
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-startup-candidate/agent-resource-manager.exe'
+          ./scripts/verify-hosted-paired-startup.ps1 -Reference $reference -Candidate $candidate
+      - name: Preserve only the synthetic diagnostic receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Agent_Resource_Manager_paired_startup_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-paired-startup.json
+          if-no-files-found: warn
+          retention-days: 14
