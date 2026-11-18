@@ -427,6 +427,70 @@ async function stabilityRun(app) {
   return { warmupCycles: policy.warmupCycles, idleCalibration: idle, bounds, samples, verdict: stabilityVerdict(samples, bounds, policy.warmupCycles) };
 }
 
+async function observeFinalStabilityRoles(app, sample) {
+  const before = new Date().toISOString();
+  const processes = sample.ownedProcesses.map(({ pid, creationFileTime }) => ({ pid, creationFileTime }));
+  const spec = Buffer.from(JSON.stringify({
+    pid: app.identity.pid, creationFileTime: app.identity.creationFileTime, executable: app.info.path, processes,
+  })).toString('base64');
+  const code = String.raw`
+$ErrorActionPreference='Stop'
+function Emit($value) { [Console]::WriteLine(($value | ConvertTo-Json -Depth 6 -Compress)) }
+$probe=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${spec}')) | ConvertFrom-Json
+function Is-OriginalManager {
+  $owner=Get-Process -Id $probe.pid -ErrorAction SilentlyContinue
+  return ($owner -and $owner.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() -ceq $probe.creationFileTime -and
+    [string]::Equals($owner.MainModule.FileName,$probe.executable,[StringComparison]::OrdinalIgnoreCase))
+}
+if (-not (Is-OriginalManager)) { Emit @{status='manager-not-running-or-changed';roles=@()}; return }
+$expected=@{}
+foreach ($item in $probe.processes) { $expected[[int]$item.pid]=[string]$item.creationFileTime }
+$filter=($expected.Keys | ForEach-Object { 'ProcessId='+$_ }) -join ' OR '
+$rows=@(Get-CimInstance Win32_Process -Filter $filter -Property ProcessId,ParentProcessId,CreationDate,Name,ExecutablePath,CommandLine)
+$roles=@(foreach ($row in $rows) {
+  $key=[int]$row.ProcessId
+  if (-not $expected.ContainsKey($key) -or -not $row.CreationDate -or -not $row.ExecutablePath) { continue }
+  $process=Get-Process -Id $key -ErrorAction SilentlyContinue
+  if (-not $process) { continue }
+  try {
+    $created=$process.StartTime.ToUniversalTime().ToFileTimeUtc()
+    $cimCreated=$row.CreationDate.ToUniversalTime().ToFileTimeUtc()
+    if ($created.ToString() -cne $expected[$key] -or [Math]::Abs($created-$cimCreated) -ge 10000 -or
+      -not [string]::Equals($process.MainModule.FileName,$row.ExecutablePath,[StringComparison]::OrdinalIgnoreCase)) { continue }
+    $role='unknown'
+    $version=$null
+    if ($key -eq $probe.pid) { $role='manager' }
+    elseif ($row.Name -ieq 'msedgewebview2.exe') {
+      $version=$process.MainModule.FileVersionInfo.ProductVersion
+      if ($row.CommandLine -match '(?:^|\s)"?--type=([a-z-]+)"?(?:\s|$)') { $role='webview-'+$Matches[1] }
+      elseif ($row.CommandLine -and $row.CommandLine -notmatch '(?:^|\s)"?--type\b') { $role='webview-browser' }
+    }
+    @{pid=$key;creationFileTime=$created.ToString();parentPid=[int]$row.ParentProcessId;role=$role;runtimeProductVersion=$version}
+  } catch { continue }
+})
+if (-not (Is-OriginalManager)) { Emit @{status='manager-exited-during-observation';roles=@()}; return }
+Emit @{status='observed';roles=$roles}
+`;
+  const observation = { phase: 'after-final-sample-before-normal-exit', finalSampleObservedAt: sample.observedAt, startedAt: before };
+  try {
+    const [{ execFile }, { promisify }] = await Promise.all([import('node:child_process'), import('node:util')]);
+    const { stdout } = await promisify(execFile)('pwsh.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(code, 'utf16le').toString('base64')], { windowsHide: true, timeout: 10000, maxBuffer: 64 * 1024 });
+    const result = JSON.parse(stdout.trim());
+    if (!Array.isArray(result?.roles) || result.roles.some(row => !processes.some(process =>
+      process.pid === row.pid && process.creationFileTime === row.creationFileTime))) {
+      throw new Error('Role observation does not match the final sample identities.');
+    }
+    Object.assign(observation, result);
+  } catch (error) {
+    Object.assign(observation, { status: 'unavailable', roles: [], errorCode: error.code || error.name });
+  }
+  observation.unmatched = processes.filter(process => !observation.roles.some(row =>
+    row.pid === process.pid && row.creationFileTime === process.creationFileTime));
+  observation.finishedAt = new Date().toISOString();
+  return observation;
+}
+
 function exactOfficialDownload(specification) {
   return Object.entries(officialDownload).every(([key, value]) => specification?.[key] === value);
 }
@@ -612,6 +676,9 @@ try {
           else await sampledLoads(app, loadKind, index => sampledStage(app, mixed, stageSeeds[index]), stageSeeds.length);
         }
         if (['stability', 'all'].includes(suite)) report.stability = await stabilityRun(app);
+        if (suite === 'stability' && process.env.RUNNER_ENVIRONMENT === 'github-hosted') {
+          report.finalStabilityRoles = await observeFinalStabilityRoles(app, report.stability.samples.at(-1));
+        }
       } finally { await close(app); }
     }
     if (suite === 'download-resume') await downloadRestartContinue(report.candidate, mixed);
