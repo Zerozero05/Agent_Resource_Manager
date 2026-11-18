@@ -160,6 +160,26 @@ function Write-UpgradeReport {
     [IO.File]::WriteAllText($reportPath, ($report | ConvertTo-Json -Depth 12) + "`n", $utf8)
 }
 
+function Wait-UpgradeUninstall([string[]]$ProgramFiles, [int]$TimeoutMilliseconds = 20000) {
+    # NSIS can exit its launcher early and delete both executables before
+    # the detached uninstaller finishes removing shortcuts and registry keys.
+    $elapsed = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $filesRemain = @($ProgramFiles | Where-Object { [IO.File]::Exists($_) }).Count -gt 0
+        $registrations = @(Get-UpgradeRegistrations)
+        $uninstallRegistrationRemains = @($registrations | Where-Object kind -eq 'uninstall').Count -gt 0
+        if (-not $filesRemain -and -not $uninstallRegistrationRemains -and -not @(Get-UpgradeShortcuts).Count) {
+            return $registrations
+        }
+        $timeRemaining = $TimeoutMilliseconds - $elapsed.ElapsedMilliseconds
+        if ($timeRemaining -le 0) { break }
+        Start-Sleep -Milliseconds ([Math]::Min(200, $timeRemaining))
+    } while ($true)
+    if ($filesRemain) { throw 'Ordinary uninstall left an installed executable or uninstaller in the test target.' }
+    if ($uninstallRegistrationRemains) { throw 'Ordinary uninstall did not remove its uninstall registration.' }
+    throw 'Ordinary uninstall left a related shortcut.'
+}
+
 function Invoke-UpgradeSetup([string]$Label, [string]$Program, [string]$Arguments, [string]$ExpectedHash) {
     Assert-UpgradeIdle
     $null = Assert-UpgradePlainPath $TestRoot
@@ -294,15 +314,15 @@ try {
     $uninstaller = Assert-UpgradePlainPath (Join-Path $app 'uninstall.exe')
     $uninstallerHash = Get-UpgradeHash $uninstaller
     Invoke-UpgradeSetup 'uninstall-current' $uninstaller '/S' $uninstallerHash
-    $deadline = [DateTime]::UtcNow.AddSeconds(20)
-    while ([IO.File]::Exists($uninstaller) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
-    if ([IO.File]::Exists($currentProgram) -or [IO.File]::Exists($oldProgram) -or [IO.File]::Exists($uninstaller)) { throw 'Ordinary uninstall left an installed executable or uninstaller in the test target.' }
-    $report.registrationsAfter = @(Get-UpgradeRegistrations)
-    if (@($report.registrationsAfter | Where-Object kind -eq 'uninstall').Count) { throw 'Ordinary uninstall did not remove its uninstall registration.' }
+    try {
+        $report.registrationsAfter = @(Wait-UpgradeUninstall @($currentProgram, $oldProgram, $uninstaller))
+    } catch {
+        $report.registrationsAfter = @(Get-UpgradeRegistrations)
+        throw
+    }
     foreach ($row in $report.registrationsAfter) {
         if ($row.kind -ne 'manufacturer' -or $row.hive -ne 'CurrentUser' -or $row.key -cne 'Skill Manager' -or $row.location.Trim('"', '\') -ine $app) { throw 'Uninstall left an unexpected related registration.' }
     }
-    if (@(Get-UpgradeShortcuts).Count) { throw 'Ordinary uninstall left a related shortcut.' }
     foreach ($file in $sentinels) {
         $null = Assert-UpgradePlainPath $file.path
         if ((Get-UpgradeHash $file.path) -cne $file.sha256) { throw 'Ordinary uninstall changed synthetic data or an external resource.' }
