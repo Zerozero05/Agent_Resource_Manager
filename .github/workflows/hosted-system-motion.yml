@@ -1,0 +1,60 @@
+name: Verify the real Windows reduced-motion preference
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  CANDIDATE_RUN_ID: '44372944922'
+  CANDIDATE_SOURCE: ee1ed4a29edf55b1e0cc902d022fb38deaec40aa
+  CANDIDATE_ARTIFACT_ID: '14461785773'
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_ee1ed4a29edf55b1e0cc902d022fb38deaec40aa
+  CANDIDATE_SHA256: 37ca48e0e8ff94d5eb2afce9057ea585822182d870bc3805c2ae4f850e113c2e
+jobs:
+  motion:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-reduced-motion-ee1ed4a' }}
+    runs-on: windows-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify the exact candidate and its hosted build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows') { throw 'This test is hosted-only.' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
+              $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push' -or
+              $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+          $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID) { throw 'The exact Windows candidate artifact is missing.' }
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-motion-candidate'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }
+          $info = Get-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.json') -Raw | ConvertFrom-Json
+          $digest = (Get-FileHash -LiteralPath (Join-Path $candidate 'agent-resource-manager.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:CANDIDATE_SHA256 -or $info.executableSha256 -cne $digest -or
+              $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or
+              $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
+              $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the pinned executable.' }
+      - name: Read the app across the real Windows preference change
+        timeout-minutes: 5
+        run: |
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-motion-candidate/agent-resource-manager.exe'
+          ./scripts/verify-hosted-system-motion.ps1 -Candidate $candidate -ExpectedSha256 $env:CANDIDATE_SHA256
+      - name: Upload only the synthetic motion audit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        with:
+          name: Agent_Resource_Manager_native_system_motion_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-system-motion-evidence/system-motion.json
+          if-no-files-found: warn
+          retention-days: 14
