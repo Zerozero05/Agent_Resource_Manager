@@ -191,7 +191,8 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
     $session.InvokeUnique('外观','设置分类')
     Wait-VisibleControl '设置分类：外观' 'ControlType.Button'
     $report.phase = 'settings-motion-control'
-    Wait-VisibleControl '动效' 'ControlType.ComboBox'
+    # SelectCombo resolves the unique owned control and presents it via its native scroll pattern if needed.
+    $report.motionControlBeforeSelection = @($session.InspectNamed('动效',$null) | Select-Object type,enabled,offscreen)
     $uia = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$session.Handle)
     function Find-Exact($root,$name) {
         $match = $root.FindAll([Windows.Automation.TreeScope]::Descendants,
@@ -330,5 +331,5 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
     Write-Report
 }
 [ordered]@{status=$report.status; phase=$report.phase; systemRestored=$report.systemRestored; closedNormally=$report.closedNormally;
-    candidateSha256=$ExpectedSha256; error=$report.error} | ConvertTo-Json -Compress
+    candidateSha256=$ExpectedSha256; motionControlBeforeSelection=$report.motionControlBeforeSelection; error=$report.error} | ConvertTo-Json -Compress
 if ($report.status -cne 'observed-visible-system-motion') { exit 1 }
