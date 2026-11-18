@@ -625,11 +625,12 @@ fn stage_with(
         return Err("已有候选版本，原候选保留".into());
     }
     new_destination(m, &prepared.destination, &record)?;
+    let selected: BTreeSet<&str> = prepared.selected.iter().map(String::as_str).collect();
     let selected_bytes: u64 = prepared
         .inventory
         .files
         .iter()
-        .filter(|f| prepared.selected.contains(&f.path) || f.license)
+        .filter(|f| selected.contains(f.path.as_str()) || f.license)
         .map(|f| f.bytes)
         .sum();
     let (_, space) = crate::storage::destination_space(

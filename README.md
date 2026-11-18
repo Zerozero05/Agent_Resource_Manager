@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 说明页与更新准备（开发候选） | 2026-11-19 | 1、打开独立说明页时按需读取导出选择，已开始的选择可继续使用。[详情](CHANGELOG.md#document-export-and-update-preparation-20261119)<br>2、计算候选更新所需空间时，复用已选文件的成员索引。[详情](CHANGELOG.md#document-export-and-update-preparation-20261119) |
 | Skill 说明打开速度（开发候选） | 2026-11-18 | 1、读取说明时减少重复状态复制和无关预览处理。[详情](CHANGELOG.md#skill-document-opening-20261118)<br>2、技能排序和快捷入口按需计算。[详情](CHANGELOG.md#skill-document-opening-20261118) |
 | 资源搜索焦点（开发候选） | 2026-11-18 | 1、全部资源与工具搜索框聚焦时只显示一圈清晰轮廓。[详情](CHANGELOG.md#resource-search-focus-20261118) |
 | 云端安装验收（开发流程） | 2026-11-18 | 1、可在 GitHub 托管的 Windows 虚拟机验收 v0.2.11 到指定候选的静默安装、升级及卸载，仅上传验收报告。[详情](CHANGELOG.md#hosted-installer-validation-20261118)<br>2、卸载验收在原有时限内等待程序文件、登记和快捷方式全部移除。[详情](CHANGELOG.md#hosted-installer-validation-20261118)<br>3、增加云端图形安装向导验收脚本，核对默认目录、可选路径、安装登记和快捷方式。[详情](CHANGELOG.md#hosted-installer-validation-20261118)<br>4、可核对无参数首次启动、实际数据和缓存路径，以及从界面完全退出。[详情](CHANGELOG.md#hosted-installer-validation-20261118) |

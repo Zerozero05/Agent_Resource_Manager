@@ -74,7 +74,7 @@ const snapshot = () => freeze({ stateRevision: 1, managementRevision: 1, skills:
   { id: 'beta', name: 'beta-original', description: '其他说明', localPath: 'D:/synthetic/beta' },
 ] as LibraryItem[], sources: [], connections: [], settings: { libraryMode: 'list', librarySort: 'name', libraryPageSize: 20 } });
 
-async function fixture(options: { panes?: number; operation?: boolean; active?: boolean; visible?: boolean; sidebarHost?: HTMLElement; actualTasks?: boolean; state?: ReturnType<typeof snapshot>; draft?: Record<string, unknown>; load?: () => Promise<ReturnType<typeof metadata>>; read?: (action: string, args: unknown) => unknown; nativeRead?: (action: string, args: unknown) => unknown } = {}) {
+async function fixture(options: { panes?: number; operation?: boolean; detailSkillId?: string; active?: boolean; visible?: boolean; sidebarHost?: HTMLElement; actualTasks?: boolean; state?: ReturnType<typeof snapshot>; draft?: Record<string, unknown>; load?: () => Promise<ReturnType<typeof metadata>>; read?: (action: string, args: unknown) => unknown; nativeRead?: (action: string, args: unknown) => unknown } = {}) {
   const query = `?managementAppFixture=${++fixtureId}`;
   const { default: App } = await import(new URL('../src/App.tsx' + query, import.meta.url).href);
   const { WorkspaceSessionContext } = await import(new URL('../src/session.tsx' + query, import.meta.url).href);
@@ -98,7 +98,7 @@ async function fixture(options: { panes?: number; operation?: boolean; active?: 
     listen: (name: string, listener: (event: { payload: unknown }) => void) => { const handlers = listeners.get(name) || new Set(); handlers.add(listener); listeners.set(name, handlers); return () => { handlers.delete(listener); }; },
   } });
   let sessions = Array.from({ length: options.panes || 1 }, (_, index) => ({
-    pane: { id: `home-${index}`, kind: options.operation ? 'operation' : 'home', state: { view: 'skills' } }, active: options.active ?? index === 0, visible: options.visible ?? true, sidebarHost: options.sidebarHost, owned: true, closing: false,
+    pane: { id: `home-${index}`, kind: options.operation ? 'operation' : options.detailSkillId ? 'detail' : 'home', skillId: options.detailSkillId, state: { view: 'skills' } }, active: options.active ?? index === 0, visible: options.visible ?? true, sidebarHost: options.sidebarHost, owned: true, closing: false,
     isTransferring: () => false, initialDraft: options.draft || {}, managerSnapshot: state,
     tasks: { tasks: [], run, inspect: async () => undefined, cancel: async () => undefined, clear: async () => undefined },
     acceptSnapshot: (value: unknown) => { accepted.push(value); },
@@ -690,6 +690,47 @@ test('actual Skill source health uses the selected identity and discards results
   await act(async () => pending.resolve({ skillId: 'alpha', source: currentSkillSource, health: { status: 'reachable', message: '迟到的旧来源', checkedAt: '' } }));
   assert.equal(f.pane().querySelector('[aria-label="来源健康与安装记录"] [role="status"]'), null); assert.equal(reads, 2);
   assert(f.pane().querySelector('[aria-label="原安装来源"]')!.textContent!.includes('original/skills'));
+});
+
+test('standalone Skill documentation defers export selection until needed and keeps it across tabs and handoff', async () => {
+  const draft = { id: 'export-alpha', skillId: 'alpha', revision: 2, selectedIds: ['file:guide.md'], version: 4 };
+  const nativeRead = (action: string) => {
+    if (action === 'get_document') return { markdown: '# 本地说明', documentPath: 'SKILL.md', source: '本地运行文件' };
+    if (action === 'workspace_get_export_selection') return { draft, leaseId: 'lease-alpha' };
+    if (action === 'workspace_read_export_selection') return { draft, version: draft.version, leaseValid: true };
+    if (action === 'workspace_release_export_selection') return { released: true };
+    if (action === 'get_files') return { files: [], runtimeConfirmed: true };
+    if (action === 'get_export_plan') return { id: 'plan-alpha', skillId: 'alpha', resources: [], manifest: [], canExport: true, issues: [],
+      summary: { required: 0, optionalPackageSelected: 1, optionalPackageTotal: 1, optionalExternalSelected: 0, optionalExternalTotal: 0, generated: 0, total: 1, remoteCount: 0, bytes: 0 } };
+    throw new Error(`Unexpected request: ${action}`);
+  };
+  const f = await fixture({ detailSkillId: 'alpha', nativeRead });
+  const leaseCalls = () => f.calls.filter(call => call.action.startsWith('workspace_') && call.action.endsWith('_export_selection'));
+  assert.equal(f.calls.filter(call => call.action === 'get_document').length, 1);
+  assert.deepEqual(leaseCalls(), []);
+  assert(await f.bridges.get('home-0')!.flush());
+  assert.deepEqual(leaseCalls(), [], 'a read-only detail pane has no export lease to flush');
+
+  await click(button(f.pane(), '导出'));
+  assert.equal(f.opened.length, 1);
+  const exportModal = f.opened[0].modal as { kind: string; skill: { id: string } };
+  assert.equal(exportModal.kind, 'export');
+  assert.equal(exportModal.skill.id, 'alpha');
+  assert.deepEqual(leaseCalls(), [], 'the separate export page owns its lazy entry');
+
+  await click(button(f.pane(), '文件'));
+  assert.equal(leaseCalls().filter(call => call.action === 'workspace_get_export_selection').length, 1);
+  assert(f.calls.some(call => call.action === 'get_export_plan' && (call.args as { selectedIds: string[] }).selectedIds.includes('file:guide.md')));
+  await click(button(f.pane(), '说明'));
+  assert(!leaseCalls().some(call => call.action === 'workspace_release_export_selection'));
+  const handoff = f.bridges.get('home-0')!.capture();
+  assert.equal(handoff.exportLeaseSkillId, 'alpha');
+  await click(button(f.pane(), '文件'));
+  assert.equal(leaseCalls().filter(call => call.action === 'workspace_get_export_selection').length, 1);
+
+  await f.dispose();
+  const restored = await fixture({ detailSkillId: 'alpha', draft: handoff, nativeRead });
+  assert.equal(restored.calls.filter(call => call.action === 'workspace_get_export_selection').length, 1, 'restoring an active draft in the description tab resumes its lease');
 });
 
 test('historical document relative assets open from the returned document source rather than the rebound Skill repository', async () => {
