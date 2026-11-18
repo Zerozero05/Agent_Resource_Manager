@@ -53,7 +53,7 @@ if ((Get-Item -LiteralPath $program).VersionInfo.ProductVersion -ne $version) { 
 
 # Documentation and this packaging layer may evolve after the tested application.
 # All actual application inputs must still match the verified build commit.
-$allowed = @('README.md', 'CHANGELOG.md', 'docs/USER_GUIDE.md', "docs/RELEASE_v$version.md", '.github/workflows/package-release.yml', 'scripts/prepare-release.ps1')
+$allowed = @('README.md', 'CHANGELOG.md', 'docs/USER_GUIDE.md', "docs/RELEASE_v$version.md", '.github/workflows/package-release.yml', 'scripts/prepare-release.ps1', 'scripts/verify-installed-upgrade.ps1', 'tests/installed-upgrade.test.ps1')
 $sourceComparison = & "$PSScriptRoot/verify-release-source.ps1" -RepositoryPath $projectRoot -CandidateCommit $info.sourceCommit -ReleaseCommit $env:GITHUB_SHA -AllowedPaths $allowed
 Write-Utf8 (Join-Path $verification 'source-comparison.json') ($sourceComparison | ConvertTo-Json -Depth 4)
 if ((Get-Sha256 (Join-Path $projectRoot 'docs/THIRD_PARTY_NOTICES.txt')) -ne (Get-Sha256 (Join-Path $candidate 'THIRD_PARTY_NOTICES.txt'))) { throw 'Candidate license notices differ from source' }

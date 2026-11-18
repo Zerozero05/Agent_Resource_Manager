@@ -194,7 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
-| 云端安装验收（开发流程） | 2026-11-18 | 1、可在 GitHub 托管的 Windows 虚拟机验收 v0.2.11 到指定候选的静默安装、升级及卸载，仅上传验收报告。[详情](CHANGELOG.md#hosted-installer-validation-20261118) |
+| 云端安装验收（开发流程） | 2026-11-18 | 1、可在 GitHub 托管的 Windows 虚拟机验收 v0.2.11 到指定候选的静默安装、升级及卸载，仅上传验收报告。[详情](CHANGELOG.md#hosted-installer-validation-20261118)<br>2、卸载验收在原有时限内等待程序文件、登记和快捷方式全部移除。[详情](CHANGELOG.md#hosted-installer-validation-20261118) |
 | 验收目录与浏览器入口（开发候选） | 2026-11-18 | 1、同步搬迁后的验收脚本路径。[详情](CHANGELOG.md#renamed-qa-paths-edge-20261118)<br>2、已备好新版的隔离视觉数据，主题对比检查通过。[详情](CHANGELOG.md#renamed-qa-paths-edge-20261118)<br>3、Codex 实测 Edge 连接可读，分别记录管理器重定位状态。[详情](CHANGELOG.md#renamed-qa-paths-edge-20261118)<br>4、支持单独核对验收程序与通信程序的摘要。[详情](CHANGELOG.md#renamed-qa-paths-edge-20261118) |
 | 标签页草稿恢复（开发候选） | 2026-11-18 | 1、多个标签页恢复时，草稿读取失败后可继续重试，修复部分标签一直停在恢复中的问题。[详情](CHANGELOG.md#workspace-draft-restore-retry-20261118)<br>2、同版便携包和安装包完成离线内容核对。[详情](CHANGELOG.md#workspace-draft-restore-retry-20261118) |
 | 标签名称与负载验收（开发候选） | 2026-11-18 | 1、恢复的 Skill 标签显示当前名称而保留原页和阅读位置。[详情](CHANGELOG.md#skill-tab-title-and-mixed-load-evidence-20261118)<br>2、混合负载区分独立时延样本和快速检查，保留原时限。[详情](CHANGELOG.md#skill-tab-title-and-mixed-load-evidence-20261118)<br>3、同一新版安装包和便携包离线核对，图像及动效完成新版预检。[详情](CHANGELOG.md#skill-tab-title-and-mixed-load-evidence-20261118)<br>4、本地检查具备串行统计取样入口，原生验收仍待运行。[详情](CHANGELOG.md#skill-tab-title-and-mixed-load-evidence-20261118)<br>5、补齐下载与更新取样入口；本机已切到同一版本，Agent Reach 登记已重新定位。[详情](CHANGELOG.md#skill-tab-title-and-mixed-load-evidence-20261118)<br>6、三类负载可分段取样并离线核对。[详情](CHANGELOG.md#skill-tab-title-and-mixed-load-evidence-20261118) |

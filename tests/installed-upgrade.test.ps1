@@ -5,7 +5,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($verifier, [ref]$token
 if ($errors.Count) { throw "Installed-upgrade script does not parse: $($errors.Message -join '; ')" }
 # Only load pure helper definitions. The script body, installers, COM, registry
 # and process queries are never invoked by these background boundary checks.
-$needed = @('Assert-UpgradePlainPath', 'Test-UpgradeWithin', 'Assert-UpgradeEmptyRoot', 'Assert-UpgradeRegistration', 'Assert-UpgradeShortcuts', 'Assert-UpgradeIdle')
+$needed = @('Assert-UpgradePlainPath', 'Test-UpgradeWithin', 'Assert-UpgradeEmptyRoot', 'Assert-UpgradeRegistration', 'Assert-UpgradeShortcuts', 'Assert-UpgradeIdle', 'Wait-UpgradeUninstall')
 foreach ($name in $needed) {
     $definitions = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true))
     if ($definitions.Count -ne 1) { throw "Expected one verifier helper: $name" }
@@ -62,6 +62,28 @@ $wrong = @($after | ForEach-Object { $_.PSObject.Copy() }); $wrong[0].target = '
 Assert-Case 'wrong-shortcut-target-refused' { Assert-UpgradeShortcuts $before $wrong 'D:\test\app\agent-resource-manager.exe' } '*outside the verified executable*'
 $wrong = @($after | ForEach-Object { $_.PSObject.Copy() }); $wrong[0].arguments = '--changed'
 Assert-Case 'changed-shortcut-arguments-refused' { Assert-UpgradeShortcuts $before $wrong 'D:\test\app\agent-resource-manager.exe' } '*property changed*'
+Assert-Case 'waits-for-detached-uninstaller-registration-and-shortcuts' {
+    $progress = @{ observations = 0; waited = 0 }
+    $location = [pscustomobject]@{ kind = 'manufacturer'; location = 'D:\test\app' }
+    function Get-UpgradeRegistrations {
+        $progress.observations++
+        if ($progress.observations -eq 1) { $row }
+        $location
+    }
+    function Get-UpgradeShortcuts { if ($progress.observations -eq 2) { $before[0] } }
+    function Start-Sleep { $progress.waited++ }
+    $gone = Join-Path $PSScriptRoot ("missing-" + [Guid]::NewGuid().ToString('N') + '.exe')
+    $result = @(Wait-UpgradeUninstall @($gone) 20000)
+    if ($progress.observations -ne 3 -or $progress.waited -ne 2 -or $result.Count -ne 1 -or $result[0] -ne $location) {
+        throw 'The simulated detached uninstall did not wait for all of its observed effects.'
+    }
+}
+Assert-Case 'retained-uninstall-registration-stays-a-failure' {
+    function Get-UpgradeRegistrations { $row }
+    function Get-UpgradeShortcuts { @() }
+    $gone = Join-Path $PSScriptRoot ("missing-" + [Guid]::NewGuid().ToString('N') + '.exe')
+    Wait-UpgradeUninstall @($gone) 0
+} '*did not remove its uninstall registration*'
 # Run the actual preflight body with read-only queries replaced by synthetic
 # observations. The refusal must occur before any COM, setup or filesystem write.
 $preflight = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.TryStatementAst] -and $node.Body.Extent.Text.Contains('if ([Environment]::OSVersion.Platform') }, $true))
