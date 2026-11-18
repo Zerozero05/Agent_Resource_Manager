@@ -1,0 +1,82 @@
+name: Identify native memory process roles in a bounded diagnostic
+on: create
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-memory-roles-bbd5175' }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CANDIDATE_RUN_ID: '44323802557'
+      CANDIDATE_SOURCE: bbd51752eec3d616203ee7a0529d0d935b7cc8ba
+      CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_bbd51752eec3d616203ee7a0529d0d935b7cc8ba
+      CANDIDATE_SHA256: 54269857d8cdcd3b2d9ab52f9eb00949960abb98470e8c8a8c399e5db645c273
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Verify the isolated runner and exact executable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh isolated Windows runner on D:.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no pre-existing manager process.' }
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+          $verified = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $verified.conclusion -cne 'success' -or $verified.head_sha -cne $env:CANDIDATE_SOURCE -or
+              $verified.run_attempt -ne 1 -or $verified.path -cne '.github/workflows/check.yml') { throw 'Candidate run identity differs.' }
+          $base = Join-Path $env:RUNNER_TEMP 'arm-memory-role-candidate'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $base
+          if ($LASTEXITCODE -ne 0) { throw 'The pinned candidate archive could not be retrieved.' }
+          $exe = Join-Path $base 'agent-resource-manager.exe'
+          $source = Join-Path $base 'BUILD_INFO.json'
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:CANDIDATE_SHA256 -or
+              $info.executableSha256 -cne $env:CANDIDATE_SHA256 -or $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or
+              $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or $info.workflowRunAttempt -ne 1 -or
+              $info.repository -cne $env:GITHUB_REPOSITORY -or $info.version -cne '0.3.0-dev.1') { throw 'The build metadata did not match the pinned candidate.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $base 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+      - name: Observe idle IPC and actual navigation under the same candidate
+        run: |
+          $base = Join-Path $env:RUNNER_TEMP 'arm-memory-role-candidate'
+          $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-memory-role-evidence')
+          foreach ($variant in @('ipc-control','churn-control')) {
+            $setup = @('--phase','prepare')
+            if ($variant -eq 'churn-control') { $setup += @('--workload','churn') }
+            $prepared = & node scripts/verify-native-observer-memory.mjs @setup
+            if ($LASTEXITCODE -ne 0) { throw 'The synthetic observer fixture failed to prepare.' }
+            $fixture = ($prepared | ConvertFrom-Json).prepared
+            $report = Join-Path (Split-Path -Parent $fixture) "$variant/observer-result.json"
+            & node scripts/verify-native-observer-memory.mjs --phase run --prepared $fixture --variant $variant --candidate (Join-Path $base 'agent-resource-manager.exe') --candidate-build-info (Join-Path $base 'BUILD_INFO.native-validation.json')
+            $exit = $LASTEXITCODE
+            if (!(Test-Path -LiteralPath $report -PathType Leaf)) { throw 'No diagnostic report was returned.' }
+            Copy-Item -LiteralPath $report -Destination (Join-Path $evidence.FullName "$variant.json")
+            $r = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+            [ordered]@{variant=$variant;status=$r.status;normalExit=$r.normalExit;cycles=$r.completedCycles;queries=$r.completedQueries
+              reportSha256=(Get-FileHash -LiteralPath $report -Algorithm SHA256).Hash.ToLowerInvariant();error=$r.error} | ConvertTo-Json -Compress
+            if ($exit -ne 0 -or $r.status -cne 'diagnostic-measurements-collected' -or $r.normalExit -ne $true -or
+                $r.candidate.sha256 -cne $env:CANDIDATE_SHA256 -or $r.diagnosticOnly -ne $true -or
+                $r.convergenceClaim -ne $false -or $r.harnessChangedDuringRun -ne $false) { throw 'The observer diagnostic did not finish normally.' }
+          }
+      - name: Upload only short observer reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        with:
+          name: Agent_Resource_Manager_native_memory_roles_${{ github.run_id }}_${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/arm-memory-role-evidence/ipc-control.json
+            ${{ runner.temp }}/arm-memory-role-evidence/churn-control.json
+          if-no-files-found: warn
+          retention-days: 14
