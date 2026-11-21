@@ -10,10 +10,10 @@ env:
   REFERENCE_REVIEW_ARTIFACT_ID: '14698254292'
   REFERENCE_ROI_ARTIFACT_ID: '14698443675'
   REFERENCE_RECEIPT_SHA256: 'dfb058807162f5b4358ceab58007b5858886cc1f5fd195c0a73dbfabb53d2f9c'
-  APPROVAL_SHA256: '0376f18c8f512d881b1acdb13a1f14fd1cb7cd839a3bf4136c2a476ad48133eb'
+  APPROVAL_SHA256: '916e058c916cd5c57db4753e3d791135ecb757ba2e2e1dd7e2506921f7529836'
 jobs:
   stability:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-stability-wrapper-0ac5e79-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-stability-wrapper-r2-0ac5e79-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
