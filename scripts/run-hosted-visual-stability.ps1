@@ -159,8 +159,26 @@ async function main() { const selected = options(process.argv.slice(2));
 '@
 $diagnostic = Replace-One $diagnostic '    const save = () => writeFile(reportPath, json(report));' @'
     report.diagnosticPilotOnly = true;
+    report.startupStage = 'admission';
     report.diagnosticScriptSha256 = await digest(fileURLToPath(import.meta.url));
     const save = () => writeFile(reportPath, json(report));
+'@
+$diagnostic = Replace-One $diagnostic '        report.pid = child.pid;' @'
+        report.pid = child.pid;
+        report.startupStage = 'awaiting-native-backend';
+'@
+$diagnostic = Replace-One $diagnostic "        assert.ok(identity, 'Owner-checked backend readiness failed.');" @'
+        assert.ok(identity, 'Owner-checked backend readiness failed.');
+        report.startupStage = 'attaching-visual-observer';
+        await save();
+'@
+$diagnostic = Replace-One $diagnostic '        report.identity = visual.identity;' @'
+        report.identity = visual.identity;
+        report.startupStage = 'ready-for-pilot-input';
+'@
+$diagnostic = Replace-One $diagnostic '        report.error = error.message;' @'
+        report.error = error.message;
+        await save();
 '@
 $diagnostic = Replace-One $diagnostic '            let consecutive = 0;' @'
             let consecutive = 0;
@@ -244,8 +262,8 @@ function Run-Pilot {
     foreach ($name in @('GH_TOKEN', 'GITHUB_TOKEN')) { [void]$startInfo.Environment.Remove($name) }
     $process = [Diagnostics.Process]::Start($startInfo)
     $clock = [Diagnostics.Stopwatch]::StartNew()
+    $stderr = $process.StandardError.ReadToEndAsync()
     try {
-        $null = $process.StandardError.ReadToEndAsync()
         for (;;) {
             $read = $process.StandardOutput.ReadLineAsync()
             while (-not $read.Wait(1000)) {
@@ -298,6 +316,15 @@ function Run-Pilot {
         return $sourceReport
     } finally {
         if (Test-Path -LiteralPath $reportFile -PathType Leaf) { Copy-Item -LiteralPath $reportFile -Destination $measurements }
+        if ($process.HasExited) {
+            $detail = if ($stderr.IsCompletedSuccessfully) {
+                ($stderr.Result -replace 'https?://[^\s]+', '[URL]' -replace '[A-Za-z0-9+/_=-]{80,}', '[opaque]' -replace '[\x00-\x08\x0b-\x1f]', '').Trim()
+            } else { '' }
+            if ($detail.Length -gt 1600) { $detail = $detail.Substring(0, 1600) }
+            Save-Json (Join-Path $measurements 'pilot-process.json') ([ordered]@{
+                exitCode=$process.ExitCode; stdoutLines=$lineCount; normalQuitReceipt=($null -ne $quitProof); stderr=$detail
+            })
+        }
         $process.Dispose()
     }
 }
