@@ -163,7 +163,8 @@ function Run-Measurement([string]$phase, [int]$maxMinutes) {
     $proofFile = Join-Path $measurements "$phase-normal-quit.json"
     $lineCount = 0
     $quitProof = $null
-    $startInfo = [Diagnostics.ProcessStartInfo]::new((Get-Command node -CommandType Application).Source)
+    $node = Get-Command node.exe -CommandType Application | Select-Object -First 1
+    $startInfo = [Diagnostics.ProcessStartInfo]::new($node.Source)
     $startInfo.WorkingDirectory = $workspace
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
