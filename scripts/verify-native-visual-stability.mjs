@@ -294,11 +294,16 @@ async function references(descriptor) {
         if (hostedReferenceFrame) assert.equal(visual.identity.dpi, hostedReferenceFrame.dpi, 'Hosted display DPI changed before reference input.');
         await visual.call('prepareForeground');
         ref.frame = visual.identity;
-        const observeRows = async (op, fields) => referenceObservationRows(await app.call(op, fields));
+        const observeRows = async (op, fields, deadline = performance.now() + visualPolicy.matchTimeoutMs) => {
+            if (!hostedReferenceFrame) return referenceObservationRows(await app.call(op, fields));
+            const remaining = Math.floor(deadline - performance.now());
+            assert.ok(remaining > 0, 'The owned reference observation reached its original deadline.');
+            return referenceObservationRows(await app.call(op, { ...fields, referenceReadBudgetMs: remaining }, remaining));
+        };
         async function element(name, scope, type, selected) {
             const deadline = performance.now() + visualPolicy.matchTimeoutMs;
             do {
-                const rows = await observeRows('state', { name, ...(scope ? { scope } : {}) });
+                const rows = await observeRows('state', { name, ...(scope ? { scope } : {}) }, deadline);
                 const matches = rows.filter(row => !row.offscreen && (!type || row.type === type));
                 assert.ok(matches.length <= 1, `Ambiguous visible reference element ${name}.`);
                 if (matches.length === 1 && (selected === undefined || matches[0].selected === selected))
@@ -320,9 +325,9 @@ async function references(descriptor) {
         async function semanticList(index) {
             const deadline = performance.now() + visualPolicy.matchTimeoutMs;
             do {
-                const names = await observeRows('names');
+                const names = await observeRows('names', undefined, deadline);
                 const titles = names.filter(row => row.type === 'ControlType.Button' && /^Perf Skill \d{4}$/.test(row.name));
-                const edit = await observeRows('state', { name: '搜索 Skill' });
+                const edit = await observeRows('state', { name: '搜索 Skill' }, deadline);
                 if (edit.some(row => row.enabled && !row.offscreen) && titles.length === (index === null ? 20 : 1) &&
                     (index === null || titles[0].name === `Perf Skill ${String(index).padStart(4, '0')}`))
                     return;

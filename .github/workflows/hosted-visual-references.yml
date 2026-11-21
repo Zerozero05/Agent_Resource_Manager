@@ -1,4 +1,4 @@
-name: Prepare hosted visual references for afdcc14 (r3)
+name: Prepare hosted visual references for afdcc14 (bounded provider retry)
 on: create
 permissions:
   contents: read
@@ -11,7 +11,7 @@ env:
   CANDIDATE_SHA256: '2a4b27faf9b2aed958760dc30d5f4ad980b8f62a9e3be6e38d321382f8d89db3'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-afdcc14-frame-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-afdcc14-provider-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
