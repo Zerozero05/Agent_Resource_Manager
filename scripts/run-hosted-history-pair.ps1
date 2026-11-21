@@ -10,10 +10,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$candidateSource = '3536ca0e5cf7c897b860b5ce32d8b415904b9e45'
-$candidateRun = '44866595695'
-$candidateArtifact = '14692802883'
-$candidateSha256 = 'aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7'
+$referenceSource = '37f83f135f9fd8facd90255fa33f58d534f8364d'
+$referenceCandidateRun = '44889635017'
+$referenceCandidateArtifact = '14702350758'
+$referenceCandidateSha256 = '79544e0b78cd0cb157d2601f48e0812158a428569f5b34d07556f478494f133e'
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:GITHUB_REPOSITORY -ine 'Zerozero05/Agent_Resource_Manager' -or -not [Environment]::UserInteractive -or
     [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
@@ -35,7 +35,7 @@ function Save-Json([string]$path, $value) {
 
 $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).ProviderPath
 Set-Location -LiteralPath $workspace
-if ($env:GITHUB_REF_NAME -cne 'codex/hosted-check-only-pair-37f83f1-20261121' -or
+if ($env:GITHUB_REF_NAME -cne 'codex/hosted-check-only-pair-2d19488-20261121' -or
     (git rev-parse HEAD) -cne $env:GITHUB_SHA -or $LASTEXITCODE -ne 0) {
     throw 'The exact paired diagnostic checkout is required.'
 }
@@ -44,9 +44,9 @@ Assert-Digest $receiptPath $ReferenceReceiptSha256
 Assert-Digest $ApprovalFile $ApprovalSha256
 $receipt = Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json
 $approval = Get-Content -Raw -LiteralPath $ApprovalFile | ConvertFrom-Json
-if ($receipt.status -cne 'references-generated-review-required' -or $receipt.candidateSource -cne $candidateSource -or
-    $receipt.candidateSha256 -cne $candidateSha256 -or $receipt.candidateRunId -ne $candidateRun -or
-    $receipt.candidateArtifactId -ne $candidateArtifact -or $receipt.normalExit -ne $true -or
+if ($receipt.status -cne 'references-generated-review-required' -or $receipt.candidateSource -cne $referenceSource -or
+    $receipt.candidateSha256 -cne $referenceCandidateSha256 -or $receipt.candidateRunId -ne $referenceCandidateRun -or
+    $receipt.candidateArtifactId -ne $referenceCandidateArtifact -or $receipt.normalExit -ne $true -or
     $receipt.referenceCount -ne 72 -or $receipt.roiCount -ne 210 -or $receipt.sheets -ne 9 -or
     $approval.reviewedBy -cne 'root' -or $approval.visualReviewConfirmed -ne $true -or
     $approval.referenceSha256 -cne $receipt.referenceSha256 -or @($approval.reviewedStates).Count -ne 72 -or
@@ -66,11 +66,11 @@ Assert-Digest $manifestPath $receipt.roiTransportManifestSha256
 $descriptor = Get-Content -Raw -LiteralPath $descriptorPath | ConvertFrom-Json
 $reference = Get-Content -Raw -LiteralPath $referencePath | ConvertFrom-Json
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-if ($descriptor.candidateSha256 -cne $candidateSha256 -or $reference.candidateSha256 -cne $candidateSha256 -or
+if ($descriptor.candidateSha256 -cne $referenceCandidateSha256 -or $reference.candidateSha256 -cne $referenceCandidateSha256 -or
     $reference.semanticReferencePhaseCompleted -ne $true -or $reference.root -cne $descriptor.root -or
     $reference.datasetFingerprint -cne $descriptor.dataset.dataFingerprint -or
     $manifest.format -cne 'agent-resource-manager-native-visual-roi-transport-v1' -or $manifest.syntheticOnly -ne $true -or
-    $manifest.candidateSource -cne $candidateSource -or $manifest.candidateSha256 -cne $candidateSha256 -or
+    $manifest.candidateSource -cne $referenceSource -or $manifest.candidateSha256 -cne $referenceCandidateSha256 -or
     $manifest.fixtureSha256 -cne $reference.datasetFingerprint -or $manifest.referenceSha256 -cne $receipt.referenceSha256 -or
     $manifest.roiCount -ne 210 -or @($manifest.files).Count -ne 210) {
     throw 'The visual descriptor, reviewed references, and transport manifest do not bind to the same candidate.'
@@ -145,7 +145,7 @@ function Prepare-Arm($arm) {
     $bindings = [ordered]@{ executable=$exe; buildInfo=$armValidation; candidateSha256=$arm.sha256
         buildInfoSha256=(Get-FileHash -LiteralPath $armValidation -Algorithm SHA256).Hash.ToLowerInvariant()
         transportSha256=$arm.sha256; hostedReferenceFrame=$receipt.referenceFrame; hostedFirstSearchReceipt=$receipt.hostedFirstSearchReceipt
-        hostedRetentionReference=@{ sha256=$receipt.referenceSha256; candidateSha256=$candidateSha256; root=$referenceRoot } }
+        hostedRetentionReference=@{ sha256=$receipt.referenceSha256; candidateSha256=$referenceCandidateSha256; root=$referenceRoot } }
     $wrapped = $pristineModule
     foreach ($key in $bindings.Keys) {
         $pattern = "(?m)^const $key = [^\r\n]+;(?=\r?$)"
@@ -333,11 +333,12 @@ $sampleSkew = for ($index = 0; $index -lt $before.samples.Count; $index++) {
 }
 Save-Json (Join-Path $measurements 'comparison.json') ([ordered]@{
     status='paired-short-check-only-diagnostic-completed'; scope='check-only'
-    interpretation='Same-host check-only comparison with fixed arm order and fresh data. Twelve physical check clicks with the library held on All. Private-byte differences are observations.'
+    interpretation='Same-host c2aed09 then 2d19488, fixed order and fresh data. Twelve physical check clicks with the library held on All. Private-byte differences are observations.'
+    compactTransportObserved=$false
     navigationGateEvaluated=$false; latencyGateEvaluated=$false
     convergenceGateEvaluated=$false; previousFailureReplaced=$false
     sameHost=[ordered]@{runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion; node=(& node --version); windows=[Environment]::OSVersion.Version.ToString()}
-    referenceSha256=$receipt.referenceSha256; referenceSource=$candidateSource; approvalSha256=$ApprovalSha256
+    referenceSha256=$receipt.referenceSha256; referenceSource=$referenceSource; approvalSha256=$ApprovalSha256
     fixtureSha256=$reference.datasetFingerprint; checkKeySha256=$before.history.normalizedKeySha256
     maximumObservedSampleSkewMs=($sampleSkew | Measure-Object -Maximum).Maximum
     before=[ordered]@{sourceCommit=$arms[0].source; workflowRunId=$arms[0].run; observations=$beforeStats}
