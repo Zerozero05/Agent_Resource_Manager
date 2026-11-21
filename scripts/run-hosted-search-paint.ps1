@@ -251,7 +251,9 @@ function Run-Measurement {
             $sourceReport.approvalSha256 -cne $ApprovalSha256 -or $sourceReport.arm -cne 'detached') {
             throw 'The diagnostic report failed its identity, data, observer mode, or exit checks.'
         }
-        if ($process.ExitCode -ne 0 -or $sourceReport.status -cne 'detached-paint-observed' -or @($sourceReport.samples).Count -ne 2) {
+        if ($process.ExitCode -ne 0 -or $sourceReport.status -cne 'detached-paint-observed' -or
+            $sourceReport.plannedTrials -ne 12 -or $sourceReport.maxCheckAttempts -ne 24 -or
+            @($sourceReport.samples).Count -ne 12 -or @($sourceReport.attempts).Count -gt 24) {
             throw 'Search-paint diagnostic did not collect sufficient valid observations.'
         }
         return $sourceReport
@@ -280,7 +282,7 @@ function Run-Measurement {
                 Copy-Item -LiteralPath $item.FullName -Destination $target
                 Save-Json (Join-Path $measurements 'search-paint-mismatch-proof.json') ([ordered]@{
                     workflowCommit=$overlay.workflowCommit; candidateSha256=$candidateSha256; fixture=$reference.datasetFingerprint
-                    gestureScope='two exact owned synthetic search actions'; originalLatencyGateEvaluated=$false
+                    gestureScope='alternating two exact owned synthetic search states'; originalLatencyGateEvaluated=$false
                     frameSha256=(Get-FileHash -LiteralPath $target).Hash.ToLowerInvariant()
                     frameBytes=$item.Length; bounds=$actualBounds
                 })

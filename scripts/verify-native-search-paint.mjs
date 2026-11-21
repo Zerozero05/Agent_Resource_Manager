@@ -13,10 +13,10 @@ import { VisualSession, inside, requiredStates, validateReferences, visualObserv
 const source = '37f83f135f9fd8facd90255fa33f58d534f8364d';
 const candidateRun = '44889635017';
 const validation = 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data';
-const branch = 'codex/hosted-search-paint-mismatch-37f83f1-20261121';
+const branch = 'codex/hosted-search-paint-content-37f83f1-20261121';
 const statePair = ['search-0001', 'search-0002'];
-const measuredTrials = 2;
-const maxCheckAttempts = 2;
+const measuredTrials = 12;
+const maxCheckAttempts = 24;
 const expectedSchedulingKeys = 2002;
 const execute = promisify(execFile);
 const shaPattern = /^[a-f0-9]{64}$/;
@@ -251,6 +251,7 @@ async function main(args) {
     const reference = JSON.parse(await pinnedFile(referencePath, REFERENCE_SHA256));
     const approval = JSON.parse(await pinnedFile(approvalPath, APPROVAL_SHA256));
     validateReferences(reference, descriptor);
+    assert.equal(reference.frame.dpi, 96, 'The frozen search content crops require 96 DPI.');
     assert.equal(approval.reviewedBy, 'root');
     assert.equal(approval.referenceSha256, REFERENCE_SHA256);
     assert.equal(approval.visualReviewConfirmed, true);
@@ -283,7 +284,8 @@ async function main(args) {
         fixtureSha256: dataset.dataFingerprint, statePair, plannedTrials: measuredTrials, maxCheckAttempts, expectedSchedulingKeys,
         status: 'running', startedAt: new Date().toISOString(), attempts: [], samples: [], normalExit: false,
         limitations: [
-            'Detached owned search-to-observed-result-pixels during an observed real global check. No UI Automation queries occur during these trials.',
+            'Detached owned search-to-observed-result-content pixels during an observed real global check. No UI Automation queries occur during these trials.',
+            'Exact RGB compares fixed content rectangles inside the approved title and table ROIs, with the full approved result count. The icon-only strips are excluded from this diagnostic.',
             'A finite sampling interval brackets a pixel observation, not the exact presentation time.',
             'One fixed synthetic pair and a bounded sample set. This does not replace the 1200-input benchmark or its original 200 ms gate.',
         ],

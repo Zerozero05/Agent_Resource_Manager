@@ -19,7 +19,7 @@ env:
   APPROVAL_SHA256: 'e0716ff3da002c34bf7b39f42a088a9cc154d69f75ca9b51b9a30c53b57dc5fb'
 jobs:
   search-paint:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-search-paint-mismatch-37f83f1-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-search-paint-content-37f83f1-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 15
     defaults:

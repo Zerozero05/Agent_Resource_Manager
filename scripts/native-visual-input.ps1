@@ -339,6 +339,36 @@ public sealed class NativeVisualInput : IDisposable {
     internal readonly byte[] pixels;
     internal SearchAnchor(int[] box,byte[] pixels) {this.box=box;this.pixels=pixels;}
   }
+  static readonly int[][] SearchContentCrops={new[]{20,0,181,31},new[]{103,0,528,99},new[]{0,0,440,56}};
+  static SearchAnchor[] SearchContent(SearchAnchor[] parents) {
+    var content=new SearchAnchor[parents.Length];
+    for(int index=0;index<parents.Length;index++) {
+      SearchAnchor parent=parents[index];
+      int[] crop=SearchContentCrops[index];
+      int[] box=parent.box;
+      if(box[2]!=crop[0]+crop[2]||box[3]!=crop[1]+crop[3])
+        throw new InvalidOperationException("A fixed content crop does not match its approved parent dimensions.");
+      if(crop[0]==0&&crop[1]==0) {
+        content[index]=parent;
+        continue;
+      }
+      int stride=crop[2]*4;
+      var pixels=new byte[stride*crop[3]];
+      for(int row=0;row<crop[3];row++)
+        Buffer.BlockCopy(parent.pixels,((crop[1]+row)*box[2]+crop[0])*4,pixels,row*stride,stride);
+      content[index]=new SearchAnchor(new[]{box[0]+crop[0],box[1]+crop[1],crop[2],crop[3]},pixels);
+    }
+    return content;
+  }
+  static void RequireSameSearchParentGeometry(SearchAnchor[] previous,SearchAnchor[] target) {
+    for(int index=0;index<previous.Length;index++)
+      if(!previous[index].box.AsSpan().SequenceEqual(target[index].box))
+        throw new InvalidOperationException("Both search states must have identical approved parent boxes.");
+  }
+  static void RequireDistinctSearchTitles(SearchAnchor[] previous,SearchAnchor[] target) {
+    if(DifferingPixelBytes(previous[0].pixels,target[0].pixels)==0)
+      throw new InvalidOperationException("The two neutral result titles must differ within the fixed content crop.");
+  }
   sealed class SearchFrame {
     internal readonly long start,end;
     internal SearchFrame(long start,long end) {this.start=start;this.end=end;}
@@ -442,8 +472,12 @@ public sealed class NativeVisualInput : IDisposable {
   public object SearchPaint(string value,SearchRoi[] previousRois,SearchRoi[] targetRois) {
     Guard();
     ValidateSearch(value);
-    SearchAnchor[] previous=ReadSearchAnchors(previousRois),target=ReadSearchAnchors(targetRois);
-    int[] bounds=SearchBounds(previous,target);
+    if(dpi!=96)throw new InvalidOperationException("The exact search content crops require 96 DPI.");
+    SearchAnchor[] previousParents=ReadSearchAnchors(previousRois),targetParents=ReadSearchAnchors(targetRois);
+    RequireSameSearchParentGeometry(previousParents,targetParents);
+    SearchAnchor[] previous=SearchContent(previousParents),target=SearchContent(targetParents);
+    RequireDistinctSearchTitles(previous,target);
+    int[] bounds=SearchBounds(previousParents,targetParents);
     Unobscured(bounds);
     INPUT[] input=SearchKeys(value);
     var pixels=new byte[bounds[2]*bounds[3]*4];
@@ -451,7 +485,9 @@ public sealed class NativeVisualInput : IDisposable {
     using(var graphics=Graphics.FromImage(bitmap)) {
       SearchFrame initial=CaptureSearchFrame(bounds,bitmap,graphics,pixels);
       if(!SearchMatches(pixels,bounds,previous)||SearchMatches(pixels,bounds,target))
-        throw new InvalidOperationException("The previous search must be visible and the target absent before any input."+SearchMismatch(pixels,bounds,previous,target));
+        throw new InvalidOperationException("The previous search must be visible and the target absent before any input."+
+          SearchMismatch(pixels,bounds,previous,target)+" Full parent comparison:"+
+          SearchMismatch(pixels,bounds,previousParents,targetParents)+PreserveSearchMismatch(bounds,bitmap,pixels));
       GuardSearchFocus();
       var dispatch=Send(input,false);
       const int timeoutMs=4000;
@@ -464,12 +500,15 @@ public sealed class NativeVisualInput : IDisposable {
         bool matches=SearchMatches(pixels,bounds,target);
         if(firstHit!=null) {
           if(!matches)throw new InvalidOperationException("The first visible search result failed the independent confirmation."+
-            SearchMismatch(pixels,bounds,previous,target)+PreserveSearchMismatch(bounds,bitmap,pixels));
+            SearchMismatch(pixels,bounds,previous,target)+" Full parent comparison:"+
+            SearchMismatch(pixels,bounds,previousParents,targetParents)+PreserveSearchMismatch(bounds,bitmap,pixels));
           Guard();
           long lower=lastMiss==null?dispatch.start:Math.Max(dispatch.start,lastMiss.start);
+          int[][] contentBoxes={target[0].box,target[1].box,target[2].box};
           return new{typed=value,qpcFrequency=Stopwatch.Frequency.ToString(),inputStartedQpc=dispatch.start.ToString(),
             inputReturnedQpc=dispatch.end.ToString(),initial=initial.Receipt(),lastMiss=lastMiss?.Receipt(),
             firstHit=firstHit.Receipt(),confirmation=frame.Receipt(),observations=count,
+            contentBoxes=contentBoxes,fullParentTargetMatched=SearchMatches(pixels,bounds,targetParents),
             lowerBoundMs=(lower-dispatch.start)*1000.0/Stopwatch.Frequency,
             upperBoundMs=(firstHit.end-dispatch.start)*1000.0/Stopwatch.Frequency,foreground=true,lastInputTick=inputTick};
         }
@@ -477,7 +516,8 @@ public sealed class NativeVisualInput : IDisposable {
         else lastMiss=frame;
       }
       throw new TimeoutException("The frozen search result and its independent confirmation were not observed within the native bound."+
-        SearchMismatch(pixels,bounds,previous,target)+PreserveSearchMismatch(bounds,bitmap,pixels));
+        SearchMismatch(pixels,bounds,previous,target)+" Full parent comparison:"+
+        SearchMismatch(pixels,bounds,previousParents,targetParents)+PreserveSearchMismatch(bounds,bitmap,pixels));
     }
   }
   public static int CheckSearchPaintComparator() {
@@ -513,7 +553,38 @@ public sealed class NativeVisualInput : IDisposable {
             throw new InvalidOperationException("The mismatch PNG must preserve the owned frame size and visible RGB.");
       }
     }
-    return 9;
+    var parents=new[]{new SearchAnchor(new[]{373,611,201,31},new byte[201*31*4]),
+      new SearchAnchor(new[]{290,543,631,99},new byte[631*99*4]),
+      new SearchAnchor(new[]{290,473,440,56},new byte[440*56*4])};
+    var neutral=new[]{new SearchAnchor((int[])parents[0].box.Clone(),new byte[201*31*4]),
+      parents[1],parents[2]};
+    RequireSameSearchParentGeometry(parents,neutral);
+    neutral[0].pixels[15*4]=1;
+    SearchAnchor[] left=SearchContent(parents),right=SearchContent(neutral);
+    if(!left[0].box.AsSpan().SequenceEqual(new[]{393,611,181,31})||
+       !left[1].box.AsSpan().SequenceEqual(new[]{393,543,528,99})||left[2]!=parents[2]||
+       DifferingPixelBytes(left[0].pixels,right[0].pixels)!=0)
+      throw new InvalidOperationException("Only the two fixed left strips may be excluded.");
+    var rejected=false;
+    try {RequireDistinctSearchTitles(left,right);}
+    catch(InvalidOperationException) {rejected=true;}
+    if(!rejected)throw new InvalidOperationException("Icon-only variants are not distinct result titles.");
+    neutral[0].pixels[(201+20)*4]=1;
+    right=SearchContent(neutral);
+    RequireDistinctSearchTitles(left,right);
+    if(right[0].pixels[181*4]!=1||DifferingPixelBytes(left[0].pixels,right[0].pixels)!=1)
+      throw new InvalidOperationException("Content differences must survive the exact row-stride copy.");
+    neutral[0].box[1]++;
+    rejected=false;
+    try {RequireSameSearchParentGeometry(parents,neutral);}
+    catch(InvalidOperationException) {rejected=true;}
+    if(!rejected)throw new InvalidOperationException("A shifted parent box must be rejected.");
+    neutral[0].box[2]--;
+    rejected=false;
+    try {SearchContent(neutral);}
+    catch(InvalidOperationException) {rejected=true;}
+    if(!rejected)throw new InvalidOperationException("A crop cannot leave its parent image.");
+    return 14;
   }
   public object Sheet(string path,string[] names,string[] paths) {
     Guard();path=FilePath(path);
