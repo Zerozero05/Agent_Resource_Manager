@@ -1,0 +1,199 @@
+name: Compare local Skill document latency during native checks on one host
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  CONTROL_RUN_ID: '44866595695'
+  CONTROL_SOURCE: 3536ca0e5cf7c897b860b5ce32d8b415904b9e45
+  CONTROL_ARTIFACT_ID: '14692802883'
+  CONTROL_ARCHIVE_SHA256: 6b8afaf8ca811c866b1ecb46ae778bf1fc1c8c715e176b32101d5a3f0f2ab2a6
+  CONTROL_EXE_SHA256: aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7
+  OPTIMIZED_RUN_ID: '44874817264'
+  OPTIMIZED_SOURCE: fef68f9b86e4d233fa4df8f14719434ddc94e008
+  OPTIMIZED_ARTIFACT_ID: '14695203923'
+  OPTIMIZED_ARCHIVE_SHA256: 6582fb85b203738881241afeb6c09c1fed9ba1503769a67cff3bf59632b76745
+  OPTIMIZED_EXE_SHA256: 25b722cabf03dad906bbdfa3eb3f040c4085d78d5b18f1ea6b380cf85517e4ff
+jobs:
+  compare:
+    if: ${{ github.repository == 'Zerozero05/Agent_Resource_Manager' && github.ref_type == 'branch' && github.ref_name == 'codex/hosted-local-document-ab-fef68f9-20261121' }}
+    runs-on: windows-latest
+    timeout-minutes: 32
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify hosted runner and the two exact Windows candidates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arms = @(
+            @{name='control'; run=$env:CONTROL_RUN_ID; source=$env:CONTROL_SOURCE;
+              id=$env:CONTROL_ARTIFACT_ID; zip=$env:CONTROL_ARCHIVE_SHA256; sha=$env:CONTROL_EXE_SHA256}
+            @{name='optimized'; run=$env:OPTIMIZED_RUN_ID; source=$env:OPTIMIZED_SOURCE;
+              id=$env:OPTIMIZED_ARTIFACT_ID; zip=$env:OPTIMIZED_ARCHIVE_SHA256; sha=$env:OPTIMIZED_EXE_SHA256}
+          )
+          foreach ($arm in $arms) {
+            if ($arm.run -cnotmatch '^[0-9]+$' -or $arm.source -cnotmatch '^[0-9a-f]{40}$' -or
+                $arm.id -cnotmatch '^[0-9]+$' -or $arm.zip -cnotmatch '^[0-9a-f]{64}$' -or
+                $arm.sha -cnotmatch '^[0-9a-f]{64}$') {
+              throw 'Both exact artifact IDs, archive digests, and executable digests must be independently verified and pinned.'
+            }
+          }
+          if ($arms[0].sha -ceq $arms[1].sha -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or
+              $env:RUNNER_OS -cne 'Windows' -or -not [Environment]::UserInteractive -or
+              [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container) -or
+              (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue)) {
+            throw 'Expected two distinct candidates and a fresh hosted interactive Windows session.'
+          }
+          $candidateParent = Join-Path $env:RUNNER_TEMP 'arm-document-ab-candidates'
+          if (Test-Path -LiteralPath $candidateParent) { throw 'Candidate destination must be fresh.' }
+          foreach ($arm in $arms) {
+            $artifactName = "Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_$($arm.source)"
+            $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$($arm.run)" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $run.id -ne $arm.run -or $run.head_sha -cne $arm.source -or
+                $run.run_attempt -ne 1 -or $run.path -cne '.github/workflows/check.yml' -or
+                $run.event -cne 'push' -or $run.status -cne 'completed' -or $run.conclusion -cne 'success') {
+              throw "Wrong or unsuccessful Windows build for $($arm.name)."
+            }
+            $artifact = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$($arm.id)" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $artifact.id -ne $arm.id -or $artifact.expired -or
+                $artifact.name -cne $artifactName -or $artifact.digest -cne "sha256:$($arm.zip)" -or
+                $artifact.workflow_run.id -ne $arm.run -or $artifact.workflow_run.head_sha -cne $arm.source) {
+              throw "The verified artifact is unavailable for $($arm.name)."
+            }
+            $candidate = Join-Path $candidateParent $arm.name
+            gh run download $arm.run --repo $env:GITHUB_REPOSITORY --name $artifactName --dir $candidate
+            if ($LASTEXITCODE -ne 0) { throw "Pinned Windows candidate download failed for $($arm.name)." }
+            $exe = Join-Path $candidate 'agent-resource-manager.exe'
+            $source = Join-Path $candidate 'BUILD_INFO.json'
+            $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+            $sha = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($sha -cne $arm.sha -or $info.executableSha256 -cne $sha -or $info.sourceCommit -cne $arm.source -or
+                $info.workflowRunId -ne $arm.run -or $info.workflowRunAttempt -ne 1 -or
+                $info.repository -cne $env:GITHUB_REPOSITORY -or $info.version -cne '0.3.0-dev.1') {
+              throw "Build metadata does not bind to the pinned executable for $($arm.name)."
+            }
+            $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+            $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+            $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+          }
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+      - name: Run the original sampled check workload for both releases
+        timeout-minutes: 27
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          if (Test-Path -LiteralPath $root) { throw 'Expected a fresh synthetic measurement directory.' }
+          $candidates = Join-Path $env:RUNNER_TEMP 'arm-document-ab-candidates'
+          $audit = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-document-ab-evidence')
+          $sequence = @()
+          foreach ($name in 'control','optimized') {
+            $out = New-Item -ItemType Directory -Path (Join-Path $audit.FullName $name)
+            $record = [ordered]@{arm=$name; nativeExitCode=$null; replayExitCode=$null; reportReady=$false; error=$null }
+            try {
+              if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) {
+                throw 'An existing manager prevents the next isolated native session.'
+              }
+              $candidate = Join-Path $candidates $name
+              $exe = Join-Path $candidate 'agent-resource-manager.exe'
+              $info = Join-Path $candidate 'BUILD_INFO.native-validation.json'
+              $sha = if ($name -ceq 'control') { $env:CONTROL_EXE_SHA256 } else { $env:OPTIMIZED_EXE_SHA256 }
+              $source = if ($name -ceq 'control') { $env:CONTROL_SOURCE } else { $env:OPTIMIZED_SOURCE }
+              $before = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+              & node scripts/verify-uia-performance.mjs --suite loads --load-kind check --sample-overlap true --accessibility-input --candidate $exe --candidate-build-info $info
+              $record.nativeExitCode = $LASTEXITCODE
+              $new = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notin $before })
+              if ($new.Count -ne 1) { throw 'Expected one new synthetic validation session for this arm.' }
+              $record['rawDirectory'] = $new[0].Name
+              foreach ($file in 'report.json','observations.jsonl','policy-before-run.json','candidate-mixed-1000-100-driver.json') {
+                $from = Join-Path $new[0].FullName $file
+                if (Test-Path -LiteralPath $from -PathType Leaf) { Copy-Item -LiteralPath $from -Destination $out.FullName }
+              }
+              $fixtureOutput = New-Item -ItemType Directory -Path (Join-Path $out.FullName 'mixed-native-fixture')
+              Copy-Item -LiteralPath (Join-Path $new[0].FullName 'mixed-native-fixture/dataset.json') -Destination $fixtureOutput.FullName
+              $reportPath = Join-Path $out.FullName 'report.json'
+              $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+              $driver = Get-Content -LiteralPath (Join-Path $out.FullName 'candidate-mixed-1000-100-driver.json') -Raw | ConvertFrom-Json
+              $dataDir = Join-Path $new[0].FullName 'mixed-native-fixture/data'
+              if ($report.candidate.source -cne $source -or $report.candidate.sha256 -cne $sha -or
+                  $driver.dataDirectory -ine $dataDir -or $report.dataset.dataDir -ine $dataDir -or
+                  $driver.strictReadinessTimeoutMs -ne 30000 -or $report.sampledLoad.stopReason -cne 'sample-count' -or
+                  $record.nativeExitCode -notin @(0,1) -or $driver.closedNormally -ne $true) {
+                throw 'The arm lacks its exact release, own fixture, strict readiness, complete sampling or normal exit.'
+              }
+              $replayText = & node scripts/verify-sampled-load-evidence.mjs $sha $reportPath
+              $record.replayExitCode = $LASTEXITCODE
+              $replayText | Set-Content -LiteralPath (Join-Path $out.FullName 'replay.json') -Encoding utf8NoBOM
+              $replay = ($replayText -join [Environment]::NewLine) | ConvertFrom-Json
+              $check = $replay.workloads.check
+              # Only the check arm is expected. The original verifier reports the omitted workloads as incomplete.
+              if ($record.replayExitCode -ne 2 -or @($replay.reasons).Count -ne 0 -or
+                  ($replay.missingWorkloads -join ',') -cne 'download,update' -or $check.sampleOverlap.acceptedInputs -ne 400) {
+                throw 'The frozen replay did not establish 400 inputs contained in exact running check tasks.'
+              }
+              foreach ($category in 'search','filter','tab','document') {
+                if ($check.sampleOverlap.categories.$category.count -ne 100 -or
+                    $check.sampleOverlap.categories.$category.limitMs -ne 200) {
+                  throw "The original count or P95 threshold changed for $category."
+                }
+              }
+              $record['document'] = $check.sampleOverlap.categories.document
+              $record['checkOriginalP95'] = $check.originalP95
+              $record['checkLimitedTolerance'] = $check.limitedTolerance
+              $record['candidateSource'] = $source
+              $record['candidateSha256'] = $sha
+              $record['dataDirectory'] = $dataDir
+              $record['fixtureFingerprint'] = $report.dataset.dataFingerprint
+              $record['machine'] = $report.machine
+              $record['harness'] = $report.harness
+              $record['input'] = $report.inputMethod
+              $events = Get-Content -LiteralPath (Join-Path $out.FullName 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
+              $record['startedAt'] = ($events | Where-Object kind -CEQ 'native-startup').observedAt
+              $record['exitedAt'] = ($events | Where-Object kind -CEQ 'native-normal-exit').observedAt
+              $record.reportReady = $true
+            } catch {
+              $record.error = $_.Exception.Message
+            }
+            $sequence += $record
+            ConvertTo-Json -InputObject $sequence -Depth 12 | Set-Content -LiteralPath (Join-Path $audit.FullName 'sequence.json') -Encoding utf8NoBOM
+          }
+          $a = $sequence[0]
+          $b = $sequence[1]
+          if (!$a.reportReady -or !$b.reportReady -or $a.dataDirectory -ieq $b.dataDirectory -or
+              $a.fixtureFingerprint -cne $b.fixtureFingerprint -or $a.input -cne 'native-accessibility-patterns' -or
+              $b.input -cne $a.input -or ($a.machine | ConvertTo-Json -Compress) -cne ($b.machine | ConvertTo-Json -Compress) -or
+              ($a.harness | ConvertTo-Json -Compress) -cne ($b.harness | ConvertTo-Json -Compress) -or
+              [DateTimeOffset]$a.exitedAt -gt [DateTimeOffset]$b.startedAt) {
+            throw 'The two completed check arms are not comparable on the same host, harness, and fixture settings.'
+          }
+          $summary = [ordered]@{
+            scope='same-host-check-overlap-document-comparison'
+            originalDocumentLimitMs=200
+            controlSource=$a.candidateSource
+            optimizedSource=$b.candidateSource
+            controlDocument=$a.document
+            optimizedDocument=$b.document
+            differenceMs=([double]$b.document.p95Ms - [double]$a.document.p95Ms)
+            sequence='control-then-optimized'
+            fullMixedLoadAcceptance=$false
+          }
+          $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $audit.FullName 'comparison.json') -Encoding utf8NoBOM
+          if ($b.document.status -cne 'passed') { throw 'The optimized document arm did not pass the original 200ms P95 target.' }
+      - name: Upload only original synthetic measurements and comparison
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Agent_Resource_Manager_local_document_ab_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-document-ab-evidence/
+          if-no-files-found: warn
+          retention-days: 14
