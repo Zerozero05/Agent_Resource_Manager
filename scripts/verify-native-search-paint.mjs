@@ -14,7 +14,7 @@ import { VisualSession, inside, requiredStates, validateReferences, visualObserv
 const source = '2d194880f48bbef0fe9613f3d2a5afffc3b2ce15';
 const candidateRun = '44898573141';
 const validation = 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data';
-const branch = 'codex/hosted-search-observer-pair-2d19488-20261121';
+const branch = 'codex/hosted-search-observer-ready-2d19488-20261121';
 const statePair = ['search-0001', 'search-0002'];
 const observers = ['pixels', 'uia'];
 const perDirection = 6;
@@ -414,11 +414,12 @@ async function main(args) {
         }
         assert.ok(primed, 'The fixed initial search state did not match; no measurement input was sent.');
 
-        const filteredBounds = reference.firstSearchPreflight.filteredSearchBounds.split(',').map(Number);
-        assert.ok(filteredBounds.length === 4 && filteredBounds.every(Number.isInteger));
-        const [sx, sy, sw, sh] = filteredBounds;
-        const filteredSearch = { x: sx + Math.floor(sw / 2) - reference.frame.left,
-            y: sy + Math.floor(sh / 2) - reference.frame.top };
+        // Give WebView's native accessibility provider the same readiness check as the formal driver.
+        // Keep this read outside the measured dispatch and before the first check task.
+        const readiness = await visual.call('waitSearchAccessibility', { value: initialQuery }, 12000);
+        assert.equal(readiness.ready, true);
+        assert.equal(readiness.value, initialQuery);
+        report.accessibilityReady = readiness;
         let previous = statePair[0];
         let schedulingKeysSha256 = null;
         const complete = () => statePair.every(previous => observers.every(observer =>
@@ -427,8 +428,7 @@ async function main(args) {
             const existing = await taskObserver.call('tasks');
             assert.ok(existing.tasks.every(task => !active(task.status)), 'Another active backend operation would contaminate the check workload.');
             const known = new Set(existing.tasks.map(task => task.id));
-            await visual.call('click', reference.controls.check);
-            const focus = await visual.call('click', filteredSearch);
+            const checkClick = await visual.call('click', reference.controls.check);
             const observer = chooseObserver(previous, report.samples);
             const attempt = { index, previous, observer };
             report.attempts.push(attempt);
@@ -451,7 +451,7 @@ async function main(args) {
                 await save();
                 continue;
             }
-            assert.equal(before.lastInputTick, focus.lastInputTick, 'Unexpected input before the measured search.');
+            assert.equal(before.lastInputTick, checkClick.lastInputTick, 'Unexpected input before the measured search.');
             const target = statePair.find(state => state !== previous);
             const value = 'perf-skill-' + target.slice(-4);
             const fields = { value, observer, previousRois: reference.states[previous].rois, targetRois: reference.states[target].rois };

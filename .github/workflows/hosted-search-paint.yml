@@ -19,7 +19,7 @@ env:
   APPROVAL_SHA256: 'd74dfbc451fd372a6904679775b54e21e5cab3de18eada02cb8618b5bf1c4df5'
 jobs:
   search-paint:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-search-observer-pair-2d19488-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-search-observer-ready-2d19488-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 15
     defaults:

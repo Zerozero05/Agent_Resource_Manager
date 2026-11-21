@@ -492,13 +492,37 @@ public sealed class NativeVisualInput : IDisposable {
     Guard();
     return AutomationElement.FromHandle(window);
   }
-  ValuePattern SearchPilotPattern() {
-    AutomationElement edit=SearchPilotFind(SearchPilotRoot(),"搜索 Skill",ControlType.Edit);
-    if(edit==null||!edit.TryGetCurrentPattern(ValuePattern.Pattern,out object pattern))return null;
-    return (ValuePattern)pattern;
+  ValuePattern SearchPilotPattern(out string unavailable) {
+    var root=SearchPilotRoot();
+    if(root==null||root.Current.ProcessId!=process.Id)throw new InvalidOperationException("Unexpected accessibility root owner.");
+    AutomationElement edit=SearchPilotFind(root,"搜索 Skill",ControlType.Edit);
+    if(edit==null){unavailable="no visible Skills search Edit in the owned accessibility tree";return null;}
+    if(!edit.Current.IsEnabled){unavailable="Skills search disabled";return null;}
+    if(!edit.TryGetCurrentPattern(ValuePattern.Pattern,out object pattern)){unavailable="Skills search lacks ValuePattern";return null;}
+    var value=(ValuePattern)pattern;
+    if(value.Current.IsReadOnly){unavailable="Skills search ValuePattern is read-only";return null;}
+    unavailable=null;
+    return value;
+  }
+  public object WaitForSearchAccessibility(string expected) {
+    ValidateSearch(expected);
+    var wait=Stopwatch.StartNew();
+    string unavailable="waiting for the Skills search";
+    do {
+      Guard();
+      try {
+        ValuePattern search=SearchPilotPattern(out unavailable);
+        if(search!=null) {
+          if(search.Current.Value==expected)return new{ready=true,value=expected,lastInputTick=inputTick};
+          unavailable="Skills search value differs from the verified previous state";
+        }
+      } catch(ElementNotAvailableException) {unavailable="Skills search accessibility element was replaced";}
+      System.Threading.Thread.Sleep(60);
+    } while(wait.ElapsedMilliseconds<8000);
+    throw new TimeoutException("Search observer readiness: "+unavailable+". No measurement input was sent.");
   }
   bool SearchPilotMatches(string value) {
-    ValuePattern search=SearchPilotPattern();
+    ValuePattern search=SearchPilotPattern(out _);
     if(search==null||search.Current.Value!=value)return false;
     AutomationElement table=SearchPilotFind(SearchPilotRoot(),"可横向滚动的 Skill 列表",null,false);
     if(table==null)return false;
@@ -515,12 +539,11 @@ public sealed class NativeVisualInput : IDisposable {
   (long start,long invocation,long end) DispatchAccessibilitySearch(string value) {
     Guard();
     long start=Stopwatch.GetTimestamp();
-    AutomationElement edit=SearchPilotFind(SearchPilotRoot(),"搜索 Skill",ControlType.Edit);
-    if(edit==null||!edit.Current.IsEnabled||!edit.TryGetCurrentPattern(ValuePattern.Pattern,out object pattern)||((ValuePattern)pattern).Current.IsReadOnly)
-      throw new InvalidOperationException("The owned search input is not editable.");
+    ValuePattern search=SearchPilotPattern(out string unavailable);
+    if(search==null)throw new InvalidOperationException("Search measurement input unavailable: "+unavailable+". No input was sent.");
     Guard();
     long invocation=Stopwatch.GetTimestamp();
-    ((ValuePattern)pattern).SetValue(value);
+    search.SetValue(value);
     long end=Stopwatch.GetTimestamp();
     Guard();
     return(start,invocation,end);
@@ -766,6 +789,10 @@ try {
           $previousRois=[NativeVisualInput+SearchRoi[]]@(Read-SearchRois $request.previousRois)
           $targetRois=[NativeVisualInput+SearchRoi[]]@(Read-SearchRois $request.targetRois)
           $session.SearchPaint($request.value,$previousRois,$targetRois)
+        }
+        'waitSearchAccessibility' {
+          if(!$AccessibilitySearchPilot -or $request.value -isnot [string]) {throw 'An enabled accessibility pilot and exact previous value are required'}
+          $session.WaitForSearchAccessibility($request.value)
         }
         'searchObserver' {
           if(!$AccessibilitySearchPilot -or $request.value -isnot [string] -or $request.observer -cnotin @('pixels','uia')) {
