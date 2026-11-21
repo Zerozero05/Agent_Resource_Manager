@@ -1,4 +1,4 @@
-name: Verify Windows reduced motion with timestamped DXGI pixels
+name: Diagnose Windows motion notifications and the owned WebView state
 on: create
 permissions:
   contents: read
@@ -10,8 +10,8 @@ env:
   CANDIDATE_ARTIFACT_ID: '14470108635'
   CANDIDATE_SHA256: '090dc7a9e4298b0153baee53c2f2f8329a2dc1a95708b4a9cfbf840e2d46ab91'
 jobs:
-  motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-dxgi-motion-r2-65b14b9' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+  motion-notifications:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-notify-65b14b9' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:
@@ -21,35 +21,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Compile the probe with the installed Windows SDK and confirm clipped WARP pixels
-        timeout-minutes: 2
+      - name: Verify the isolated Windows job
         run: |
           if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
               -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
-            throw 'The capability probe requires an isolated interactive GitHub-hosted Windows VM.'
+            throw 'The observation requires an isolated interactive GitHub-hosted Windows VM.'
           }
           if ($env:ImageOS -cne 'win25-vs2026' -or $env:ImageVersion -cne '20261116.315.1') {
             throw "The hosted Windows image ($env:ImageOS $env:ImageVersion) differs from the successful DXGI capability image."
           }
           Write-Host "Hosted Windows image: $env:ImageOS $env:ImageVersion"
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-          $install = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if ($LASTEXITCODE -ne 0 -or -not $install) { throw 'The hosted x64 Visual C++ compiler is unavailable.' }
-          Import-Module (Join-Path $install 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
-          Enter-VsDevShell -VsInstallPath $install -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          $build = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-dxgi/bin')
-          $probe = Join-Path $build.FullName 'verify-hosted-dxgi-row.exe'
-          $object = Join-Path $build.FullName 'verify-hosted-dxgi-row.obj'
-          & cl.exe /nologo /std:c++17 /EHsc /W4 /WX "/Fo$object" "/Fe$probe" scripts/verify-hosted-dxgi-row.cpp
-          if ($LASTEXITCODE -ne 0) { throw 'Could not compile the one-row probe using the installed SDK.' }
-          $synthetic = & $probe --synthetic
-          if ($LASTEXITCODE -ne 0) { throw 'The in-memory WARP preflight failed.' }
-          $result = $synthetic | ConvertFrom-Json
-          if ($result.status -cne 'synthetic-row-exact' -or $result.desktopAccess -ne $false -or
-              $result.first -ne 13417386 -or $result.second -ne 12246270) {
-            throw 'Wrong colors, clipping, or access mode in the in-memory row.'
-          }
-          Write-Output $synthetic
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -67,7 +48,7 @@ jobs:
           $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
           $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
           if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID) { throw 'Incorrect Windows candidate artifact.' }
-          $target = Join-Path $env:RUNNER_TEMP 'arm-dxgi-candidate'
+          $target = Join-Path $env:RUNNER_TEMP 'arm-motion-notification-candidate'
           gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $target
           if ($LASTEXITCODE -ne 0) { throw 'The pinned Windows artifact could not be read.' }
           $info = Get-Content -LiteralPath (Join-Path $target 'BUILD_INFO.json') -Raw | ConvertFrom-Json
@@ -76,16 +57,16 @@ jobs:
               $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or
               $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
               $info.version -cne '0.3.0-dev.1') { throw 'Build information does not bind to the pinned executable.' }
-      - name: Observe the four original motion conditions on the owned synthetic window
-        timeout-minutes: 5
+      - name: Compare real OS notifications and read-only WebView motion state
+        timeout-minutes: 4
         run: |
-          $candidate = Join-Path $env:RUNNER_TEMP 'arm-dxgi-candidate/agent-resource-manager.exe'
-          ./scripts/verify-hosted-motion-pixels.ps1 -Candidate $candidate -ExpectedSha256 $env:CANDIDATE_SHA256
-      - name: Preserve only the native motion report
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-motion-notification-candidate/agent-resource-manager.exe'
+          ./scripts/verify-hosted-motion-notifications.ps1 -Candidate $candidate -ExpectedSha256 $env:CANDIDATE_SHA256
+      - name: Preserve only the notification diagnostic
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_dxgi_motion_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arm-motion-pixels-evidence/motion-pixels.json
+          name: Agent_Resource_Manager_motion_notifications_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-motion-notification-evidence/motion-notifications.json
           if-no-files-found: warn
           retention-days: 14
