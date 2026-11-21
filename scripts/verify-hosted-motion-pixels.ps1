@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+    $env:ImageOS -cne 'win25-vs2026' -or $env:ImageVersion -cne '20261116.315.1' -or
     -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
     throw 'This can run only in a fresh interactive GitHub-hosted Windows VM.'
 }
@@ -17,6 +18,10 @@ $policy = [ordered]@{ trials=3; neutralSettleMs=250; beforeMs=95; afterMs=430; m
 $report = [ordered]@{ candidateSha256=$ExpectedSha256; syntheticOnly=$true; status='incomplete'; phase='preflight'
     policy=$policy; arms=@(); attemptedSystemChange=$false; systemRestored=$false; closedNormally=$false
     previousRun=[ordered]@{id='44854495440'; status='inconclusive'; reason='A two-update DXGI batch interrupted the first positive control under that run''s policy.'}
+    previousR2=[ordered]@{id='44855333628'; status='incomplete'; passedArms=2; totalArms=4}
+    notificationProbe=[ordered]@{id='44857288176'; setterFlags=2; stateChanged=$true; matchingNotifications=0}
+    setterFlags=3; motionChanges=@()
+    notificationScope='A separate hidden top-level window observes real settings broadcasts in the hosted session. WebView-specific receipt is not inferred.'
     capture='One DXGI duplication over each trial. No-update and pointer-only polls retain the last timestamped desktop row.'
     runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion
     scope='Native foreground hover pixels on one inactive sidebar control. No DOM or CSS readback and no display-DPI or whole-app animation claim.' }
@@ -24,6 +29,7 @@ function Write-Report { $report | ConvertTo-Json -Depth 15 | Set-Content -Litera
 Write-Report
 
 $session = $null
+$receiver = $null
 $original = $null
 try {
     $base = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
@@ -43,30 +49,9 @@ try {
 
     # Compile the existing window/pipe guard and normal-quit path without launching it.
     & (Join-Path $PSScriptRoot 'verify-native-uia.ps1') -CompileOnly | Out-Null
-    Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-
-public static class HostedMotionState {
-    [DllImport("user32.dll", EntryPoint="SystemParametersInfoW", SetLastError=true)]
-    static extern bool GetSetting(uint action, uint arg, out int value, uint flags);
-    [DllImport("user32.dll", EntryPoint="SystemParametersInfoW", SetLastError=true)]
-    static extern bool SetSetting(uint action, uint arg, IntPtr value, uint flags);
-
-    public static bool AnimationsEnabled() {
-        if (!GetSetting(0x1042, 0, out int value, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
-        return value != 0;
-    }
-
-    public static void SetAnimations(bool value) {
-        // Broadcast the change in this isolated session, with no persistent profile change.
-        if (!SetSetting(0x1043, 0, new IntPtr(value ? 1 : 0), 2))
-            throw new Win32Exception(Marshal.GetLastWin32Error());
-        if (AnimationsEnabled() != value) throw new InvalidOperationException("Windows did not retain the requested session motion state.");
-    }
-}
-'@
+    $receiverSource = Join-Path $PSScriptRoot 'HostedMotionNotifications.cs'
+    Add-Type -LiteralPath $receiverSource
+    $report.notificationSourceSha256 = (Get-FileHash -LiteralPath $receiverSource).Hash.ToLowerInvariant()
 
     $fixtureCode = @'
 import { mkdir } from 'node:fs/promises';
@@ -137,6 +122,34 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
 
     function Select-Motion([string]$option) {
         if ($session.SelectCombo('动效',$option,$false,$false) -cne $option) { throw 'The live motion option could not be retained.' }
+    }
+
+    function Set-ObservedMotion([bool]$requested, [string]$reason, [switch]$Restore) {
+        if (-not $Restore -and $session.WindowIdentity().foregroundHandle -ne $session.Handle) {
+            throw 'The owned test window is no longer in the foreground.'
+        }
+        $before = [HostedMotionNotifications]::AnimationsEnabled()
+        if ($before -eq $requested) { throw 'A real setting change is required for fresh broadcast evidence.' }
+        $change = [ordered]@{ number=1+$report.motionChanges.Count; reason=$reason; before=$before
+            requested=$requested; confirmed=$false }
+        $report.motionChanges += $change
+        $report.attemptedSystemChange = $true
+        Write-Report
+        $change.requestQpc = [Diagnostics.Stopwatch]::GetTimestamp()
+        [HostedMotionNotifications]::SetAnimations($requested)
+        $change.observedValue = [HostedMotionNotifications]::AnimationsEnabled()
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            $change.notifications = @($receiver.Snapshot() | Where-Object Qpc -GE $change.requestQpc)
+            $matching = @($change.notifications | Where-Object Action -EQ 0x1043)
+            if ($matching.Count) { break }
+            Start-Sleep -Milliseconds 50
+        } while ($clock.ElapsedMilliseconds -lt 2000)
+        $change.confirmed = $change.observedValue -eq $requested -and $matching.Count -gt 0
+        Write-Report
+        if (-not $change.confirmed) {
+            throw 'No matching WM_SETTINGCHANGE (0x1043) arrived after a confirmed Windows animation-state change.'
+        }
     }
 
     function Distance-Rgb([uint32]$a,[uint32]$b) {
@@ -299,7 +312,12 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         $report.phase = $name
         $arm = [ordered]@{ name=$name; osAnimationsEnabled=$expectedEnabled; expectTransition=$expectTransition; trials=@() }
         $report.arms += $arm
-        if ([HostedMotionState]::AnimationsEnabled() -ne $expectedEnabled) { throw 'Unexpected OS setting before this arm.' }
+        $verified = $report.motionChanges[-1]
+        if (-not $verified.confirmed -or $verified.requested -ne $expectedEnabled -or
+            [HostedMotionNotifications]::AnimationsEnabled() -ne $expectedEnabled) {
+            throw 'The current OS state lacks verified broadcast evidence before this arm.'
+        }
+        $arm.osNotification = $verified.number
         $points = $report.points
         for ($attempt=1; $attempt -le $policy.trials; $attempt++) {
             if ($button.Current.IsOffscreen -or $button.Current.BoundingRectangle -ne $geometry) {
@@ -327,23 +345,29 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
             Write-Report
         }
 
-        if ([HostedMotionState]::AnimationsEnabled() -ne $expectedEnabled) { throw 'OS setting changed during this arm.' }
+        if ([HostedMotionNotifications]::AnimationsEnabled() -ne $expectedEnabled) { throw 'OS setting changed during this arm.' }
         $arm.pairedObservationPassed = ($arm.trials.Count -eq $policy.trials -and
             @($arm.trials | Where-Object { $_.status -cne 'observed' }).Count -eq 0)
         Write-Report
     }
 
-    $original = [HostedMotionState]::AnimationsEnabled()
+    $report.phase = 'preflight-motion-notification'
+    $receiver = [HostedMotionNotifications]::new()
+    $original = [HostedMotionNotifications]::AnimationsEnabled()
     $report.originalAnimationsEnabled = $original
     Select-Motion '轻动效'
+    Set-ObservedMotion (-not $original) 'preflight-opposite'
+    Set-ObservedMotion $original 'preflight-original'
+    Start-Sleep -Milliseconds 550
     Run-Arm 'explicit-light-preflight' $original $true
 
+    $report.phase = 'system-enabled-notification'
     Select-Motion '跟随系统（默认）'
-    $report.attemptedSystemChange = $true
-    [HostedMotionState]::SetAnimations($true)
+    if (-not $original) { Set-ObservedMotion $true 'system-enabled' }
     Start-Sleep -Milliseconds 550
     Run-Arm 'system-animations-enabled' $true $true
-    [HostedMotionState]::SetAnimations($false)
+    $report.phase = 'system-disabled-notification'
+    Set-ObservedMotion $false 'system-disabled'
     Start-Sleep -Milliseconds 550
     Run-Arm 'system-animations-disabled' $false $false
     Select-Motion '轻动效'
@@ -358,10 +382,19 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
 } finally {
     if ($report.attemptedSystemChange) {
         try {
-            if ([HostedMotionState]::AnimationsEnabled() -ne $original) { [HostedMotionState]::SetAnimations($original) }
-            $report.restoredAnimationsEnabled = [HostedMotionState]::AnimationsEnabled()
-            $report.systemRestored = $report.restoredAnimationsEnabled -eq $original
+            if ([HostedMotionNotifications]::AnimationsEnabled() -ne $original) {
+                Set-ObservedMotion $original 'restore-initial-state' -Restore
+            }
         } catch { $report.restoreError = $_.Exception.GetBaseException().Message }
+        finally {
+            try {
+                $report.restoredAnimationsEnabled = [HostedMotionNotifications]::AnimationsEnabled()
+                $report.systemRestored = $report.restoredAnimationsEnabled -eq $original
+            } catch { $report.restoreReadbackError = $_.Exception.GetBaseException().Message }
+        }
+    }
+    if ($receiver) {
+        try { $receiver.Dispose() } catch { $report.notificationCloseError = $_.Exception.GetBaseException().Message }
     }
     if ($session) {
         try {
@@ -371,7 +404,8 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         catch { $report.exitError = $_.Exception.GetBaseException().Message }
         finally { $session.Dispose() }
     }
-    if (-not $report.systemRestored -or -not $report.closedNormally) { $report.status = 'incomplete' }
+    if (-not $report.systemRestored -or -not $report.closedNormally -or $report.restoreError -or
+        $report.notificationCloseError) { $report.status = 'incomplete' }
     $report.finishedAt = [DateTime]::UtcNow.ToString('o')
     Write-Report
 }
@@ -380,5 +414,6 @@ $outcomes = @($report.arms | ForEach-Object {
         trials=@($_.trials | ForEach-Object { [ordered]@{status=$_.status; error=$_.error; batches=$_.postTriggerCoalescedSamples} }) }
 })
 [ordered]@{status=$report.status; phase=$report.phase; systemRestored=$report.systemRestored; closedNormally=$report.closedNormally; arms=$outcomes;
-    candidateSha256=$ExpectedSha256; motionControlBeforeSelection=$report.motionControlBeforeSelection; error=$report.error} | ConvertTo-Json -Compress
+    setterFlags=$report.setterFlags; motionChanges=$report.motionChanges; candidateSha256=$ExpectedSha256; error=$report.error} |
+    ConvertTo-Json -Depth 8 -Compress
 if ($report.status -cne 'observed-visible-system-motion') { exit 1 }
