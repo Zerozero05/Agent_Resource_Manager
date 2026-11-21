@@ -1,10 +1,10 @@
-name: Compare extended styles on two owned synthetic WGC windows
+name: Verify frame collection with an agile WGC delegate
 on: create
 permissions:
   contents: read
 jobs:
   capability:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-wgc-style-ab-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-wgc-agile-probe-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -16,7 +16,7 @@ jobs:
         timeout-minutes: 2
         run: |
           $ErrorActionPreference = 'Stop'
-          $report = Join-Path $env:RUNNER_TEMP 'wgc-window-style-ab.json'
+          $report = Join-Path $env:RUNNER_TEMP 'wgc-window-agile-probe.json'
           $stage = 'verify-hosted-session'
           try {
             if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
@@ -33,7 +33,7 @@ jobs:
             if (!$env:WindowsSdkDir -or !$env:WindowsSDKVersion) { throw 'An existing Windows SDK is required.' }
             $include = Join-Path (Join-Path $env:WindowsSdkDir 'Include') ($env:WindowsSDKVersion.TrimEnd('\','/'))
             foreach ($file in @('winrt/windows.graphics.capture.h','um/windows.graphics.capture.interop.h',
-                'um/windows.graphics.directx.direct3d11.interop.h','winrt/wrl/client.h','winrt/wrl/event.h')) {
+                'um/windows.graphics.directx.direct3d11.interop.h','winrt/wrl/client.h','winrt/wrl/implements.h')) {
               if (!(Test-Path -LiteralPath (Join-Path $include $file) -PathType Leaf)) { throw "The installed Windows SDK lacks $file." }
             }
             $native = Join-Path $env:RUNNER_TEMP 'arm-wgc-fixture.exe'
@@ -100,7 +100,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Agent_Resource_Manager_wgc_window_style_ab_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/wgc-window-style-ab.json
+          name: Agent_Resource_Manager_wgc_window_agile_probe_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/wgc-window-agile-probe.json
           if-no-files-found: error
           retention-days: 14

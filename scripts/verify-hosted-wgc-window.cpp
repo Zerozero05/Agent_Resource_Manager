@@ -10,7 +10,7 @@
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <wrl/client.h>
-#include <wrl/event.h>
+#include <wrl/implements.h>
 #include <wrl/wrappers/corewrappers.h>
 #include <array>
 #include <cstdint>
@@ -36,7 +36,7 @@ using Microsoft::WRL::ComPtr;
 using Microsoft::WRL::Wrappers::HStringReference;
 
 constexpr wchar_t windowClass[] = L"ArmWgcSingleOwnedFixture";
-constexpr wchar_t branch[] = L"codex/hosted-wgc-style-ab-20261121";
+constexpr wchar_t branch[] = L"codex/hosted-wgc-agile-probe-20261121";
 constexpr int width = 320;
 constexpr int height = 180;
 constexpr UINT row = 90;
@@ -84,17 +84,27 @@ struct Signal {
     Signal() { require(handle != nullptr, "frame-event"); }
     ~Signal() { CloseHandle(handle); }
 };
+using FrameHandler = __FITypedEventHandler_2_Windows__CGraphics__CCapture__CDirect3D11CaptureFramePool_IInspectable;
+class AgileFrameHandler final : public Microsoft::WRL::RuntimeClass<
+    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, FrameHandler, Microsoft::WRL::FtmBase> {
+public:
+    explicit AgileFrameHandler(const std::shared_ptr<Signal>& signal) : signal_(signal) {}
+    HRESULT STDMETHODCALLTYPE Invoke(IDirect3D11CaptureFramePool*, IInspectable*) override {
+        return SetEvent(signal_->handle) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+    }
+private:
+    std::shared_ptr<Signal> signal_;
+};
 struct FrameNotification {
     IDirect3D11CaptureFramePool* pool;
     std::shared_ptr<Signal> signal = std::make_shared<Signal>();
     EventRegistrationToken token{};
     bool active = false;
     explicit FrameNotification(IDirect3D11CaptureFramePool* source) : pool(source) {
-        auto callback = Microsoft::WRL::Callback<__FITypedEventHandler_2_Windows__CGraphics__CCapture__CDirect3D11CaptureFramePool_IInspectable>(
-            [signal = signal](IDirect3D11CaptureFramePool*, IInspectable*) -> HRESULT {
-                return SetEvent(signal->handle) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
-            });
+        const auto callback = Microsoft::WRL::Make<AgileFrameHandler>(signal);
         require(callback != nullptr, "frame-event-callback");
+        ComPtr<IAgileObject> agile;
+        check(callback.As(&agile), "require-agile-frame-event-callback");
         check(pool->add_FrameArrived(callback.Get(), &token), "subscribe-frame-event");
         active = true;
     }
