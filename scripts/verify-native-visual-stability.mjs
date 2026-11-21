@@ -296,6 +296,20 @@ function relativeBox(text, frame) {
     assert.ok(validBox(box, frame));
     return box;
 }
+async function waitForEmptyFilterToChange(visual, roi) {
+    const deadline = performance.now() + visualPolicy.matchTimeoutMs;
+    let lastDifferent;
+    do {
+        const remaining = Math.floor(deadline - performance.now());
+        if (remaining < 1) break;
+        const current = await visual.call('match', roi, remaining);
+        if (!current.matched && current.pixelSha256 === lastDifferent) return;
+        lastDifferent = current.matched ? undefined : current.pixelSha256;
+        await sleep(visualPolicy.observationGapMs);
+    } while (performance.now() < deadline);
+    throw new Error('The empty filter state did not visibly change after the owned reset. No wheel was sent.');
+}
+
 export function referenceObservationRows(value) {
     // PowerShell's switch enumerates these collections before JSON serialization.
     const rows = value === null ? [] : Array.isArray(value) ? value : [value];
@@ -503,10 +517,19 @@ async function references(descriptor) {
         referencePhase = 'github-empty';
         await nativeClick('github');
         await scrollLibrary(false);
-        await point('allFiltered', '全部', '来源筛选');
-        await capture('github', [relativeBox((await element('当前筛选无结果')).bounds, ref.frame)], 'Native GitHub filter confirmed empty result.');
+        const emptyTitle = relativeBox((await element('当前筛选无结果')).bounds, ref.frame);
+        await capture('github', [emptyTitle], 'Native GitHub filter confirmed empty result.');
+        if (hostedReferenceFrame) {
+            const candidates = (await observeRows('state', { name: '清除筛选' }))
+                .filter(row => row.type === 'ControlType.Button' && row.enabled && !row.offscreen)
+                .map(row => unclippedNativeBox(row.bounds, ref.frame))
+                .filter(box => validBox(box, ref.frame) && box[1] >= emptyTitle[1] + emptyTitle[3]);
+            assert.equal(candidates.length, 1, 'Expected one visible reset below the confirmed empty heading.');
+            ref.controls.allFiltered = { ...boxCenter(candidates[0]), sourceName: '清除筛选', box: candidates[0] };
+        } else await point('allFiltered', '全部', '来源筛选');
         referencePhase = 'restore-all-after-github';
         await nativeClick('allFiltered');
+        if (hostedReferenceFrame) await waitForEmptyFilterToChange(visual, ref.states.github.rois[0]);
         await scrollLibrary(true);
         await semanticList(null);
         referencePhase = 'search-0000-before-open';
@@ -669,6 +692,7 @@ async function run(descriptor, pilot) {
             }
             else if (action === 'filter') {
                 await click(value ? 'github' : 'allFiltered');
+                if (!value && hostedReferenceFrame) await waitForEmptyFilterToChange(visual, ref.states.github.rois[0]);
                 await scrollLibrary(!value);
                 await waitState(value ? 'github' : 'all');
             }

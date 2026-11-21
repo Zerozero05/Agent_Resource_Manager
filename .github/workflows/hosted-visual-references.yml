@@ -1,4 +1,4 @@
-name: Prepare hosted visual references for 3536ca0
+name: Prepare hosted visual references using the visible filter reset
 on: create
 permissions:
   contents: read
@@ -19,7 +19,7 @@ env:
   FIRST_SEARCH_RESULT_BOUNDS: '433,671,201,31'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-3536ca0-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-r2-3536ca0-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
