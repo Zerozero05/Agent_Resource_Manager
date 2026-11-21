@@ -2322,42 +2322,52 @@ fn merge_state(
     current: &State,
     action: &str,
 ) -> Result<State, String> {
-    let mut merged = current.clone();
-    merged.skills = merge_records(
+    let skills = merge_records(
         &before.skills,
         &after.skills,
         &current.skills,
         "Skill",
         action,
     )?;
-    merged.sources = merge_records(
+    let sources = merge_records(
         &before.sources,
         &after.sources,
         &current.sources,
         "来源",
         action,
     )?;
-    merged.connections = merge_records(
+    let connections = merge_records(
         &before.connections,
         &after.connections,
         &current.connections,
         "客户端连接",
         action,
     )?;
-    merged.settings = merge_object(
+    let mut settings = current.settings.clone();
+    merge_object_into(
         &before.settings,
         &after.settings,
-        &current.settings,
+        &mut settings,
         "设置",
         &["ignoredClientConnections"],
     )?;
-    merged.local_roots = merge_records(
-        &before.local_roots,
-        &after.local_roots,
-        &current.local_roots,
-        "本地目录",
-        action,
-    )?;
+    let mut merged = State {
+        skills,
+        sources,
+        connections,
+        settings,
+        local_roots: merge_records(
+            &before.local_roots,
+            &after.local_roots,
+            &current.local_roots,
+            "本地目录",
+            action,
+        )?,
+        ignored_local_paths: current.ignored_local_paths.clone(),
+        check_mode: current.check_mode.clone(),
+        check_generation: current.check_generation,
+        check_summary: current.check_summary.clone(),
+    };
     if before.ignored_local_paths != after.ignored_local_paths {
         merged.ignored_local_paths.retain(|path| {
             !before.ignored_local_paths.contains(path) || after.ignored_local_paths.contains(path)
@@ -2472,9 +2482,9 @@ fn merge_records(
                     ) {
                         prior["runtimeAudit"] = live["runtimeAudit"].clone();
                     }
-                    merged[index] = merge_object(&prior, &next, live, kind, protected)?;
+                    merge_object_into(&prior, &next, &mut merged[index], kind, protected)?;
                 } else {
-                    merged[index] = merge_object(prior, next, &merged[index], kind, protected)?;
+                    merge_object_into(prior, next, &mut merged[index], kind, protected)?;
                 }
             }
             (Some(next), None) if next != prior => {
@@ -2545,23 +2555,26 @@ fn same_runtime_audit_proof(left: &Value, right: &Value) -> bool {
     }
 }
 
-fn merge_object(
+// The output is a private copy of the live value, discarded by the caller on failure.
+fn merge_object_into(
     before: &Value,
     after: &Value,
-    current: &Value,
+    output: &mut Value,
     kind: &str,
     protected: &[&str],
-) -> Result<Value, String> {
-    let (Some(prior), Some(next), Some(live)) =
-        (before.as_object(), after.as_object(), current.as_object())
-    else {
-        return if current == before || current == after {
-            Ok(after.clone())
+) -> Result<(), String> {
+    let (Some(prior), Some(next), Some(live)) = (
+        before.as_object(),
+        after.as_object(),
+        output.as_object_mut(),
+    ) else {
+        return if *output == *before || *output == *after {
+            *output = after.clone();
+            Ok(())
         } else {
             Err(format!("{kind}在任务运行期间已变化"))
         };
     };
-    let mut merged = live.clone();
     let keys: BTreeSet<_> = prior.keys().chain(next.keys()).collect();
     for key in keys {
         if protected.contains(&key.as_str()) || prior.get(key) == next.get(key) {
@@ -2572,14 +2585,14 @@ fn merge_object(
         }
         match next.get(key) {
             Some(value) => {
-                merged.insert(key.clone(), value.clone());
+                live.insert(key.clone(), value.clone());
             }
             None => {
-                merged.remove(key);
+                live.remove(key);
             }
         }
     }
-    Ok(Value::Object(merged))
+    Ok(())
 }
 
 fn rebase_result(
@@ -6915,15 +6928,19 @@ mod tests {
         let (_dir, service) = fixture();
         let before = service.manager.lock().unwrap().state.clone();
         let mut after = before.clone();
+        after.skills[0]["description"] = json!("Checked metadata");
         after.skills[0]["status"] = json!("synced");
         after.settings["uiZoom"] = json!(125);
         let mut current = before.clone();
         current.skills[0]["status"] = json!("both_modified");
         current.settings["uiFontSize"] = json!(18);
+        let current_skill = current.skills[0].clone();
         assert!(merge_state(&before, &after, &current, "refresh").is_err());
+        assert_eq!(current.skills[0], current_skill);
         assert_eq!(current.settings["uiZoom"], 100);
         current.skills[0]["status"] = before.skills[0]["status"].clone();
         let merged = merge_state(&before, &after, &current, "refresh").unwrap();
+        assert_eq!(merged.skills[0]["description"], "Checked metadata");
         assert_eq!(merged.settings["uiZoom"], 125);
         assert_eq!(merged.settings["uiFontSize"], 18);
     }
