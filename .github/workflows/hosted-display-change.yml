@@ -1,0 +1,71 @@
+name: Verify owned app through one reversible Windows mode change
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  CANDIDATE_SOURCE: '0ac5e79b7a3d1184e7602f241793f240b0609d44'
+  CANDIDATE_RUN_ID: '44880393531'
+  CANDIDATE_ARTIFACT_ID: '14698411078'
+  CANDIDATE_ARCHIVE_SHA256: '5ea596eb7d95de7df46bc1929c8694e56c8c5b72f7ded2915987aefa83ce152e'
+  CANDIDATE_SHA256: 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24'
+jobs:
+  verify:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-display-change-0ac5e79-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    runs-on: windows-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify the exact candidate and supported hosted image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              $env:ImageOS -cne 'win25-vs2026' -or $env:ImageVersion -cne '20261116.315.1' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'The exact tested hosted Windows image is required.' }
+          $expected = @('.github/workflows/hosted-display-change.yml','scripts/verify-hosted-display-change.ps1')
+          $changed = @(git diff --name-only $env:CANDIDATE_SOURCE HEAD --)
+          if ($LASTEXITCODE -ne 0 -or ($changed -join '|') -cne ($expected -join '|')) {
+            throw 'Only this workflow and its validation script may differ from the pinned candidate.'
+          }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or
+              $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
+              $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push') { throw 'Wrong candidate run.' }
+          $artifactName = "Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_$env:CANDIDATE_SOURCE"
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+          $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $artifactName -and -not $_.expired })
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID -or
+              $match[0].digest -cne "sha256:$env:CANDIDATE_ARCHIVE_SHA256") { throw 'Wrong candidate artifact.' }
+          $directory = Join-Path $env:RUNNER_TEMP 'arm-physical-display-candidate'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $artifactName --dir $directory
+          if ($LASTEXITCODE -ne 0) { throw 'Could not retrieve the pinned candidate.' }
+          $program = Join-Path $directory 'agent-resource-manager.exe'
+          $info = Get-Content -LiteralPath (Join-Path $directory 'BUILD_INFO.json') -Raw | ConvertFrom-Json
+          if ((Get-FileHash -LiteralPath $program).Hash -ine $env:CANDIDATE_SHA256 -or
+              $info.executableSha256 -cne $env:CANDIDATE_SHA256 -or $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or
+              $info.workflowRunId -ne $run.id -or $info.workflowRunAttempt -ne 1 -or
+              $info.repository -cne $env:GITHUB_REPOSITORY -or $info.version -cne '0.3.0-dev.1') {
+            throw 'The pinned candidate executable and metadata do not agree.'
+          }
+      - name: Exercise native search before and after a reversible display change
+        timeout-minutes: 5
+        run: ./scripts/verify-hosted-display-change.ps1
+      - name: Preserve only the synthetic transition receipt and owned-window images
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        with:
+          name: Agent_Resource_Manager_hosted_display_change_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-hosted-display-audit/
+          if-no-files-found: warn
+          retention-days: 14
