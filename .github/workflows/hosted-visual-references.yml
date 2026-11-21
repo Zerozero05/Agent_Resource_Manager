@@ -1,4 +1,4 @@
-name: Prepare hosted visual references for 3536ca0
+name: Observe hosted GitHub filter return for 3536ca0
 on: create
 permissions:
   contents: read
@@ -19,9 +19,9 @@ env:
   FIRST_SEARCH_RESULT_BOUNDS: '433,671,201,31'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-3536ca0-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-filter-return-3536ca0-20261121' }}
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 7
     defaults:
       run:
         shell: pwsh
@@ -84,9 +84,9 @@ jobs:
           $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
           $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
           Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
-      - name: Generate owned synthetic ROI references only
+      - name: Observe one owned synthetic physical filter return
         id: generate
-        timeout-minutes: 18
+        timeout-minutes: 5
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
           $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
@@ -181,6 +181,7 @@ jobs:
               transportSha256 = $env:CANDIDATE_SHA256
               hostedReferenceFrame = $referenceFrame
               hostedFirstSearchReceipt = $firstSearch
+              hostedFilterRestoreDiagnostic = $true
             }
             $text = [IO.File]::ReadAllText($module)
             foreach ($key in $entries.Keys) {
@@ -202,165 +203,82 @@ jobs:
                 (Split-Path -Parent $referenceRoot) -ine $approved -or (Split-Path -Leaf $referenceRoot) -cnotmatch '^native-visual-[A-Za-z0-9]+$') {
               throw 'Expected the exact generated visual descriptor.'
             }
-            $stage = 'capture-owned-references'
+            $stage = 'observe-owned-filter-return'
             $capture = @(& node $module --references $descriptorPath)
             if ($LASTEXITCODE -ne 0) {
               $detail = Join-Path $referenceRoot 'reference-failure.json'
               if (Test-Path -LiteralPath $detail -PathType Leaf) {
                 $referenceError = Get-Content -LiteralPath $detail -Raw | ConvertFrom-Json
               }
-              throw 'The original reference generation did not complete.'
+              throw 'The isolated filter-return diagnostic did not complete.'
             }
             $result = ($capture -join [Environment]::NewLine) | ConvertFrom-Json
-            $referencePath = Join-Path $referenceRoot 'visual-references.json'
+            $report = Join-Path $referenceRoot 'filter-restore-diagnostic.json'
             $driverPath = Join-Path $referenceRoot 'reference-driver.json'
             $descriptor = Get-Content -LiteralPath $descriptorPath -Raw | ConvertFrom-Json
-            $refs = Get-Content -LiteralPath $referencePath -Raw | ConvertFrom-Json
+            $probe = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
             $driver = Get-Content -LiteralPath $driverPath -Raw | ConvertFrom-Json
-            $stage = 'validate-reference-receipt'
-            if ($result.status -cne 'references-generated-review-required' -or $result.referenceCount -ne 72 -or
-                $result.visualApprovalRequired -ne $true -or $result.pilotRequired -ne $true -or (Resolve-Path -LiteralPath $result.path).Path -ine $referencePath -or
-                $descriptor.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $descriptor.buildInfoSha256 -cne $infoDigest -or
+            $stage = 'validate-filter-return-receipt'
+            if ($result.status -cne 'filter-restore-observed' -or (Resolve-Path -LiteralPath $result.path).Path -ine $report -or
+                $probe.status -cne 'filter-restore-observed' -or $probe.scopedUseOnly -ne $true -or
+                $probe.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $probe.datasetFingerprint -cne $env:FIRST_SEARCH_FIXTURE_SHA256 -or
                 $descriptor.dataset.syntheticOnly -ne $true -or $descriptor.dataset.skillCount -ne 1000 -or $descriptor.dataset.toolCount -ne 100 -or
-                $refs.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $refs.datasetFingerprint -cne $descriptor.dataset.dataFingerprint -or
-                $refs.semanticReferencePhaseCompleted -ne $true -or $refs.capture -cne 'foreground-owned-CopyFromScreen' -or
-                $driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or $driver.closedNormally -ne $true -or $driver.dataDirectory -ine $descriptor.dataset.dataDir) {
-              throw 'The reference receipt does not bind to a completed synthetic session and graceful exit.'
-            }
+                $probe.observationBudgetMs -ne 15000 -or ($probe.completedStatesBeforeRestore -join ',') -cne 'all,search-0000,github' -or
+                $probe.click.clicked -ne $true -or $probe.wheel.scrolledUp -ne $true -or
+                $probe.click.x -ne $probe.controls.allFiltered.x -or $probe.click.y -ne $probe.controls.allFiltered.y -or
+                $probe.wheel.x -ne $probe.controls.search.x -or $probe.wheel.y -ne $probe.controls.search.y -or
+                @($probe.pixels.regions).Count -ne 3 -or ($probe.pixels.regions.role -join ',') -cne 'result-table,result-count,empty-filter-title' -or
+                $probe.semantic.confirmedTwentyTitlesAndVisibleEdit -isnot [bool] -or $probe.exitEvidence.normalExit -ne $true -or
+                $driver.closedNormally -ne $true -or $driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or
+                $driver.dataDirectory -ine $descriptor.dataset.dataDir) { throw 'The diagnostic receipt lacks bound observations and safe exit.' }
+
             foreach ($field in $referenceFrame.Keys) {
-              if ($refs.frame.$field -ne $referenceFrame[$field]) { throw 'The captured reference frame differs from the hosted preflight.' }
+              if ($probe.frame.$field -ne $referenceFrame[$field]) { throw 'The diagnostic frame changed.' }
             }
             foreach ($field in $firstSearch.Keys) {
-              if ($refs.firstSearchPreflight.$field -cne $firstSearch[$field]) { throw 'The captured references do not bind to the verified first-search observation.' }
+              if ($probe.firstSearchPreflight.$field -cne $firstSearch[$field]) { throw 'The diagnostic did not bind to the verified first-search observation.' }
             }
-            $sheets = @($refs.reviewSheets)
-            $roiCount = @($refs.states.PSObject.Properties.Value | ForEach-Object { $_.rois }).Count
-            if ($sheets.Count -ne 9 -or $roiCount -ne 210) { throw 'Expected exactly nine montage sheets from 210 synthetic crops.' }
-            $sheetPaths = for ($i = 0; $i -lt $sheets.Count; $i++) {
-              $sheet = $sheets[$i]
-              $path = Join-Path $referenceRoot ("references/review-{0:D2}.png" -f ($i + 1))
-              if ((Resolve-Path -LiteralPath $sheet.path).Path -ine $path -or
-                  ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                  (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sheet.sha256) {
-                throw 'A synthetic ROI review sheet failed its exact path or digest check.'
-              }
-              $path
+            if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:CANDIDATE_SHA256) {
+              throw 'The candidate executable changed during the session.'
             }
-            $output = Join-Path $env:RUNNER_TEMP 'arm-visual-reference-review'
+            $output = Join-Path $env:RUNNER_TEMP 'arm-filter-return-diagnostic'
             New-Item -ItemType Directory -Path $output | Out-Null
-            foreach ($path in @($descriptorPath, $referencePath, $driverPath) + $sheetPaths) { Copy-Item -LiteralPath $path -Destination $output }
-            $stage = 'package-verified-individual-rois'
-            $referenceSha256 = (Get-FileHash -LiteralPath $referencePath -Algorithm SHA256).Hash.ToLowerInvariant()
-            $roiSource = Join-Path $referenceRoot 'references'
-            $sourceDirectory = Get-Item -LiteralPath $roiSource
-            if ($sourceDirectory -isnot [IO.DirectoryInfo] -or
-                ($sourceDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-              throw 'The frozen ROI source is not an ordinary owned directory.'
-            }
-            $roiTransport = Join-Path $env:RUNNER_TEMP 'arm-visual-reference-rois'
-            $roiDestination = Join-Path $roiTransport 'references'
-            New-Item -ItemType Directory -Path $roiTransport | Out-Null
-            New-Item -ItemType Directory -Path $roiDestination | Out-Null
-            $roiFiles = @(foreach ($state in $refs.states.PSObject.Properties) {
-              if ($state.Name -cnotmatch '^(all|github|document|homeDocument|documentTab|closed|search-[0-9]{4})$') {
-                throw 'An unexpected reference state cannot be packaged.'
-              }
-              for ($index = 0; $index -lt $state.Value.rois.Count; $index++) {
-                $roi = $state.Value.rois[$index]
-                $fileName = "$($state.Name)-$index.png"
-                $sourcePath = Join-Path $roiSource $fileName
-                if ($roi.path -ine $sourcePath) { throw 'The frozen ROI path is not its canonical owned path.' }
-                $item = Get-Item -LiteralPath $sourcePath
-                if ($item -isnot [IO.FileInfo] -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                    (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $roi.sha256) {
-                  throw 'The frozen ROI failed its ordinary-file or original digest check.'
-                }
-                $destinationPath = Join-Path $roiDestination $fileName
-                Copy-Item -LiteralPath $sourcePath -Destination $destinationPath
-                if ((Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $roi.sha256) {
-                  throw 'The transported ROI does not match its frozen original.'
-                }
-                [ordered]@{path="references/$fileName"; state=$state.Name; index=$index; role=$roi.role; box=$roi.box; sha256=$roi.sha256}
-              }
-            })
-            if ($roiFiles.Count -ne $roiCount) { throw 'The transported ROI count does not match the full frozen set.' }
-            $roiManifest = Join-Path $roiTransport 'roi-files.json'
+            Copy-Item -LiteralPath $report -Destination $output
             [ordered]@{
-              format = 'agent-resource-manager-native-visual-roi-transport-v1'
-              syntheticOnly = $true
-              candidateSource = $env:CANDIDATE_SOURCE
-              candidateSha256 = $env:CANDIDATE_SHA256
-              fixtureSha256 = $refs.datasetFingerprint
-              referenceSha256 = $referenceSha256
-              roiCount = $roiCount
-              files = $roiFiles
-            } | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $roiManifest -Encoding utf8NoBOM
-            $receipt = [ordered]@{
-              status = 'references-generated-review-required'
-              candidateSource = $env:CANDIDATE_SOURCE
-              candidateSha256 = $env:CANDIDATE_SHA256
-              candidateRunId = $env:CANDIDATE_RUN_ID
-              candidateArtifactId = $env:CANDIDATE_ARTIFACT_ID
-              buildInfoSha256 = $infoDigest
-              referenceSha256 = $referenceSha256
-              roiTransportManifestSha256 = (Get-FileHash -LiteralPath $roiManifest -Algorithm SHA256).Hash.ToLowerInvariant()
-              descriptorSha256 = (Get-FileHash -LiteralPath $descriptorPath -Algorithm SHA256).Hash.ToLowerInvariant()
-              driverSha256 = (Get-FileHash -LiteralPath $driverPath -Algorithm SHA256).Hash.ToLowerInvariant()
-              desktop = $desktop
-              referenceFrame = $referenceFrame
-              hostedFirstSearchReceipt = $firstSearch
-              referenceWorkflow = [ordered]@{
-                repository=$env:GITHUB_REPOSITORY; headSha=$env:GITHUB_SHA; runId=$env:GITHUB_RUN_ID; attempt=[int]$env:GITHUB_RUN_ATTEMPT
-              }
-              hostEnvironment = [ordered]@{
-                imageOs=$env:ImageOS; imageVersion=$env:ImageVersion
-                windowsVersion=[Environment]::OSVersion.Version.ToString(); nodeVersion=(& node --version)
-              }
-              referenceCount = 72
-              roiCount = $roiCount
-              sheets = $sheets.Count
-              normalExit = $true
-              visualReviewCompleted = $false
-              pilotRun = $false
-            }
-            $receipt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $output 'receipt.json') -Encoding utf8NoBOM
-            $receipt | ConvertTo-Json -Depth 5 -Compress
+              status='filter-restore-observed'; candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$env:CANDIDATE_SHA256
+              diagnosticHead=$env:GITHUB_SHA; runId=$env:GITHUB_RUN_ID; runAttempt=[int]$env:GITHUB_RUN_ATTEMPT
+              diagnosticSha256=(Get-FileHash -LiteralPath $report -Algorithm SHA256).Hash.ToLowerInvariant()
+              visualOutcome=$probe.pixels.outcome; semanticConfirmed=$probe.semantic.confirmedTwentyTitlesAndVisibleEdit
+              normalExit=$probe.exitEvidence.normalExit; fullVisualAcceptance=$false
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $output 'receipt.json') -Encoding utf8NoBOM
           } catch {
-            [ordered]@{status='reference-preflight-failed'; stage=$stage; candidateSource=$env:CANDIDATE_SOURCE;
+            [ordered]@{status='filter-restore-diagnostic-failed'; stage=$stage; candidateSource=$env:CANDIDATE_SOURCE;
               candidateSha256=$env:CANDIDATE_SHA256; message=$_.Exception.Message; referenceError=$referenceError;
               desktop=$desktop; referenceFrame=$referenceFrame} |
-              ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $failure -Encoding utf8NoBOM
+              ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $failure -Encoding utf8NoBOM
             throw
           }
-      - name: Record a pre-reference failure
+      - name: Record an interrupted diagnostic
         if: ${{ always() && steps.generate.outcome != 'success' }}
         run: |
           $failure = Join-Path $env:RUNNER_TEMP 'arm-visual-reference-failure.json'
           if (!(Test-Path -LiteralPath $failure -PathType Leaf)) {
-            [ordered]@{status='reference-preflight-failed'; stage='workflow-setup-or-candidate-preflight'; candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$env:CANDIDATE_SHA256} |
+            [ordered]@{status='filter-restore-diagnostic-failed'; stage='workflow-setup'; candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$env:CANDIDATE_SHA256} |
               ConvertTo-Json | Set-Content -LiteralPath $failure -Encoding utf8NoBOM
           }
-      - name: Upload only synthetic reference sheets and bound manifests
+      - name: Upload bounded synthetic diagnostic receipts
         if: ${{ steps.generate.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Agent_Resource_Manager_visual_references_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arm-visual-reference-review/
+          name: Agent_Resource_Manager_filter_return_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-filter-return-diagnostic/
           if-no-files-found: error
           retention-days: 14
-      - name: Upload the individually verified synthetic reference crops and crop manifest
-        if: ${{ steps.generate.outcome == 'success' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: Agent_Resource_Manager_visual_reference_rois_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arm-visual-reference-rois/
-          if-no-files-found: error
-          retention-days: 14
-      - name: Upload only the synthetic preflight failure receipt
+      - name: Upload only the interrupted synthetic diagnostic receipt
         if: ${{ always() && steps.generate.outcome != 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Agent_Resource_Manager_visual_reference_failure_${{ github.run_id }}_${{ github.run_attempt }}
+          name: Agent_Resource_Manager_filter_return_failure_${{ github.run_id }}_${{ github.run_attempt }}
           path: ${{ runner.temp }}/arm-visual-reference-failure.json
           if-no-files-found: error
           retention-days: 14

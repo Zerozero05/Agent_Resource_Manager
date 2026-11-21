@@ -22,6 +22,7 @@ const buildInfoSha256 = '0bdcc16ff13fffa08045b791abcb93897b24c91153675127c6fddd8
 const transportSha256 = 'f9dfe387f6900925808cdd16b9785f29b96e90c40b554b828b17557f99bd846f';
 const hostedReferenceFrame = null;
 const hostedFirstSearchReceipt = null;
+const hostedFilterRestoreDiagnostic = false;
 const helper = fileURLToPath(new URL('native-visual-input.ps1', import.meta.url));
 const sourceFiles = ['verify-native-visual-stability.mjs', 'native-visual-input.ps1', 'performance-policy.mjs', 'performance-fixture.mjs', 'diagnose-native-idle-memory.mjs', 'native-uia-client.mjs', 'verify-native-uia.ps1'].map(name => fileURLToPath(new URL(name, import.meta.url)));
 const format = 'agent-resource-manager-native-visual-stability-v1';
@@ -240,7 +241,7 @@ export class VisualSession {
             clearTimeout(deadline);
         }
     }
-    call(op, fields = {}) {
+    call(op, fields = {}, timeoutMs = 20000) {
         assert.ok(!this.exited, 'Visual driver has exited.');
         const id = this.nextId++;
         return new Promise((resolve, reject) => {
@@ -248,7 +249,7 @@ export class VisualSession {
                 this.pending.delete(id);
                 reject(new Error('Visual operation timed out. No input was replayed.'));
                 this.child.stdin.end();
-            }, 20000);
+            }, timeoutMs);
             this.pending.set(id, { resolve, reject, timer });
             this.child.stdin.write(JSON.stringify({ id, op, ...fields }) + '\n');
         });
@@ -303,13 +304,18 @@ export function referenceObservationRows(value) {
     return rows;
 }
 async function references(descriptor) {
+    if (hostedFilterRestoreDiagnostic) {
+        assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
+        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-filter-return-3536ca0-20261121');
+        assert.ok(hostedReferenceFrame && hostedFirstSearchReceipt);
+    }
     const { NativeUiaSession } = await import('./native-uia-client.mjs');
     await writeFile(join(descriptor.root, 'references-owner.json'), json({ startedAt: new Date().toISOString() }), { flag: 'wx' });
     await mkdir(join(descriptor.root, 'temp'), { recursive: true });
     await mkdir(join(descriptor.root, 'references'));
     const env = environment(descriptor.root);
     const savedTemp = process.env.TEMP, savedTmp = process.env.TMP;
-    let app, visual, failure, lastRead, exitEvidence;
+    let app, visual, failure, lastRead, exitEvidence, filterRestoreProbe;
     let referencePhase = 'launch-reference-session', quitRequested = false;
     const ref = { format, root: descriptor.root, candidateSha256, datasetFingerprint: descriptor.dataset.dataFingerprint, policy: visualPolicy, sources: descriptor.sources, controls: {}, states: {}, semanticReferencePhaseCompleted: false, capture: 'foreground-owned-CopyFromScreen', limitations: ['Reference semantics are confirmed with the existing native driver. Runtime verification uses frozen visible ROIs, not hidden DOM/AX row counting.'] };
     async function closeReferenceApp() {
@@ -415,8 +421,7 @@ async function references(descriptor) {
                 descriptionBox = relativeBox(selected.bounds, ref.frame);
             }
         }
-        async function semanticList(index) {
-            const deadline = performance.now() + visualPolicy.matchTimeoutMs;
+        async function semanticList(index, deadline = performance.now() + visualPolicy.matchTimeoutMs) {
             do {
                 const names = await observeRows('scopeNames', { scope: '可横向滚动的 Skill 列表' }, deadline);
                 const titles = names.filter(row => row.type === 'ControlType.Button' && /^Perf Skill \d{4}$/.test(row.name));
@@ -471,6 +476,72 @@ async function references(descriptor) {
             }
             ref.states[name] = { semanticConfirmedByNativeDriver: true, semantic, rois };
         }
+        async function filterReturnPixels(deadline, started) {
+            const rois = [...ref.states.all.rois, ...ref.states.github.rois];
+            let last, unchanged = 0;
+            observe: do {
+                const sample = [];
+                for (const roi of rois) {
+                    const remaining = Math.floor(deadline - performance.now());
+                    if (remaining < 1) break observe;
+                    const result = await visual.call('match', roi, remaining);
+                    sample.push({ role: roi.role, box: roi.box, ...result });
+                }
+                unchanged = last?.regions.every((region, index) => region.pixelSha256 === sample[index].pixelSha256)
+                    ? unchanged + 1 : 1;
+                const all = sample[0].matched && sample[1].matched, empty = sample[2].matched;
+                last = { elapsedMs: Math.round(performance.now() - started), regions: sample, all, empty, consecutive: unchanged };
+                if (performance.now() < deadline && unchanged >= visualPolicy.stableObservations && all && !empty)
+                    return { ...last, outcome: 'exact-visible-all' };
+                await sleep(visualPolicy.observationGapMs);
+            } while (performance.now() < deadline);
+            assert.ok(last, 'The three fixed visual regions did not complete an observation.');
+            return { ...last, outcome: last.empty && !last.all && unchanged >= visualPolicy.stableObservations
+                ? 'last-stable-pixels-match-github-empty' : 'pixels-differ-or-unsettled' };
+        }
+        async function diagnoseFilterReturn() {
+            filterRestoreProbe = { completedStatesBeforeRestore: Object.keys(ref.states), observationBudgetMs: visualPolicy.matchTimeoutMs };
+            filterRestoreProbe.click = await visual.call('click', ref.controls.allFiltered);
+            const afterClick = performance.now();
+            filterRestoreProbe.wheel = await scrollLibrary(true);
+            const afterWheel = performance.now();
+            const deadline = afterWheel + visualPolicy.matchTimeoutMs;
+            filterRestoreProbe.wheelAcknowledgedAfterClickMs = Math.round(afterWheel - afterClick);
+            // Independent screen sampling and the original scoped native read share a deadline.
+            // No AX response, extra wait or second input sits between the recorded click and wheel.
+            const [pixels, semantic] = await Promise.allSettled([
+                filterReturnPixels(deadline, afterWheel),
+                (async () => {
+                    try {
+                        await semanticList(null, deadline);
+                        return { confirmedTwentyTitlesAndVisibleEdit: true, elapsedMs: Math.round(performance.now() - afterWheel) };
+                    } catch (error) {
+                        return { confirmedTwentyTitlesAndVisibleEdit: false, elapsedMs: Math.round(performance.now() - afterWheel),
+                            lastRead, error: error.message };
+                    }
+                })()
+            ]);
+            filterRestoreProbe.pixels = pixels.status === 'fulfilled' ? pixels.value : { error: pixels.reason.message };
+            assert.equal(semantic.status, 'fulfilled');
+            filterRestoreProbe.semantic = semantic.value;
+            await visual.finish();
+            visual = null;
+            try {
+                await closeReferenceApp();
+            } catch (error) {
+                filterRestoreProbe.quitRequestError = error.message;
+                if (!exitEvidence?.normalExit) throw error;
+                app = null;
+            }
+            assert.equal(exitEvidence?.normalExit, true);
+            filterRestoreProbe.exitEvidence = exitEvidence;
+            if (pixels.status === 'rejected') throw pixels.reason;
+            const path = join(descriptor.root, 'filter-restore-diagnostic.json');
+            await writeFile(path, json({ status: 'filter-restore-observed', candidateSha256, datasetFingerprint: ref.datasetFingerprint,
+                frame: ref.frame, controls: ref.controls, firstSearchPreflight: ref.firstSearchPreflight,
+                scopedUseOnly: true, ...filterRestoreProbe }), { flag: 'wx' });
+            console.log(json({ status: 'filter-restore-observed', path }));
+        }
         referencePhase = 'initial-library';
         const initialSearchBounds = (await element('搜索 Skill', undefined, 'ControlType.Edit')).bounds;
         await point('search', '搜索 Skill', undefined, 'ControlType.Edit');
@@ -478,7 +549,8 @@ async function references(descriptor) {
         await point('check', '检查本地与 GitHub 变化');
         await semanticList(null);
         await capture('all', await tableRois(), 'Native initial list readiness and fixed 1000-Skill fixture.');
-        for (let index = 0; index < 66; index++) {
+        const searchCount = hostedFilterRestoreDiagnostic ? 1 : 66;
+        for (let index = 0; index < searchCount; index++) {
             referencePhase = 'search-' + String(index).padStart(4, '0');
             await nativeSearch(index);
             const title = `Perf Skill ${String(index).padStart(4, '0')}`;
@@ -506,6 +578,7 @@ async function references(descriptor) {
         await point('allFiltered', '全部', '来源筛选');
         await capture('github', [relativeBox((await element('当前筛选无结果')).bounds, ref.frame)], 'Native GitHub filter confirmed empty result.');
         referencePhase = 'restore-all-after-github';
+        if (hostedFilterRestoreDiagnostic) return await diagnoseFilterReturn();
         await nativeClick('allFiltered');
         await scrollLibrary(true);
         await semanticList(null);
@@ -580,7 +653,7 @@ async function references(descriptor) {
         else
             process.env.TMP = savedTmp;
         if (failure)
-            await writeFile(join(descriptor.root, 'reference-failure.json'), json({ status: 'failed-references', error: failure.message, referencePhase, lastRead, documentReading: ref.documentReading, completedStates: Object.keys(ref.states), exitEvidence, cleanupErrors }), { flag: 'wx' });
+            await writeFile(join(descriptor.root, 'reference-failure.json'), json({ status: 'failed-references', error: failure.message, referencePhase, lastRead, documentReading: ref.documentReading, completedStates: Object.keys(ref.states), exitEvidence, cleanupErrors, filterRestoreProbe }), { flag: 'wx' });
     }
 }
 async function run(descriptor, pilot) {
