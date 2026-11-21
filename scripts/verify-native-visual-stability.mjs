@@ -168,6 +168,20 @@ function protectedData(dataset) {
         db.close();
     }
 }
+function navigationDataDigest(dataset) {
+    const db = new DatabaseSync(dataset.dbPath, { readOnly: true });
+    try {
+        db.exec('BEGIN');
+        const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' AND name != 'workspace_state' ORDER BY name").all();
+        return hash(json(tables.map(({ name }) => {
+            assert.match(name, /^[a-z][a-z_]*$/);
+            const rows = db.prepare(`SELECT * FROM "${name}"`).all();
+            return { name, rows: rows.map(row => json(row)).sort() };
+        })));
+    } finally {
+        db.close();
+    }
+}
 async function candidate() { const bytes = await readFile(buildInfo); assert.equal(hash(bytes), buildInfoSha256); const info = JSON.parse(bytes.toString('utf8')); assert.equal(info.buildMode, 'release'); assert.equal(info.executableSha256, candidateSha256); assert.equal(info.diagnosticOnly === true, false); assert.equal(await digest(executable), candidateSha256); }
 async function prepare() {
     await candidate();
@@ -671,7 +685,7 @@ async function run(descriptor, pilot, shortRetention = false) {
     if (shortRetention) {
         assert.equal(process.env.GITHUB_ACTIONS, 'true');
         assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
-        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-global-check-control-0ac5e79-20261121');
+        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-short-navigation-pair-c2aed09-20261121');
         assert.ok(hostedRetentionReference);
         assert.equal(hash(refBytes), hostedRetentionReference.sha256);
     }
@@ -703,7 +717,7 @@ async function run(descriptor, pilot, shortRetention = false) {
     const env = environment(root);
     const report = { format, mode: name, status: 'running', startedAt: new Date().toISOString(), candidateSha256, transportSha256, descriptorPath: join(root, 'visual-dataset.json'), datasetFingerprint: descriptor.dataset.dataFingerprint, referenceSha256: hash(refBytes), approvalSha256: hash(approvalBytes), visualApproval: approval, policy: PERFORMANCE_POLICY, visualPolicy, measurementsUseAccessibility: false, capture: 'foreground-owned-CopyFromScreen', calibration: [], samples: [], cycles: [], checks: [], actions: [], normalExit: false, limitations: ['Visual state checks cover frozen visible ROIs, not hidden AX/DOM counts. Unicode search injection is not IME evidence. Previous UIA convergence failure remains retained. Normal Quit happens after sampling.'] };
     const save = () => writeFile(reportPath, json(report));
-    let child, exit, identity, visual, baseline;
+    let child, exit, identity, visual, baseline, navigationBaseline;
     try {
         const ownership = await assertNoUserManager({ transportSha256 });
         assert.ok(ownership.managers.every(process => process.role === 'mcpTransport'), 'Only verified formal MCP transports may already exist.');
@@ -809,18 +823,16 @@ async function run(descriptor, pilot, shortRetention = false) {
         await waitState('all');
         if (shortRetention) {
             report.shortRetentionPolicy = shortRetentionPolicy;
-            report.limitations.push('Short same-host diagnostic only. No result from this mode can pass or replace the 61-point convergence gate.');
-            const arm = process.env.ARM_SHORT_GLOBAL_CHECK_ARM;
-            assert.ok(['control', 'treatment'].includes(arm), 'The same-executable diagnostic requires an explicit arm.');
-            const enabled = arm === 'treatment';
-            report.globalCheckArm = arm;
-            async function intervention(phaseStart) {
-                const known = new Set((await observe(descriptor, identity, env, 'tasks')).tasks.map(task => task.id));
-                if (enabled) await click('check');
+            report.limitations.push('Same-host navigation diagnostic with fixed executable order. No global checks, convergence or latency gate.');
+            report.navigationOnly = true;
+            navigationBaseline = navigationDataDigest(descriptor.dataset);
+            const taskIds = async () => (await observe(descriptor, identity, env, 'tasks')).tasks.map(task => task.id).sort();
+            const known = await taskIds();
+            report.navigationTaskCount = known.length;
+            async function observeQuietSlot(phaseStart) {
+                assert.deepEqual(await taskIds(), known, 'The preceding navigation introduced an unexpected task.');
                 await sleep(phaseStart + shortRetentionPolicy.checkObservationOffsetMs - performance.now());
-                const added = (await observe(descriptor, identity, env, 'tasks')).tasks.filter(task => !known.has(task.id) && task.action === 'check_now');
-                assert.equal(added.length, Number(enabled), 'The matched check slot did not produce the required one-or-zero actual global tasks.');
-                if (enabled) report.checks.push({ taskId: added[0].id, action: added[0].action, initialStatus: added[0].status, observedAt: new Date().toISOString() });
+                assert.deepEqual(await taskIds(), known, 'A quiet diagnostic slot introduced an unexpected task.');
             }
             await cycle(0);
             const start = performance.now();
@@ -828,7 +840,7 @@ async function run(descriptor, pilot, shortRetention = false) {
             for (let index = 1; index <= shortRetentionPolicy.cycles; index++) {
                 const phaseStart = start + index * shortRetentionPolicy.intervalMs;
                 await sleep(phaseStart - performance.now());
-                await intervention(phaseStart);
+                await observeQuietSlot(phaseStart);
                 await cycle(index);
                 const sampleTime = phaseStart + shortRetentionPolicy.sampleOffsetMs;
                 await sleep(sampleTime - performance.now());
@@ -842,7 +854,7 @@ async function run(descriptor, pilot, shortRetention = false) {
             const tail = await sample(0, true);
             tail.elapsedMs = performance.now() - start;
             report.samples.push(tail);
-            assert.equal(new Set(report.checks.map(check => check.taskId)).size, enabled ? shortRetentionPolicy.cycles : 0);
+            assert.deepEqual(await taskIds(), known, 'Navigation accumulated unexpected backend tasks.');
             report.history = retainedCheckHistory(descriptor.dataset, report.checks);
             report.status = 'short-operations-completed';
         }
@@ -916,6 +928,11 @@ async function run(descriptor, pilot, shortRetention = false) {
             if (baseline) {
                 assert.deepEqual(protectedData(descriptor.dataset), baseline);
                 report.managementDataPreserved = true;
+            }
+            if (shortRetention && navigationBaseline) {
+                const finalDigest = navigationDataDigest(descriptor.dataset);
+                report.navigationDatabase = { beforeSha256: navigationBaseline, afterSha256: finalDigest };
+                assert.equal(finalDigest, navigationBaseline, 'Navigation changed durable management data outside workspace_state.');
             }
             assert.deepEqual(await runtimeFiles(descriptor.dataset), descriptor.runtimeFiles);
             assert.deepEqual(await sources(), descriptor.sources);

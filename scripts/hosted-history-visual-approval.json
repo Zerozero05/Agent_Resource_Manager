@@ -1,7 +1,7 @@
 {
   "reviewedBy": "root",
   "visualReviewConfirmed": true,
-  "referenceSha256": "eaf15103c321c965b179132d9e32baad1fef6a448920c5755c3531bec28894cf",
+  "referenceSha256": "9fe63b2a2385c1485849149883fca3e2f6a291bbf3ec28e2b44a7152f2b33104",
   "reviewedStates": [
     "search-0000",
     "search-0001",
@@ -76,10 +76,10 @@
     "documentTab",
     "closed"
   ],
-  "reviewScope": "Reviewed all nine rendered contact sheets and verified the file digests, PNG dimensions and visible-client bounds of all 210 crops.",
+  "reviewScope": "Reviewed all nine rendered contact sheets and verified the SHA-256, decoded dimensions, frozen visible-client rectangles, labels, and single-sheet coverage of all 210 component PNGs.",
   "notes": [
-    "All 66 single-result states have legible titles and one-result counts. The GitHub empty state, opened detail, workbench return, preserved reading position and tab closure are visible.",
-    "For the unfiltered narrow state, use the visible table border and the 1000-result count. The table rows are below the initially visible client region. The original native reference driver separately confirmed 20 rendered result entries.",
-    "A previous set containing off-window desktop pixels was rejected. This review covers only the revised visible-client crop set."
+    "The 66 individually named single-result search states show the intended name and a count of one. The GitHub empty title, selected detail tab and scrolled paragraph, retained reading position after changing tabs, and closed tab slot are visible.",
+    "The All results count shows 1000. Its compact table crop exposes only the top visible strip, as recorded by its viewport rectangle.",
+    "The first paragraph is below the initial compact viewport and is visible after five native wheel steps; the reading position is preserved on return. This review covers the frozen compact synthetic states. Timing, motion, IME, monitor DPI, and long-run behavior are separate measurements."
   ]
 }

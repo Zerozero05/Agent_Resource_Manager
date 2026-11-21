@@ -10,10 +10,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$candidateSource = '3536ca0e5cf7c897b860b5ce32d8b415904b9e45'
-$candidateRun = '44866595695'
-$candidateArtifact = '14692802883'
-$candidateSha256 = 'aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7'
+$candidateSource = $env:BEFORE_SOURCE
+$candidateRun = $env:BEFORE_RUN_ID
+$candidateArtifact = $env:BEFORE_ARTIFACT_ID
+$candidateSha256 = $env:BEFORE_EXE_SHA256
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:GITHUB_REPOSITORY -ine 'Zerozero05/Agent_Resource_Manager' -or -not [Environment]::UserInteractive -or
     [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
@@ -35,7 +35,7 @@ function Save-Json([string]$path, $value) {
 
 $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).ProviderPath
 Set-Location -LiteralPath $workspace
-if ($env:GITHUB_REF_NAME -cne 'codex/hosted-global-check-control-0ac5e79-20261121' -or
+if ($env:GITHUB_REF_NAME -cne 'codex/hosted-short-navigation-pair-c2aed09-20261121' -or
     (git rev-parse HEAD) -cne $env:GITHUB_SHA -or $LASTEXITCODE -ne 0) {
     throw 'The exact paired diagnostic checkout is required.'
 }
@@ -198,7 +198,6 @@ function Run-Measurement($arm, $prepared) {
         $startInfo.ArgumentList.Add($arg)
     }
     foreach ($name in @('GH_TOKEN', 'GITHUB_TOKEN')) { [void]$startInfo.Environment.Remove($name) }
-    $startInfo.Environment['ARM_SHORT_GLOBAL_CHECK_ARM'] = $arm.mode
     $process = [Diagnostics.Process]::Start($startInfo)
     $clock = [Diagnostics.Stopwatch]::StartNew()
     try {
@@ -253,17 +252,13 @@ function Run-Measurement($arm, $prepared) {
 }
 
 $arms = @(
-    @{name='before'; mode='control'},
-    @{name='after'; mode='treatment'}
+    @{name='before'; source=$env:BEFORE_SOURCE; run=$env:BEFORE_RUN_ID; sha256=$env:BEFORE_EXE_SHA256; buildInfoSha256=$env:BEFORE_BUILD_INFO_SHA256},
+    @{name='after'; source=$env:AFTER_SOURCE; run=$env:AFTER_RUN_ID; sha256=$env:AFTER_EXE_SHA256; buildInfoSha256=$env:AFTER_BUILD_INFO_SHA256}
 )
 $reports = @{}
 $locations = @{}
 try {
     foreach ($arm in $arms) {
-        $arm.source = $env:CANDIDATE_SOURCE
-        $arm.run = $env:CANDIDATE_RUN_ID
-        $arm.sha256 = $env:CANDIDATE_EXE_SHA256
-        $arm.buildInfoSha256 = $env:CANDIDATE_BUILD_INFO_SHA256
         if ($arm.source -cnotmatch '^[a-f0-9]{40}$' -or $arm.sha256 -cnotmatch '^[a-f0-9]{64}$' -or
             $arm.buildInfoSha256 -cnotmatch '^[a-f0-9]{64}$' -or $arm.run -cnotmatch '^[0-9]+$') {
             throw 'Missing the independently verified candidate pins.'
@@ -278,63 +273,69 @@ try {
 
 $before = $reports.before
 $after = $reports.after
-if ($locations.before -ieq $locations.after -or $before.candidateSha256 -cne $after.candidateSha256 -or
-    $before.globalCheckArm -cne 'control' -or $after.globalCheckArm -cne 'treatment' -or
+if ($locations.before -ieq $locations.after -or $before.candidateSha256 -ceq $after.candidateSha256 -or
+    $before.navigationOnly -ne $true -or $after.navigationOnly -ne $true -or
     ($before.cycles.index -join ',') -cne ($after.cycles.index -join ',') -or
     ($before.shortRetentionPolicy | ConvertTo-Json -Compress) -cne ($after.shortRetentionPolicy | ConvertTo-Json -Compress) -or
     $before.finishedAt -gt $after.startedAt) {
-    throw 'The two completed arms did not reproduce the same executable and independent physical workload.'
+    throw 'The different executables did not reproduce the same independent physical workload.'
 }
-function Summarize-Arm($report, [int]$checks) {
+function Summarize-Arm($report) {
     if ($report.status -cne 'retention-short-completed' -or $report.normalExit -ne $true -or
         $report.measurementsUseAccessibility -ne $false -or $report.samples.Count -ne 14 -or
-        $report.cycles.Count -ne 13 -or $report.checks.Count -ne $checks -or $report.history.jobs -ne $checks) {
+        ($report.cycles.index -join ',') -cne ((0..12) -join ',') -or
+        $report.checks.Count -ne 0 -or $report.history.jobs -ne 0 -or
+        $report.navigationDatabase.beforeSha256 -cnotmatch '^[a-f0-9]{64}$' -or
+        $report.navigationDatabase.beforeSha256 -cne $report.navigationDatabase.afterSha256 -or
+        @($report.actions | Where-Object key -ceq 'check').Count -ne 0) {
         throw 'An arm was incomplete or escaped its explicit short scope.'
     }
     $first, $last = $report.samples[0], $report.samples[-1]
-    $startKeys = $first.cache.taskRetention.byAction.check_now
-    $endKeys = $last.cache.taskRetention.byAction.check_now
-    if ($null -eq $first.cache.taskRetention -or $null -eq $last.cache.taskRetention -or
-        [long]$startKeys.recordedJobs -ne 0 -or [long]$endKeys.activeJobs -ne 0 -or
-        [long]$endKeys.recordedJobs -ne $checks -or [long]$endKeys.schedulingKeys -ne $checks * $report.history.keysPerJob) {
-        throw 'Backend retention does not match the independently verified durable checks.'
+    foreach ($sample in $report.samples) {
+        $retention = $sample.cache.taskRetention
+        if ($null -eq $retention -or $retention.activeJobs -ne 0 -or
+            $retention.recordedJobs -ne $first.cache.taskRetention.recordedJobs -or
+            [long]$retention.byAction.check_now.recordedJobs -ne 0 -or
+            [long]$retention.byAction.check_now.schedulingKeys -ne 0) {
+            throw 'Task measurements do not match a navigation-only workload.'
+        }
     }
     $roleDeltas = [ordered]@{}
+    $roleSamples = [ordered]@{}
     foreach ($role in 'manager','webview-browser','webview-renderer') {
-        $firstRole = @($first.ownedProcesses | Where-Object role -ceq $role)
-        $lastRole = @($last.ownedProcesses | Where-Object role -ceq $role)
-        if (!$firstRole.Count -or !$lastRole.Count) { throw "Missing process role $role." }
-        $roleDeltas[$role] = ($lastRole | Measure-Object -Property privateBytes -Sum).Sum -
-            ($firstRole | Measure-Object -Property privateBytes -Sum).Sum
+        $values = @(foreach ($sample in $report.samples) {
+            $processes = @($sample.ownedProcesses | Where-Object role -ceq $role)
+            if (!$processes.Count) { throw "Missing process role $role." }
+            [long](($processes | Measure-Object -Property privateBytes -Sum).Sum)
+        })
+        $roleSamples[$role] = $values
+        $roleDeltas[$role] = $values[-1] - $values[0]
     }
     return [ordered]@{
-        normalExit=$true; checks=$report.history.jobs; logicalCheckKeys=[long]$endKeys.schedulingKeys
-        uniqueCheckKeySets=[long]$endKeys.uniqueKeySets; uniqueCheckKeys=[long]$endKeys.uniqueSchedulingKeys
-        retainedKeyCapacityBytes=[long]$endKeys.keyBufferCapacityBytes + [long]$endKeys.keyVectorCapacityBytes
-        retainedPayloadCapacityBytes=[long]$endKeys.payloadCapacityBytes
+        normalExit=$true; checks=$report.history.jobs; persistentManagementDataPreserved=$true
         processFamilyPrivateStartBytes=$first.privateBytes; processFamilyPrivateEndBytes=$last.privateBytes
         processFamilyPrivateGrowthBytes=[long]$last.privateBytes - [long]$first.privateBytes
-        privateGrowthByRole=$roleDeltas; elapsedMs=$last.elapsedMs
+        privateGrowthByRole=$roleDeltas; privateSamplesByRole=$roleSamples; elapsedMs=$last.elapsedMs
     }
 }
-$control = Summarize-Arm $before 0
-$treatment = Summarize-Arm $after 12
+$beforeStats = Summarize-Arm $before
+$afterStats = Summarize-Arm $after
 $skew = for ($sample = 0; $sample -lt $before.samples.Count; $sample++) {
     [Math]::Abs($before.samples[$sample].elapsedMs - $after.samples[$sample].elapsedMs)
 }
 $roleContrast = [ordered]@{}
-foreach ($role in $control.privateGrowthByRole.Keys) {
-    $roleContrast[$role] = $treatment.privateGrowthByRole[$role] - $control.privateGrowthByRole[$role]
+foreach ($role in $beforeStats.privateGrowthByRole.Keys) {
+    $roleContrast[$role] = $afterStats.privateGrowthByRole[$role] - $beforeStats.privateGrowthByRole[$role]
 }
 Save-Json (Join-Path $measurements 'comparison.json') ([ordered]@{
-    status='same-executable-short-check-control-completed'
-    interpretation='Same-host short comparison with fixed arm order and fresh data; no leakage or convergence claim.'
-    convergenceGateEvaluated=$false; previousFailureReplaced=$false
+    status='paired-short-navigation-diagnostic-completed'
+    interpretation='Same-host 37f83f1 then c2aed09, fixed order and fresh data. Differences are observations over a short navigation-only workload.'
+    convergenceGateEvaluated=$false; latencyGateEvaluated=$false; previousFailureReplaced=$false
     sameHost=[ordered]@{runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion; node=(& node --version); windows=[Environment]::OSVersion.Version.ToString()}
-    candidate=[ordered]@{source=$env:CANDIDATE_SOURCE; executableSha256=$env:CANDIDATE_EXE_SHA256; workflowRunId=$env:CANDIDATE_RUN_ID}
     referenceSha256=$receipt.referenceSha256; approvalSha256=$ApprovalSha256; fixtureSha256=$reference.datasetFingerprint
-    checkKeySha256=$after.history.normalizedKeySha256; maximumObservedSampleSkewMs=($skew | Measure-Object -Maximum).Maximum
-    navigationOnly=$control; navigationAndGlobalCheck=$treatment
-    treatmentMinusControlFamilyPrivateGrowthBytes=$treatment.processFamilyPrivateGrowthBytes - $control.processFamilyPrivateGrowthBytes
-    treatmentMinusControlPrivateGrowthByRole=$roleContrast
+    maximumObservedSampleSkewMs=($skew | Measure-Object -Maximum).Maximum
+    before=[ordered]@{source=$arms[0].source; executableSha256=$arms[0].sha256; workflowRunId=$arms[0].run; observations=$beforeStats}
+    after=[ordered]@{source=$arms[1].source; executableSha256=$arms[1].sha256; workflowRunId=$arms[1].run; observations=$afterStats}
+    afterMinusBeforeFamilyPrivateGrowthBytes=$afterStats.processFamilyPrivateGrowthBytes - $beforeStats.processFamilyPrivateGrowthBytes
+    afterMinusBeforePrivateGrowthByRole=$roleContrast
 })
