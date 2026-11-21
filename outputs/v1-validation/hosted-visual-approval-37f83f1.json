@@ -3,7 +3,6 @@
   "visualReviewConfirmed": true,
   "referenceSha256": "9fe63b2a2385c1485849149883fca3e2f6a291bbf3ec28e2b44a7152f2b33104",
   "reviewedStates": [
-    "all",
     "search-0000",
     "search-0001",
     "search-0002",
@@ -70,6 +69,7 @@
     "search-0063",
     "search-0064",
     "search-0065",
+    "all",
     "github",
     "document",
     "homeDocument",
