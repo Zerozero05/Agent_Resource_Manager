@@ -4,16 +4,16 @@ permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44889635017'
-  CANDIDATE_SOURCE: '37f83f135f9fd8facd90255fa33f58d534f8364d'
-  CANDIDATE_ARTIFACT: 'Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_37f83f135f9fd8facd90255fa33f58d534f8364d'
-  CANDIDATE_ARTIFACT_ID: '14702350758'
-  CANDIDATE_SHA256: '79544e0b78cd0cb157d2601f48e0812158a428569f5b34d07556f478494f133e'
-  CANDIDATE_ARCHIVE_SHA256: '73e82438bd659c83329c76adddbfe2adb4e25b9c18243657aea8bcc7988f72e5'
-  CANDIDATE_BUILD_INFO_SHA256: 'c1468047a7ec2ea7557e274c516f88b25aafaaf36f3d0fb9b28529abc3b15536'
+  CANDIDATE_RUN_ID: '44898573141'
+  CANDIDATE_SOURCE: '2d194880f48bbef0fe9613f3d2a5afffc3b2ce15'
+  CANDIDATE_ARTIFACT: 'Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_2d194880f48bbef0fe9613f3d2a5afffc3b2ce15'
+  CANDIDATE_ARTIFACT_ID: '14705483396'
+  CANDIDATE_SHA256: '3476141dfca5894b9d9c07254a3de5b7dcf682e65108e6d064b1c48fb866c2f0'
+  CANDIDATE_ARCHIVE_SHA256: '75e6a6d6d198e3f7af41a27bc5014a84f5173778f62b1d81ef7a876ee5aba3a5'
+  CANDIDATE_BUILD_INFO_SHA256: '9d3f26aca7d0aa4ba30c83147838acfa4b86cbb596886ec33e30b3c157756abe'
 jobs:
   compact:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-narrow-detail-37f83f1-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-narrow-detail-2d19488-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 12
     defaults:
