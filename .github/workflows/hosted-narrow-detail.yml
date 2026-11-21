@@ -4,15 +4,16 @@ permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44880393531'
-  CANDIDATE_SOURCE: 0ac5e79b7a3d1184e7602f241793f240b0609d44
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_0ac5e79b7a3d1184e7602f241793f240b0609d44
-  CANDIDATE_ARTIFACT_ID: '14698411078'
-  CANDIDATE_SHA256: 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24'
-  CANDIDATE_ARCHIVE_SHA256: '5ea596eb7d95de7df46bc1929c8694e56c8c5b72f7ded2915987aefa83ce152e'
+  CANDIDATE_RUN_ID: '44889635017'
+  CANDIDATE_SOURCE: '37f83f135f9fd8facd90255fa33f58d534f8364d'
+  CANDIDATE_ARTIFACT: 'Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_37f83f135f9fd8facd90255fa33f58d534f8364d'
+  CANDIDATE_ARTIFACT_ID: '14702350758'
+  CANDIDATE_SHA256: '79544e0b78cd0cb157d2601f48e0812158a428569f5b34d07556f478494f133e'
+  CANDIDATE_ARCHIVE_SHA256: '73e82438bd659c83329c76adddbfe2adb4e25b9c18243657aea8bcc7988f72e5'
+  CANDIDATE_BUILD_INFO_SHA256: 'c1468047a7ec2ea7557e274c516f88b25aafaaf36f3d0fb9b28529abc3b15536'
 jobs:
   compact:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-narrow-detail-0ac5e79-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-narrow-detail-37f83f1-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 12
     defaults:
@@ -31,8 +32,9 @@ jobs:
         run: |
           if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or
               $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
-              $env:CANDIDATE_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
-            throw 'Bind the independently checked candidate artifact ID, archive and EXE SHA-256 first. No download or launch.'
+              $env:CANDIDATE_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:CANDIDATE_BUILD_INFO_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Bind the independently checked candidate artifact ID, archive, EXE and BUILD_INFO SHA-256 first. No download or launch.'
           }
           if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
               -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
@@ -54,6 +56,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }
           $exe = Join-Path $candidate 'agent-resource-manager.exe'
           $source = Join-Path $candidate 'BUILD_INFO.json'
+          $originalBuildInfoSha256 = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($originalBuildInfoSha256 -cne $env:CANDIDATE_BUILD_INFO_SHA256) { throw 'The original BUILD_INFO.json does not match the independently verified digest.' }
           $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
           $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($digest -cne $env:CANDIDATE_SHA256 -or $info.executableSha256 -cne $digest -or
@@ -61,7 +65,7 @@ jobs:
               $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
               $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the pinned executable.' }
           $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
-          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue $originalBuildInfoSha256
           $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
           Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
       - name: Open the exact compact detail once and inspect preserved entries

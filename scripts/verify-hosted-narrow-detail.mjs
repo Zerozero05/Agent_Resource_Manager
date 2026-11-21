@@ -8,9 +8,9 @@ import { NativeUiaSession } from './native-uia-client.mjs';
 import { createPerformanceFixture } from './performance-fixture.mjs';
 import { referenceObservationRows, validBox, VisualSession } from './verify-native-visual-stability.mjs';
 
-const source = '0ac5e79b7a3d1184e7602f241793f240b0609d44';
-const candidateRun = '44880393531';
-const branch = 'codex/hosted-narrow-detail-0ac5e79-20261121';
+const source = '37f83f135f9fd8facd90255fa33f58d534f8364d';
+const candidateRun = '44889635017';
+const branch = 'codex/hosted-narrow-detail-37f83f1-20261121';
 const repository = 'zerozero05/agent_resource_manager';
 const approved = 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data';
 const frame = { left: 60, top: 60, width: 960, height: 650, dpi: 96 };
