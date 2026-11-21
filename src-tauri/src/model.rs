@@ -893,19 +893,44 @@ impl Manager {
         runtime: Arc<dyn ManagerRuntime>,
         include_previews: bool,
     ) -> Self {
+        let mut worker = self.detached_with_state(runtime, self.state.clone());
+        if include_previews {
+            worker.previews = self.previews.clone();
+        }
+        worker.management_undo = self.management_undo.clone();
+        worker.management_redo = self.management_redo.clone();
+        worker
+    }
+    pub(crate) fn detached_for_local_document(
+        &self,
+        runtime: Arc<dyn ManagerRuntime>,
+        skill: Value,
+    ) -> Self {
+        self.detached_with_state(
+            runtime,
+            State {
+                skills: vec![skill],
+                sources: Vec::new(),
+                connections: Vec::new(),
+                settings: Value::Null,
+                local_roots: Vec::new(),
+                ignored_local_paths: Vec::new(),
+                check_mode: String::new(),
+                check_generation: 0,
+                check_summary: Value::Null,
+            },
+        )
+    }
+    fn detached_with_state(&self, runtime: Arc<dyn ManagerRuntime>, state: State) -> Self {
         Self {
             basic_mode: self.basic_mode,
             resource_catalog_available: self.resource_catalog_available,
             data_dir: self.data_dir.clone(),
             storage: self.storage.clone(),
-            state: self.state.clone(),
-            previews: if include_previews {
-                self.previews.clone()
-            } else {
-                HashMap::new()
-            },
-            management_undo: self.management_undo.clone(),
-            management_redo: self.management_redo.clone(),
+            state,
+            previews: HashMap::new(),
+            management_undo: Vec::new(),
+            management_redo: Vec::new(),
             resource_runtime: self.resource_runtime.clone(),
             db: None,
             revision: AtomicU64::new(self.revision.load(Ordering::Relaxed)),
@@ -1096,11 +1121,13 @@ impl Manager {
         result
     }
     pub fn skill(&self, id: &str) -> Result<Value, String> {
+        self.skill_entry(id).cloned()
+    }
+    pub(crate) fn skill_entry(&self, id: &str) -> Result<&Value, String> {
         self.state
             .skills
             .iter()
             .find(|s| s["id"] == id)
-            .cloned()
             .ok_or_else(|| "Skill no longer exists".into())
     }
     pub fn upsert_skill(&mut self, skill: Value) {

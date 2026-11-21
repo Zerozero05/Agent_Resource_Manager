@@ -603,6 +603,10 @@ fn local_document_requested(skill: &Value, req: &Value) -> bool {
                 && (!skill["installedProvenance"].is_null()
                     || skill["installedCommit"].is_string()))
 }
+pub(crate) fn local_document_skill(m: &Manager, req: &Value) -> Option<Value> {
+    let skill = m.skill_entry(req["skillId"].as_str()?).ok()?;
+    local_document_requested(skill, req).then(|| skill.clone())
+}
 fn get_document_with_generation(
     m: &Manager,
     req: &Value,

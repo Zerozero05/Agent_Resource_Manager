@@ -1039,7 +1039,19 @@ impl TaskSystem {
                         commit_started: AtomicBool::new(false),
                         internal_resource_automation,
                     });
-                    (manager.detached(hook.clone(), include_previews), hook)
+                    let local_skill = if local_document_read && request["automatic"] != true {
+                        crate::remote::local_document_skill(&manager, &request)
+                    } else {
+                        None
+                    };
+                    // This read only needs its target at the point the resource lock is held.
+                    // The original dispatcher still owns validation, I/O, and the result.
+                    let worker = if let Some(skill) = local_skill {
+                        manager.detached_for_local_document(hook.clone(), skill)
+                    } else {
+                        manager.detached(hook.clone(), include_previews)
+                    };
+                    (worker, hook)
                 };
                 if request["automatic"] == true {
                     validate_task_automatic(&worker.state, &request, internal_resource_automation)?;
@@ -5568,6 +5580,30 @@ mod tests {
             .unwrap();
         assert_eq!(result["markdown"], markdown);
         assert!(result["readGeneration"].is_u64());
+        let outside = service.execute(
+            json!({"action":"get_document","skillId":"one","path":"../outside.md"}),
+            crate::dispatch_local,
+        );
+        assert!(outside.is_err());
+        let missing_skill = service.execute(
+            json!({"action":"get_document","skillId":"missing"}),
+            crate::dispatch_local,
+        );
+        assert_eq!(missing_skill.unwrap_err(), "Skill no longer exists");
+        {
+            let mut manager = service.manager.lock().unwrap();
+            manager.state.skills[0]["sourceId"] = json!("linked");
+            let latest = json!({"action":"get_document","skillId":"one","version":"latest"});
+            assert!(crate::remote::local_document_skill(&manager, &latest).is_none());
+        }
+        let linked_local = service
+            .execute(
+                json!({"action":"get_document","skillId":"one","origin":"local"}),
+                crate::dispatch_local,
+            )
+            .unwrap();
+        assert_eq!(linked_local["markdown"], markdown);
+        assert_eq!(linked_local["source"], "本地运行文件");
         assert_eq!(service.manager.lock().unwrap().previews, before);
         assert!(service.list().unwrap().is_empty());
     }
