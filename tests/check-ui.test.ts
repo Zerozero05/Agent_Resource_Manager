@@ -29,22 +29,47 @@ const { CheckControl } = await import(await moduleURL(new URL('../src/CheckContr
 const { ChangesPanel } = await import(await moduleURL(new URL('../src/ChangesPanel.tsx',import.meta.url)));
 const host=document.getElementById('root')!;
 test('global mode is persisted through the actual control and manual check does not enable automatic mode', async () => {
-  const calls: unknown[] = [], snapshots: unknown[]=[];
+  const calls: unknown[] = [], snapshots: unknown[]=[], completions: unknown[]=[];
+  const stamp = { stateRevision: 7, readGeneration: 2 };
   Object.assign(dom.window,{ __TAURI_INTERNALS__:{ invoke: async (_command:string,args:any) => { calls.push(args.request); return {checkMode:args.request.mode}; } } });
-  const tasks={tasks:[],run:async (...args:unknown[]) => { calls.push(args); return { checkMode:'manual' }; }};
+  const tasks={tasks:[],runCheck:async (...args:unknown[]) => { calls.push(args); return stamp; }};
   const root=createRoot(host);
-  await act(async()=>root.render(createElement(CheckControl,{snapshot:{checkMode:'auto'},tasks,onSnapshot:(value:unknown)=>snapshots.push(value)})));
+  let finishSync!: () => void;
+  const sync = new Promise<void>(resolve => { finishSync = resolve; });
+  const onCheckCompletion = (value: unknown) => { completions.push(value); return sync; };
+  await act(async()=>root.render(createElement(CheckControl,{snapshot:{checkMode:'auto'},tasks,onSnapshot:(value:unknown)=>snapshots.push(value),onCheckCompletion})));
   await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="检查方式"]')!.click());
   await act(async()=>Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(button=>button.textContent?.includes('手动检查'))!.click());
   assert.deepEqual(calls[0],{action:'set_check_mode',mode:'manual'});
   assert.deepEqual(snapshots[0],{checkMode:'manual'});
-  await act(async()=>root.render(createElement(CheckControl,{snapshot:{checkMode:'manual'},tasks,onSnapshot:(value:unknown)=>snapshots.push(value)})));
+  await act(async()=>root.render(createElement(CheckControl,{snapshot:{checkMode:'manual'},tasks,onSnapshot:(value:unknown)=>snapshots.push(value),onCheckCompletion})));
   assert(host.textContent?.includes('手动'));
-  await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="检查本地与 GitHub 变化"]')!.click());
-  assert.equal((calls[1] as unknown[])[1],'check_now');
+  const checkButton = host.querySelector<HTMLButtonElement>('[aria-label="检查本地与 GitHub 变化"]')!;
+  await act(async () => checkButton.click());
+  assert.equal(checkButton.disabled, true, 'keep the check disabled until its state arrives');
+  await act(async () => finishSync());
+  assert.equal(checkButton.disabled, false);
+  assert.deepEqual(calls[1],['正在检查变化',{view:'changes'}]);
+  assert.deepEqual(completions,[stamp]);
+  assert.deepEqual(snapshots,[{checkMode:'manual'}]);
   assert.equal(calls.filter(item=>!Array.isArray(item)).length,1);
   await act(async()=>root.unmount());
 });
+
+test('global check reports task failures without announcing completion or changing mode', async () => {
+  const completions: unknown[] = [];
+  const tasks = { tasks: [], runCheck: async () => { throw new Error('无法读取本地目录'); } };
+  const root = createRoot(host);
+  await act(async () => root.render(createElement(CheckControl, {
+    snapshot: { checkMode: 'manual' }, tasks, onSnapshot: () => assert.fail('Unexpected mode write'),
+    onCheckCompletion: (stamp: unknown) => { completions.push(stamp); },
+  })));
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="检查本地与 GitHub 变化"]')!.click());
+  assert.match(host.querySelector('[role="alert"]')?.textContent || '', /无法读取本地目录/);
+  assert.deepEqual(completions, []);
+  await act(async () => root.unmount());
+});
+
 test('one pending task has a direct recheck without replacing its comparison action or adding batch controls', async () => {
   const selected: string[][]=[], compared:string[]=[];
   const root=createRoot(host), noop=()=>{};

@@ -2,15 +2,19 @@ import { useCallback, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Check, ChevronDown, RefreshCw } from 'lucide-react';
 import { FloatingMenu, type OpenMenu } from './FloatingMenu';
-import type { useTasks } from './tasks';
+import type { CheckCompletionStamp, useTasks } from './tasks';
 import './checks.css';
 
 export type CheckMode = 'auto' | 'manual';
-export function CheckControl({ snapshot, tasks, onSnapshot, disabled = false }: { snapshot: unknown; tasks: ReturnType<typeof useTasks>; onSnapshot: (value: unknown) => void; disabled?: boolean }) {
+export function CheckControl({ snapshot, tasks, onSnapshot, onCheckCompletion, disabled = false }: {
+  snapshot: unknown; tasks: ReturnType<typeof useTasks>; onSnapshot: (value: unknown) => void;
+  onCheckCompletion: (stamp: CheckCompletionStamp | null) => void | Promise<void>; disabled?: boolean;
+}) {
   const mode: CheckMode = (snapshot as { checkMode?: CheckMode } | undefined)?.checkMode === 'manual' ? 'manual' : 'auto';
   const [menu, setMenu] = useState<OpenMenu | null>(null);
   const [saving, setSaving] = useState(false), [error, setError] = useState('');
-  const running = tasks.tasks.some(task => ['queued', 'running'].includes(task.status) && task.action === 'check_now');
+  const [checking, setChecking] = useState(false);
+  const running = checking || tasks.tasks.some(task => ['queued', 'running'].includes(task.status) && task.action === 'check_now');
   const close = useCallback((focus = false) => setMenu(previous => { if (focus && previous?.anchor.isConnected) previous.anchor.focus(); return null; }), []);
   async function change(next: CheckMode) {
     if (next === mode || saving) return;
@@ -20,9 +24,10 @@ export function CheckControl({ snapshot, tasks, onSnapshot, disabled = false }: 
     finally { setSaving(false); }
   }
   async function check() {
-    setError('');
-    try { onSnapshot(await tasks.run('正在检查变化', 'check_now', {}, { view: 'changes' })); }
+    setChecking(true); setError('');
+    try { await onCheckCompletion(await tasks.runCheck('正在检查变化', { view: 'changes' })); }
     catch (cause) { setError(String(cause)); }
+    finally { setChecking(false); }
   }
   return <div className="global-check-control">
     <div className="check-button-group">

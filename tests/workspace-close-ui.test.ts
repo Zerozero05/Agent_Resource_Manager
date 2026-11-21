@@ -5,12 +5,13 @@ import { createElement, act } from 'react';
 import { JSDOM } from 'jsdom';
 import ts from 'typescript';
 import type { WindowWorkspace, WorkspacePane } from '../src/workspace.ts';
+import type { CheckCompletionStamp } from '../src/tasks.ts';
 
 // Exercise WorkspaceApp's real close handshake; only native IPC and unrelated panes are replaced.
 const data = (code: string) => `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`;
 const native = data('export const invoke=(command,args)=>globalThis.workspaceCloseTest.invoke(command,args); export const isTauri=()=>true; export const listen=(name,callback)=>globalThis.workspaceCloseTest.listen(name,callback); export const getCurrentWindow=()=>globalThis.workspaceCloseTest.window;');
 const taskStub = data('export const useTasks=()=>globalThis.workspaceCloseTest.tasks; export const terminalTask=()=>false;');
-const shellStub = data(`import {createElement} from ${JSON.stringify(import.meta.resolve('react'))}; export const WorkspaceShell=props=>{globalThis.workspaceCloseTest.panes=props.panes;return createElement('div',null,createElement('button',{onClick:props.onShowHelp},'帮助'),props.onToggleSidebar&&createElement('button',{'aria-label':props.sidebarExpanded?'收起侧栏':'展开侧栏','aria-expanded':props.sidebarExpanded,disabled:props.shortcutsBlocked,onClick:props.onToggleSidebar},'侧栏'),...props.panes.map(pane=>{const node=props.renderPane(pane,true,true); globalThis.workspaceCloseTest.session=node.props.value; return node;}));};`);
+const shellStub = data(`import {createElement} from ${JSON.stringify(import.meta.resolve('react'))}; export const WorkspaceShell=props=>{globalThis.workspaceCloseTest.panes=props.panes;globalThis.workspaceCloseTest.onCheckCompletion=props.checkControl.props.onCheckCompletion;return createElement('div',null,createElement('button',{onClick:props.onShowHelp},'帮助'),props.onToggleSidebar&&createElement('button',{'aria-label':props.sidebarExpanded?'收起侧栏':'展开侧栏','aria-expanded':props.sidebarExpanded,disabled:props.shortcutsBlocked,onClick:props.onToggleSidebar},'侧栏'),...props.panes.map(pane=>{const node=props.renderPane(pane,true,true); globalThis.workspaceCloseTest.session=node.props.value; return node;}));};`);
 const emptyPane = data('export default function SessionApp(){return null}');
 const emptyControl = data('export function CheckControl(){return null}');
 const modules = new Map<string, Promise<string>>();
@@ -55,6 +56,7 @@ async function mount(failSave = false, options: { snapshot?: Record<string, unkn
   let destroyed = 0;
   const fixture = {
     panes: [] as WorkspacePane[],
+    onCheckCompletion: undefined as unknown as (stamp: CheckCompletionStamp | null) => Promise<void>,
     session: undefined as unknown as { pane: WorkspacePane; requestStorageRestart: (id: string) => Promise<void>; managerSnapshot: { stateRevision?: number; settings?: { marker?: string }; maintenance?: { automaticAllowed?: boolean } }; acceptSnapshot: (snapshot: unknown) => void },
     tasks: { tasks: [], run: async (_label: string, action: string, args: Record<string, unknown>, _origin: unknown, foreground: boolean) => {
       if (!options.snapshot) throw new Error('Window closure must not run a resource task');
@@ -82,7 +84,7 @@ async function mount(failSave = false, options: { snapshot?: Record<string, unkn
   const root = createRoot(host); unmount = () => root.unmount();
   await act(async () => root.render(createElement(WorkspaceApp, { startup: { basicMode: options.basicMode || false } })));
   assert(calls.some(call => call.action === 'workspace_ready'));
-  return { calls, taskCalls, listeners, queueRead: (read: () => Promise<unknown> | unknown) => readReplies.push(read), setSnapshot: (next: Record<string, unknown>) => { managerSnapshot = next; }, updateSnapshot: (next: Record<string, unknown>) => {
+  return { calls, taskCalls, listeners, completeCheck: (stamp: CheckCompletionStamp | null) => fixture.onCheckCompletion(stamp), queueRead: (read: () => Promise<unknown> | unknown) => readReplies.push(read), setSnapshot: (next: Record<string, unknown>) => { managerSnapshot = next; }, updateSnapshot: (next: Record<string, unknown>) => {
     managerSnapshot = next; listeners.get('state-changed')?.({ payload: { stateRevision: next.stateRevision } });
   }, destroyed: () => destroyed, session: () => fixture.session, panes: () => fixture.panes, nativeClose: () => {
     reply.nativeCloseRequested = true;
@@ -175,6 +177,52 @@ test('a failed pane read does not prevent another pane in the same snapshot from
   assert.doesNotMatch(host.textContent || '', /正在恢复页面/);
   assert.deepEqual(fixture.calls.slice(callStart).map(call => [call.action, call.paneId]),
     [firstPane.id, secondPane.id, firstPane.id, secondPane.id].map(id => ['workspace_get_pane_runtime', id]));
+});
+
+test('a completed check reuses already applied state and reads once after an omitted notification', async () => {
+  const snapshot = (stateRevision: number, readGeneration: number) => ({
+    stateRevision, readGeneration, skills: [], sources: [], connections: [], settings: {},
+  });
+  const fixture = await mount(false, { snapshot: snapshot(3, 11) });
+  const reads = () => fixture.calls.filter(call => call.action === 'get_state').length;
+  const before = reads();
+  await act(async () => fixture.completeCheck({ stateRevision: 3, readGeneration: 11 }));
+  await act(async () => fixture.completeCheck({ stateRevision: 2, readGeneration: 10 }));
+  assert.equal(reads(), before);
+  fixture.setSnapshot(snapshot(4, 11));
+  await act(async () => fixture.completeCheck({ stateRevision: 4, readGeneration: 11 }));
+  assert.equal(reads(), before + 1);
+  assert.equal(fixture.session().managerSnapshot.stateRevision, 4);
+  fixture.setSnapshot(snapshot(4, 12));
+  await act(async () => fixture.completeCheck({ stateRevision: 4, readGeneration: 12 }));
+  assert.equal(reads(), before + 2, 'a newer read generation also needs the authoritative snapshot');
+  await act(async () => fixture.completeCheck(null));
+  assert.equal(reads(), before + 3, 'missing completion metadata retains a conservative refresh');
+  await act(async () => {
+    await assert.rejects(fixture.completeCheck({ stateRevision: 5, readGeneration: 12 }), /尚未读到检查后的状态/);
+  });
+  assert.equal(reads(), before + 4);
+});
+
+test('check completion joins an outstanding state notification and only follows up when needed', async () => {
+  const snapshot = (stateRevision: number) => ({
+    stateRevision, readGeneration: 11, skills: [], sources: [], connections: [], settings: {},
+  });
+  for (const latestWasCovered of [true, false]) {
+    const fixture = await mount(false, { snapshot: snapshot(3) });
+    const reads = () => fixture.calls.filter(call => call.action === 'get_state').length;
+    const before = reads();
+    let resolve!: (value: unknown) => void;
+    fixture.queueRead(() => new Promise(resolveRead => { resolve = resolveRead; }));
+    await act(async () => fixture.updateSnapshot(snapshot(4)));
+    let completion!: Promise<void>;
+    await act(async () => { completion = fixture.completeCheck({ stateRevision: 4, readGeneration: 11 }); });
+    assert.equal(reads(), before + 1, 'the completion must not issue a concurrent full read');
+    await act(async () => { resolve(snapshot(latestWasCovered ? 4 : 3)); await completion; });
+    assert.equal(reads(), before + (latestWasCovered ? 1 : 2));
+    assert.equal(fixture.session().managerSnapshot.stateRevision, 4);
+    await act(async () => unmount());
+  }
 });
 
 test('state events share one in-flight read and preserve a subsequent snapshot after a burst', async () => {
@@ -389,6 +437,23 @@ function clock(start: number) {
     visibility: async (hidden: boolean) => act(async () => { Object.defineProperty(document, 'hidden', { configurable: true, value: hidden }); document.dispatchEvent(new dom.window.Event('visibilitychange')); }),
   };
 }
+
+test('a completed check reports a state read that remains stale across the maintenance boundary', async () => {
+  const start = new Date(2026, 9, 28, 9).getTime(), until = start + 60_000, time = clock(start);
+  const maintenance = { ...repairSnapshot().maintenance, pauseUntil: new Date(until).toISOString(), automaticAllowed: false };
+  const snapshot = { stateRevision: 4, readGeneration: 12, skills: [], sources: [], connections: [], settings: {}, maintenance };
+  const fixture = await mount(false, { snapshot });
+  const reads = () => fixture.calls.filter(call => call.action === 'get_state').length;
+  const before = reads();
+  time.jump(until);
+  await act(async () => {
+    await assert.rejects(fixture.completeCheck({ stateRevision: 4, readGeneration: 12 }), /尚未读到检查后的状态/);
+  });
+  assert.equal(reads(), before + 2);
+  fixture.setSnapshot({ ...snapshot, maintenance: { ...maintenance, automaticAllowed: true } });
+  await act(async () => fixture.completeCheck({ stateRevision: 4, readGeneration: 12 }));
+  assert.equal(reads(), before + 3);
+});
 
 test('timed pause expires with a single read and accepts changed policy at the same state revision', async () => {
   const start = new Date(2026, 9, 28, 9).getTime(), until = start + 60_000, time = clock(start);

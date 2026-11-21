@@ -198,6 +198,7 @@ impl Task {
 
 struct Job {
     task: Task,
+    completion_stamp: Option<CheckCompletionStamp>,
     history_revision: u64,
     cancel: Arc<AtomicBool>,
     completion: Completion,
@@ -207,6 +208,39 @@ struct Job {
     dedup: Option<String>,
     automatic: bool,
     resource_automation: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckCompletionStamp {
+    state_revision: u64,
+    read_generation: Option<u64>,
+}
+
+impl CheckCompletionStamp {
+    fn from_result(value: &Value) -> Option<Self> {
+        if !["skills", "sources", "connections"]
+            .iter()
+            .all(|field| value[*field].is_array())
+        {
+            return None;
+        }
+        let read_generation = match value.get("readGeneration")? {
+            Value::Null => None,
+            generation => Some(generation.as_u64()?),
+        };
+        Some(Self {
+            state_revision: value["stateRevision"].as_u64()?,
+            read_generation,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StartTaskReply {
+    Hidden,
+    Full,
+    StatusOnly,
 }
 
 #[derive(Default, Serialize)]
@@ -389,6 +423,7 @@ impl TaskSystem {
                 task.id.clone(),
                 Job {
                     task,
+                    completion_stamp: None,
                     history_revision: 0,
                     cancel: Arc::new(AtomicBool::new(false)),
                     completion: Arc::new((Mutex::new(None), Condvar::new())),
@@ -806,15 +841,26 @@ impl TaskSystem {
                     .get("request")
                     .filter(|v| v.is_object())
                     .ok_or("start_task requires a business request")?;
-                let task = self.start(
+                let reply = if request["statusOnly"] == true {
+                    if business["action"] != "check_now" {
+                        return Err("轻量任务状态仅适用于检查 Skill 变化".into());
+                    }
+                    StartTaskReply::StatusOnly
+                } else {
+                    StartTaskReply::Full
+                };
+                let task = self.start_with_reply(
                     business.clone(),
                     request["label"].as_str(),
                     request.get("origin"),
                     request["foreground"] != false,
-                    true,
+                    reply,
                     dispatch,
                 )?;
                 json!({"task":task})
+            }
+            "get_task" if request["statusOnly"] == true => {
+                json!({"task":self.get_check_status(text(request,"taskId")?)?})
             }
             "get_task" => json!({"task":self.get(text(request,"taskId")?,true)?}),
             "list_tasks" => json!({"tasks":self.list()?}),
@@ -874,7 +920,29 @@ impl TaskSystem {
         visible: bool,
         dispatch: Dispatch,
     ) -> Result<Value, String> {
+        let reply = if visible {
+            StartTaskReply::Full
+        } else {
+            StartTaskReply::Hidden
+        };
+        self.start_with_reply(request, label, origin, foreground, reply, dispatch)
+    }
+
+    fn start_with_reply(
+        self: &Arc<Self>,
+        request: Value,
+        label: Option<&str>,
+        origin: Option<&Value>,
+        foreground: bool,
+        reply: StartTaskReply,
+        dispatch: Dispatch,
+    ) -> Result<Value, String> {
         let action = text(&request, "action")?.to_owned();
+        let visible = !matches!(reply, StartTaskReply::Hidden);
+        let reply_for = |task: &Task| match reply {
+            StartTaskReply::StatusOnly => task.summary(),
+            _ => task.metadata(),
+        };
         let internal_resource_automation = std::ptr::fn_addr_eq(
             dispatch,
             crate::resource_automation::engine::dispatch_step as Dispatch,
@@ -948,7 +1016,7 @@ impl TaskSystem {
             result_files: Vec::new(),
             resources: resources.iter().map(|r| r.key.clone()).collect(),
         };
-        let metadata = task.metadata();
+        let metadata = reply_for(&task);
         {
             let mut jobs = self.jobs.lock().map_err(|_| "Task registry lock failed")?;
             if let Some(key) = &dedup {
@@ -963,13 +1031,14 @@ impl TaskSystem {
                     } else {
                         existing.consumers += 1;
                     }
-                    return Ok(existing.task.metadata());
+                    return Ok(reply_for(&existing.task));
                 }
             }
             jobs.insert(
                 id.clone(),
                 Job {
                     task,
+                    completion_stamp: None,
                     history_revision: 0,
                     cancel: cancel.clone(),
                     completion: Arc::new((Mutex::new(None), Condvar::new())),
@@ -1321,6 +1390,9 @@ impl TaskSystem {
                     }
                     job.task.result_available = true;
                     job.task.progress = result_progress(value);
+                    if job.task.action == "check_now" {
+                        job.completion_stamp = CheckCompletionStamp::from_result(value);
+                    }
                 }
                 Err(error) => {
                     let is_cancel = cancelled
@@ -1466,6 +1538,22 @@ impl TaskSystem {
         drop(jobs);
         if let Some(payload) = payload {
             value["result"] = payload.read()?;
+        }
+        Ok(value)
+    }
+
+    fn get_check_status(&self, id: &str) -> Result<Value, String> {
+        let jobs = self.jobs.lock().map_err(|_| "Task registry lock failed")?;
+        let job = jobs.get(id).ok_or("操作记录已移除或不存在")?;
+        if job.task.action != "check_now" {
+            return Err("轻量任务状态仅适用于检查 Skill 变化".into());
+        }
+        let mut value = job.task.summary();
+        if !job.visible {
+            value["hidden"] = json!(true);
+        }
+        if let Some(stamp) = &job.completion_stamp {
+            value["completionStamp"] = json!(stamp);
         }
         Ok(value)
     }
@@ -3572,6 +3660,113 @@ fn result_progress(value: &Value) -> Value {
 mod tests {
     use super::*;
 
+    #[test]
+    fn lightweight_check_status_reports_the_rebased_stamp_without_loading_results() {
+        fn dispatch(manager: &mut Manager, _: &Value) -> Result<Value, String> {
+            let mut value = manager.snapshot();
+            value["stateRevision"] = json!(0);
+            value["checkSummary"] = json!({"errors":0});
+            value["failed"] = json!(1);
+            Ok(value)
+        }
+
+        let (dir, service) = fixture();
+        let pending = service
+            .execute(
+                json!({"action":"start_task","statusOnly":true,"request":{"action":"check_now"}}),
+                dispatch,
+            )
+            .unwrap();
+        let id = pending["task"]["id"].as_str().unwrap();
+        assert_eq!(pending["task"]["status"], "queued");
+        assert!(pending["task"].get("resources").is_none());
+        assert!(pending["task"].get("completionStamp").is_none());
+
+        let result = service.wait(id).unwrap();
+        let read = json!({"action":"get_task","taskId":id});
+        let full = service.execute(read.clone(), dispatch).unwrap();
+        assert_eq!(full["task"]["result"], result);
+        assert!(full["task"]["resources"].is_array());
+        assert!(full["task"].get("completionStamp").is_none());
+        assert_eq!(result["checkSummary"]["errors"], 0);
+        assert!(result["stateRevision"].as_u64().unwrap() > 0);
+
+        let db = rusqlite::Connection::open(dir.path().join("manager.sqlite3")).unwrap();
+        let row: Value = serde_json::from_str(&history_payloads(&db)[id]).unwrap();
+        assert_eq!(row["resources"], full["task"]["resources"]);
+        assert!(row.get("completionStamp").is_none());
+        assert!(service.list().unwrap()[0].get("completionStamp").is_none());
+
+        // A corrupted payload may make full retrieval fail, but must not affect
+        // the lightweight status derived from the completed runtime snapshot.
+        service
+            .jobs
+            .lock()
+            .unwrap()
+            .get_mut(id)
+            .unwrap()
+            .task
+            .result = Some(Arc::new(TaskResult {
+            bytes: vec![1, 2, 3],
+            compressed: true,
+        }));
+        assert!(service.execute(read.clone(), dispatch).is_err());
+        let mut status_only = read;
+        status_only["statusOnly"] = json!(true);
+        let status = service.execute(status_only, dispatch).unwrap();
+        let task = &status["task"];
+        assert_eq!(task["status"], "partial");
+        assert_eq!(
+            task["completionStamp"]["stateRevision"],
+            result["stateRevision"]
+        );
+        assert_eq!(
+            task["completionStamp"]["readGeneration"],
+            result["readGeneration"]
+        );
+        assert!(task.get("resources").is_none());
+        assert!(task.get("result").is_none());
+    }
+
+    #[test]
+    fn lightweight_check_status_rejects_other_actions_and_omits_ineligible_stamps() {
+        let (_dir, service) = fixture();
+        assert!(service
+            .execute(
+                json!({"action":"start_task","statusOnly":true,"request":{"action":"refresh"}}),
+                |_, _| panic!("unsupported lightweight request must not dispatch"),
+            )
+            .is_err());
+        let other = start(&service, json!({"action":"refresh"}));
+        service.wait(&other).unwrap();
+        assert!(service
+            .execute(
+                json!({"action":"get_task","taskId":other,"statusOnly":true}),
+                fake_dispatch
+            )
+            .is_err());
+
+        let failed = start(&service, json!({"action":"check_now","fail":true}));
+        assert!(service.wait(&failed).is_err());
+        let status = service.get_check_status(&failed).unwrap();
+        assert_eq!(status["status"], "failed");
+        assert_eq!(status["error"], "Synthetic failure");
+        assert!(status.get("completionStamp").is_none());
+
+        let (hold_id, latch) = new_latch();
+        let cancelled = start(&service, json!({"action":"check_now","hold":hold_id}));
+        entered(&latch);
+        service.cancel(&cancelled).unwrap();
+        assert!(service.wait(&cancelled).is_err());
+        let status = service.get_check_status(&cancelled).unwrap();
+        assert_eq!(status["status"], "cancelled");
+        assert!(status.get("completionStamp").is_none());
+        assert!(CheckCompletionStamp::from_result(
+            &json!({"stateRevision":1,"readGeneration":null})
+        )
+        .is_none());
+    }
+
     fn retention_job(
         id: &str,
         action: &str,
@@ -3587,6 +3782,7 @@ mod tests {
         task.resources = resources.into();
         Job {
             task,
+            completion_stamp: None,
             history_revision: 0,
             cancel: Arc::new(AtomicBool::new(false)),
             completion: Arc::new((Mutex::new(Some(Ok(result))), Condvar::new())),

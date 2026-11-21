@@ -3,7 +3,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import SessionApp from './App';
-import { useTasks, terminalTask } from './tasks';
+import { useTasks, terminalTask, type CheckCompletionStamp } from './tasks';
 import { WorkspaceShell } from './WorkspaceShell';
 import { CheckControl } from './CheckControl';
 import { createHomePane, localHistoryPane, reorderWorkspacePanes, type WorkspaceNavigation, type WorkspacePane, type ScreenPoint, type PaneTaskBadge } from './workspace';
@@ -61,6 +61,7 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
   }, [skills, skillAnnotations]);
   const managerRevision = useRef(-1);
   const maintenanceSignature = useRef<string | undefined>(undefined);
+  const acceptedMaintenance = useRef<MaintenanceState | undefined>(undefined);
   const pendingClockRead = useRef<Promise<void> | undefined>(undefined);
   const readGeneration = useRef<number | null | undefined>(undefined);
   const readGenerationWatermark = useRef<number | undefined>(undefined);
@@ -129,6 +130,7 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
     if (typeof next.readGeneration === 'number') readGenerationWatermark.current = next.readGeneration;
     readGeneration.current = next.readGeneration;
     maintenanceSignature.current = signature;
+    acceptedMaintenance.current = next.maintenance;
     managerRevision.current = revision; setManagerSnapshot(next);
     return false;
   }, [basicMode]);
@@ -161,6 +163,26 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
     void pending.catch(cause => { if (mounted.current) setError(errorText(cause)); })
       .finally(() => { if (pendingClockRead.current === pending) pendingClockRead.current = undefined; });
   }, [applySnapshot, refreshState]);
+  const acceptCheckCompletion = useCallback(async (stamp: CheckCompletionStamp | null) => {
+    const hasAppliedRevisions = () => stamp !== null && managerRevision.current >= stamp.stateRevision
+      && typeof stamp.readGeneration === 'number' && typeof readGeneration.current === 'number'
+      && readGeneration.current >= stamp.readGeneration;
+    const applied = () => {
+      const maintenance = acceptedMaintenance.current;
+      return hasAppliedRevisions() && (basicMode || !maintenance || maintenanceMatchesClock(maintenance, Date.now()));
+    };
+    if (applied()) return;
+    const pending = stateRead.current.pending;
+    if (pending) {
+      // Let the notification read finish before deciding whether a new fetch is needed.
+      try { await pending; } catch { /* The completion still gets a fallback read. */ }
+      if (!mounted.current || applied()) return;
+    }
+    await refreshState();
+    if (mounted.current && stamp && typeof stamp.readGeneration === 'number' && !applied()) {
+      throw new Error('检查已完成，但界面尚未读到检查后的状态。请刷新后重试。');
+    }
+  }, [basicMode, refreshState]);
   useEffect(() => {
     const snapshot = managerSnapshot as { checkMode?: string; checkGeneration?: number; maintenance?: MaintenanceState; connections?: { id: string; path: string; target: string; autoRepairable?: boolean; checkedAt?: string }[] } | undefined;
     const candidates = snapshot?.connections?.filter(connection => connection.autoRepairable) || [];
@@ -517,7 +539,7 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
     {basicMode && <div className="workspace-error" role="status"><span><strong>基本模式</strong> · 只读查看资源与诊断，自动维护和工具启动已暂停；原设置保持不变。{startup.warnings?.join(' ')}</span><button onClick={() => goHome('settings')}>查看保存位置</button></div>}
     {error && <div className="workspace-error" role="alert"><span>{error}</span><button onClick={() => setError('')}>关闭提示</button></div>}
     {closing && <div className="workspace-closing" role="status">{closingMode === 'windows' ? '正在保存并关闭界面，后台任务继续运行…' : closingMode === 'migration' ? '正在保存并等待关键任务完成，然后迁移并重启…' : '正在保存并等待关键任务完成，然后完全退出…'}</div>}
-    <WorkspaceShell panes={panes} activePaneId={incomingPanes.at(-1)?.id || owner?.activePaneId || panes[0].id} splitView={owner?.splitView} onSplitChange={splitView => { void applyReply(api('workspace_set_split', { splitView: splitView || null })); }} pendingTransfers={pendingTransfers} taskBadges={badges} shortcutsBlocked={closing} sidebarExpanded={sidebarControl?.expanded} onToggleSidebar={sidebarControl?.toggle} onSidebarHost={setSidebarHost} checkControl={<CheckControl snapshot={managerSnapshot} tasks={tasks} onSnapshot={acceptSnapshot} disabled={closing || basicMode} />}
+    <WorkspaceShell panes={panes} activePaneId={incomingPanes.at(-1)?.id || owner?.activePaneId || panes[0].id} splitView={owner?.splitView} onSplitChange={splitView => { void applyReply(api('workspace_set_split', { splitView: splitView || null })); }} pendingTransfers={pendingTransfers} taskBadges={badges} shortcutsBlocked={closing} sidebarExpanded={sidebarControl?.expanded} onToggleSidebar={sidebarControl?.toggle} onSidebarHost={setSidebarHost} checkControl={<CheckControl snapshot={managerSnapshot} tasks={tasks} onSnapshot={acceptSnapshot} onCheckCompletion={acceptCheckCompletion} disabled={closing || basicMode} />}
       onActivate={id => { void applyReply(api('workspace_activate', { paneId: id })); }} onClose={closePane}
       onReorder={(id, beforeId) => { const window = current.current.windows.find(item => item.label === label); if (window) void applyReply(api('workspace_save', { panes: reorderWorkspacePanes(window.panes, id, beforeId), activePaneId: window.activePaneId, expectedRevision: current.current.revision })); }}
       onDetach={(id, point) => { void movePane(id, point); }} onReturn={label === 'main' ? undefined : id => { void movePane(id, undefined, true); }}

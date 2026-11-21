@@ -3,19 +3,26 @@ import { listen } from '@tauri-apps/api/event';
 import { isTauri, invoke } from '@tauri-apps/api/core';
 
 export type TaskOrigin = { view?: string; skillId?: string; tab?: string; clientId?: string; sourceId?: string; resourceId?: string; paneId?: string; windowLabel?: string };
-export type ManagerTask = { id: string; action: string; label: string; status: string; stage: string; createdAt: string; startedAt?: string; finishedAt?: string; origin: TaskOrigin; progress?: { completed: number; total: number }; cancellable: boolean; cancelRequested?: boolean; error?: string; resultAvailable?: boolean; resultExpired?: boolean; resultFiles?: { id: string; label: string; path: string }[]; resources?: string[]; hidden?: boolean; result?: unknown };
+export type CheckCompletionStamp = { stateRevision: number; readGeneration: number | null };
+export type ManagerTask = { id: string; action: string; label: string; status: string; stage: string; createdAt: string; startedAt?: string; finishedAt?: string; origin: TaskOrigin; progress?: { completed: number; total: number }; cancellable: boolean; cancelRequested?: boolean; error?: string; resultAvailable?: boolean; resultExpired?: boolean; resultFiles?: { id: string; label: string; path: string }[]; resources?: string[]; hidden?: boolean; result?: unknown; completionStamp?: CheckCompletionStamp };
 export const terminalTask = (task: ManagerTask) => !['queued', 'running'].includes(task.status);
 export const taskStatus: Record<string, string> = { queued: '排队中', running: '进行中', succeeded: '完成', partial: '部分完成', failed: '失败', cancelled: '已取消', interrupted: '已中断 · 需核实' };
 const api = <T,>(action: string, args: Record<string, unknown> = {}) => invoke<T>('manager_request', { request: { action, ...args } });
 function taskForList(task: ManagerTask): ManagerTask {
   // Scheduling keys remain available in the original API response and backend.
-  const { resources: _resources, ...metadata } = task;
-  // Checks return the complete application snapshot to their caller. History
+  const { resources: _resources, completionStamp: _completionStamp, ...metadata } = task;
+  // Full check requests return the complete application snapshot to their caller. History
   // keeps the readable task identity, rather than up to 100 old snapshots.
   // Explicit inspection and run still return the unmodified API response.
   if (metadata.action !== 'check_now' || metadata.result === undefined) return metadata;
   const { result: _result, ...listed } = metadata;
   return { ...listed, resultAvailable: metadata.resultAvailable ?? !metadata.resultExpired };
+}
+
+function checkCompletionStamp(stamp: CheckCompletionStamp | undefined): CheckCompletionStamp | null {
+  if (!stamp || !Number.isSafeInteger(stamp.stateRevision) || stamp.stateRevision < 0) return null;
+  if (stamp.readGeneration !== null && (!Number.isSafeInteger(stamp.readGeneration) || stamp.readGeneration < 0)) return null;
+  return stamp;
 }
 
 export function useTasks() {
@@ -51,8 +58,9 @@ export function useTasks() {
     void listen<{ tasks: ManagerTask[]; clearedTaskIds: string[] }>('task-history-cleared', event => { if (!disposed) acceptClear(event.payload); }).then(unlisten => { if (!disposed) stopClear = unlisten; else unlisten(); }).catch(() => undefined);
     return () => { disposed = true; mounted.current = false; stop?.(); stopClear?.(); };
   }, [accept, acceptClear]);
-  const run = useCallback(async <T,>(label: string, action: string, args: Record<string, unknown>, origin: TaskOrigin, foreground = true, onStarted?: (task: ManagerTask) => void): Promise<T> => {
+  const execute = useCallback(async <T,>(label: string, action: string, args: Record<string, unknown>, origin: TaskOrigin, foreground: boolean, onStarted?: (task: ManagerTask) => void, statusOnly = false): Promise<T> => {
     let task: ManagerTask | undefined;
+    let readTerminalStatus = false;
     // Events can precede the start acknowledgement. Keep only the latest record
     // per ID until that acknowledgement identifies this run, then release them.
     const early = new Map<string, ManagerTask>();
@@ -70,14 +78,15 @@ export function useTasks() {
     };
     waiters.current.add(receive);
     try {
-      const started = await api<{ task: ManagerTask }>('start_task', { request: { action, ...args }, label, origin, foreground });
+      const started = await api<{ task: ManagerTask }>('start_task', { request: { action, ...args }, label, origin, foreground, ...(statusOnly && { statusOnly }) });
       task = started.task;
       const pending = early.get(task.id); early.clear();
       if (pending) task = merge(task, pending);
       accept(task); onStarted?.(started.task);
       const read = async () => {
         const before = version;
-        const next = (await api<{ task: ManagerTask }>('get_task', { taskId: task!.id })).task;
+        const next = (await api<{ task: ManagerTask }>('get_task', { taskId: task!.id, ...(statusOnly && { statusOnly }) })).task;
+        readTerminalStatus = terminalTask(next);
         // A later event wins over a read that began earlier; a terminal response
         // still wins over an older non-terminal event. Full response fields stay.
         task = before === version ? merge(task!, next) : merge(next, task!);
@@ -91,21 +100,30 @@ export function useTasks() {
         });
         if (!notified) await read();
       }
-      if (!['cancelled', 'failed', 'interrupted'].includes(task!.status) && task!.result === undefined) await read();
+      if (statusOnly) {
+        // Status events carry no check completion stamp. A compact terminal read
+        // can also legitimately complete without one, so do not fetch it twice.
+        if (['succeeded', 'partial'].includes(task!.status) && !readTerminalStatus && task!.completionStamp === undefined) await read();
+      } else if (!['cancelled', 'failed', 'interrupted'].includes(task!.status) && task!.result === undefined) await read();
       if (task!.status === 'cancelled') throw new Error('任务已取消');
       if (task!.status === 'failed' || task!.status === 'interrupted') throw new Error(task!.error || task!.stage || '任务未完成');
-      return task!.result as T;
+      if (statusOnly && !['succeeded', 'partial'].includes(task!.status)) throw new Error(task!.error || task!.stage || '检查未完成');
+      return (statusOnly ? checkCompletionStamp(task!.completionStamp) : task!.result) as T;
     } finally {
       waiters.current.delete(receive); early.clear();
       if (timer !== undefined) clearTimeout(timer);
       wake = undefined;
     }
   }, [accept]);
+  const run = useCallback(<T,>(label: string, action: string, args: Record<string, unknown>, origin: TaskOrigin, foreground = true, onStarted?: (task: ManagerTask) => void) =>
+    execute<T>(label, action, args, origin, foreground, onStarted), [execute]);
+  const runCheck = useCallback((label: string, origin: TaskOrigin) =>
+    execute<CheckCompletionStamp | null>(label, 'check_now', {}, origin, true, undefined, true), [execute]);
   const inspect = useCallback(async (id: string) => { const task = (await api<{ task: ManagerTask }>('get_task', { taskId: id })).task; accept(task); return task; }, [accept]);
   const cancel = useCallback(async (id: string) => { accept((await api<{ task: ManagerTask }>('cancel_task', { taskId: id })).task); }, [accept]);
   const clear = useCallback(async () => {
     const value = await api<{ tasks: ManagerTask[]; clearedTaskIds: string[] }>('clear_task_history');
     acceptClear(value);
   }, [acceptClear]);
-  return { tasks, run, inspect, cancel, clear };
+  return { tasks, run, runCheck, inspect, cancel, clear };
 }

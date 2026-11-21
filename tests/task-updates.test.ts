@@ -126,6 +126,61 @@ test('run returns the full check result while the subscribed task list keeps onl
   assert.equal(calls.filter(call => call.action === 'get_task').length, 1);
 });
 
+
+test('global check waits on compact status and returns the terminal stamp without rereading it', async () => {
+  const stamp = { stateRevision: 17, readGeneration: 4 };
+  started = summary(checkTask({ status: 'queued', resultAvailable: false }));
+  response = summary(checkTask({ completionStamp: stamp }));
+  await setup();
+  let received: unknown;
+  await act(async () => { received = await current.runCheck('检查变化', { view: 'changes' }); });
+  assert.deepEqual(received, stamp);
+  assert.deepEqual(calls.slice(1), [
+    { action: 'start_task', request: { action: 'check_now' }, label: '检查变化', origin: { view: 'changes' }, foreground: true, statusOnly: true },
+    { action: 'get_task', taskId: 'one', statusOnly: true },
+  ]);
+  assert.equal(current.tasks[0].status, 'succeeded');
+  assert.equal(current.tasks[0].completionStamp, undefined);
+  assert.equal(current.tasks[0].resources, undefined);
+  assert.equal(current.tasks[0].result, undefined);
+});
+
+test('partial check completion from a stamp-less event reads compact status once for its stamp', async () => {
+  const stamp = { stateRevision: 18, readGeneration: null };
+  started = summary(checkTask({ status: 'queued', resultAvailable: false }));
+  response = summary(checkTask({ status: 'running', resultAvailable: false }));
+  await setup();
+  let running!: Promise<unknown>;
+  await act(async () => { running = current.runCheck('检查变化', {}); });
+  assert.equal(readCount(), 1);
+  response = summary(checkTask({ status: 'partial', completionStamp: stamp }));
+  await emit(summary(checkTask({ status: 'partial' })));
+  assert.deepEqual(await running, stamp);
+  assert.equal(readCount(), 2);
+  assert(calls.filter(call => call.action === 'get_task').every(call => call.statusOnly === true));
+  assert.equal(current.tasks[0].status, 'partial');
+});
+
+test('global check without a terminal stamp completes for the caller to refresh once', async () => {
+  started = summary(checkTask({ status: 'queued', resultAvailable: false }));
+  response = summary(checkTask({ status: 'partial' }));
+  await setup();
+  await act(async () => { assert.equal(await current.runCheck('检查变化', {}), null); });
+  assert.equal(readCount(), 1);
+});
+
+test('compact global check keeps cancellation and failure visible without returning completion', async () => {
+  await setup();
+  for (const [status, message] of [['cancelled', '任务已取消'], ['failed', '检查目录不可读']] as const) {
+    started = summary(checkTask({ id: status, status: 'queued', resultAvailable: false }));
+    response = summary(checkTask({ id: status, status, error: message, resultAvailable: false }));
+    await act(async () => { await assert.rejects(current.runCheck('检查变化', {}), { message }); });
+    assert.equal(current.tasks.find((item: any) => item.id === status).status, status);
+  }
+  assert.equal(readCount(), 2);
+  assert(calls.filter(call => call.action === 'get_task').every(call => call.statusOnly === true));
+});
+
 test('explicit check inspection returns the full original result without pinning it in history', async () => {
   const snapshot = largeSnapshot(8);
   response = checkTask({ result: snapshot });
