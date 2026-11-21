@@ -22,6 +22,8 @@ const buildInfoSha256 = '0bdcc16ff13fffa08045b791abcb93897b24c91153675127c6fddd8
 const transportSha256 = 'f9dfe387f6900925808cdd16b9785f29b96e90c40b554b828b17557f99bd846f';
 const hostedReferenceFrame = null;
 const hostedFirstSearchReceipt = null;
+const hostedRetentionReference = null;
+const shortRetentionPolicy = Object.freeze({ cycles: 12, intervalMs: 12000, cooldownMs: 20000 });
 const helper = fileURLToPath(new URL('native-visual-input.ps1', import.meta.url));
 const sourceFiles = ['verify-native-visual-stability.mjs', 'native-visual-input.ps1', 'performance-policy.mjs', 'performance-fixture.mjs', 'diagnose-native-idle-memory.mjs', 'native-uia-client.mjs', 'verify-native-uia.ps1'].map(name => fileURLToPath(new URL(name, import.meta.url)));
 const format = 'agent-resource-manager-native-visual-stability-v1';
@@ -61,7 +63,7 @@ export function visualObserverSource() {
     return IDLE_OBSERVER.replace(modes, "[ValidateSet('status','sample','compile','tasks')]").replace(branch, "  if($Mode -eq 'tasks') { $tasks=([IdleMemoryRead]::Read($Spec,'task_list')|ConvertFrom-Json).value; [pscustomobject]@{ok=$true;identity=@{pid=$status.pid;creationFileTime=$status.creationFileTime};tasks=@($tasks.tasks)}|ConvertTo-Json -Depth 8 -Compress; exit 0 }\n" + branch);
 }
 export function options(args) {
-    assert.ok(['--prepare', '--references', '--pilot', '--run', '--help'].includes(args[0]));
+    assert.ok(['--prepare', '--references', '--pilot', '--run', '--short-retention', '--help'].includes(args[0]));
     assert.equal(args.length, ['--prepare', '--help'].includes(args[0]) ? 1 : 2);
     return { mode: args[0], path: args[1] };
 }
@@ -85,11 +87,11 @@ function fitsCapture(box, frame) {
     const [left, top, width, height] = frame.captureBounds;
     return box[0] >= left && box[1] >= top && box[0] + box[2] <= left + width && box[1] + box[3] <= top + height;
 }
-export function validateReferences(ref, descriptor) {
+export function validateReferences(ref, descriptor, retentionReference = null) {
     assert.equal(ref.format, format);
-    assert.equal(ref.candidateSha256, candidateSha256);
+    assert.equal(ref.candidateSha256, retentionReference?.candidateSha256 ?? candidateSha256);
     assert.equal(ref.semanticReferencePhaseCompleted, true);
-    assert.ok(same(ref.root, descriptor.root));
+    assert.ok(same(ref.root, retentionReference?.root ?? descriptor.root));
     assert.equal(ref.datasetFingerprint, descriptor.dataset.dataFingerprint);
     if (hostedFirstSearchReceipt) assert.deepEqual(ref.firstSearchPreflight, hostedFirstSearchReceipt);
     assert.ok(Number.isSafeInteger(ref.frame.left) && Number.isSafeInteger(ref.frame.top));
@@ -632,20 +634,52 @@ async function references(descriptor) {
             await writeFile(join(descriptor.root, 'reference-failure.json'), json({ status: 'failed-references', error: failure.message, referencePhase, lastRead, captureBounds: ref.frame?.captureBounds, documentReading: ref.documentReading, completedStates: Object.keys(ref.states), exitEvidence, cleanupErrors }), { flag: 'wx' });
     }
 }
-async function run(descriptor, pilot) {
+function retainedCheckHistory(dataset, checks) {
+    const db = new DatabaseSync(dataset.dbPath, { readOnly: true });
+    try {
+        const get = db.prepare('SELECT payload FROM task_history WHERE id = ?');
+        const keys = checks.map(({ taskId }) => {
+            const row = JSON.parse(get.get(taskId)?.payload ?? 'null');
+            assert.ok(row, 'One measured check was absent from durable history.');
+            assert.equal(row.id, taskId);
+            assert.equal(row.action, 'check_now');
+            assert.equal(row.status, 'succeeded');
+            assert.ok(Array.isArray(row.resources) && row.resources.length > 0);
+            assert.ok(row.resources.every(key => typeof key === 'string'));
+            return row.resources;
+        });
+        assert.equal(new Set(keys.map(row => hash(json(row)))).size, 1, 'The repeated fixture checks did not reach an identical ordered lock set.');
+        assert.equal(keys[0].length, 2 * dataset.skillCount + 2, 'The global check did not lock every fixture Skill and its directory.');
+        const fixtureRoot = dataset.root.replaceAll('/', '\\').toLowerCase();
+        const normalized = keys[0].map(key => key.toLowerCase().replaceAll('/', '\\').replace(fixtureRoot, '<fixture>'));
+        assert.equal(normalized.filter(key => key.startsWith('directory:<fixture>\\skills\\')).length, dataset.skillCount);
+        assert.equal(normalized.filter(key => key.startsWith('skill:perf-skill-')).length, dataset.skillCount);
+        return { jobs: keys.length, keysPerJob: keys[0].length, normalizedKeySha256: hash(json(normalized)) };
+    }
+    finally { db.close(); }
+}
+
+async function run(descriptor, pilot, shortRetention = false) {
     const root = descriptor.root, refPath = join(root, 'visual-references.json');
     await ordinary(refPath);
     await ordinary(join(root, 'visual-approval.json'));
     const approvalPath = join(root, 'visual-approval.json');
     const refBytes = await readFile(refPath), ref = JSON.parse(refBytes);
-    validateReferences(ref, descriptor);
-    assert.deepEqual(ref.sources, descriptor.sources);
+    if (shortRetention) {
+        assert.equal(process.env.GITHUB_ACTIONS, 'true');
+        assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
+        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-short-history-pair-930ec22-20261121');
+        assert.ok(hostedRetentionReference);
+        assert.equal(hash(refBytes), hostedRetentionReference.sha256);
+    }
+    validateReferences(ref, descriptor, shortRetention ? hostedRetentionReference : null);
+    if (!shortRetention) assert.deepEqual(ref.sources, descriptor.sources);
     const approvalBytes = await readFile(approvalPath), approval = JSON.parse(approvalBytes);
     assert.equal(approval.referenceSha256, hash(refBytes));
     assert.equal(approval.reviewedBy, 'root');
     assert.equal(approval.visualReviewConfirmed, true);
     assert.deepEqual(approval.reviewedStates, requiredStates, 'Every frozen state must receive explicit visual review before any run.');
-    if (!pilot) {
+    if (!pilot && !shortRetention) {
         await ordinary(join(root, 'pilot-result.json'));
         const result = JSON.parse(await readFile(join(root, 'pilot-result.json'), 'utf8'));
         assert.equal(result.status, 'pilot-passed');
@@ -655,10 +689,12 @@ async function run(descriptor, pilot) {
     }
     for (const state of Object.values(ref.states))
         for (const roi of state.rois) {
+            if (shortRetention)
+                roi.path = join(root, relative(hostedRetentionReference.root, roi.path));
             await ordinary(roi.path);
             assert.equal(await digest(roi.path), roi.sha256);
         }
-    const name = pilot ? 'pilot' : 'stability', reportPath = join(root, name + '-result.json');
+    const name = shortRetention ? 'retention-short' : pilot ? 'pilot' : 'stability', reportPath = join(root, name + '-result.json');
     await writeFile(join(root, name + '-owner.json'), json({ referenceSha256: hash(refBytes) }), { flag: 'wx' });
     await mkdir(join(root, 'temp'), { recursive: true });
     const env = environment(root);
@@ -768,7 +804,31 @@ async function run(descriptor, pilot) {
             await sleep(50);
         } const raw = await observe(descriptor, identity, env, 'sample'), current = await visual.call('identity'); assert.equal(raw.inputTickBefore, current.lastInputTick); assert.equal(raw.lastInputTick, current.lastInputTick); return { ...idleObservation(raw, identity, cpus().length), elapsedMs, observedAt: new Date().toISOString() }; }
         await waitState('all');
-        if (pilot) {
+        if (shortRetention) {
+            report.shortRetentionPolicy = shortRetentionPolicy;
+            report.limitations.push('Short same-host diagnostic only. No result from this mode can pass or replace the 61-point convergence gate.');
+            await cycle(0);
+            const start = performance.now();
+            report.samples.push(await sample(0));
+            for (let index = 1; index <= shortRetentionPolicy.cycles; index++) {
+                await sleep(start + index * shortRetentionPolicy.intervalMs - performance.now());
+                await check();
+                await cycle(index);
+                const value = await sample(0);
+                value.elapsedMs = performance.now() - start;
+                report.samples.push(value);
+                await save();
+                console.log(json({ phase: 'retention-short', sample: index, of: shortRetentionPolicy.cycles }).trim());
+            }
+            await sleep(shortRetentionPolicy.cooldownMs);
+            const tail = await sample(0);
+            tail.elapsedMs = performance.now() - start;
+            report.samples.push(tail);
+            assert.equal(new Set(report.checks.map(check => check.taskId)).size, shortRetentionPolicy.cycles);
+            report.history = retainedCheckHistory(descriptor.dataset, report.checks);
+            report.status = 'short-operations-completed';
+        }
+        else if (pilot) {
             for (let index = 0; index < 2; index++) {
                 if (!index)
                     await check();
@@ -853,6 +913,8 @@ async function run(descriptor, pilot) {
         }
         if (pilot && report.status === 'pilot-operations-completed' && report.normalExit && report.runtimeAndSourcesPreserved)
             report.status = 'pilot-passed';
+        if (shortRetention && report.status === 'short-operations-completed' && report.normalExit && report.runtimeAndSourcesPreserved && report.managementDataPreserved)
+            report.status = 'retention-short-completed';
         report.finishedAt = new Date().toISOString();
         await save();
         console.log(json({ status: report.status, reportPath, normalExit: report.normalExit, previousFailureReplaced: false }));
@@ -863,6 +925,6 @@ async function main() { const selected = options(process.argv.slice(2)); if (sel
     return;
 } if (selected.mode === '--prepare')
     return prepare(); const descriptor = await descriptorAt(selected.path); if (selected.mode === '--references')
-    return references(descriptor); return run(descriptor, selected.mode === '--pilot'); }
+    return references(descriptor); return run(descriptor, selected.mode === '--pilot', selected.mode === '--short-retention'); }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
     main().catch(error => { console.error(error.message); process.exitCode = 1; });
