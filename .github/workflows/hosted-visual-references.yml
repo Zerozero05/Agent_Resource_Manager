@@ -1,4 +1,4 @@
-name: Observe hosted GitHub filter return for 3536ca0
+name: Witness hosted GitHub filter click before wheel for 3536ca0
 on: create
 permissions:
   contents: read
@@ -19,7 +19,7 @@ env:
   FIRST_SEARCH_RESULT_BOUNDS: '433,671,201,31'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-filter-return-3536ca0-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-filter-return-r2-3536ca0-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 7
     defaults:
@@ -84,7 +84,7 @@ jobs:
           $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
           $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
           Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
-      - name: Observe one owned synthetic physical filter return
+      - name: Witness one owned synthetic filter click before wheel
         id: generate
         timeout-minutes: 5
         run: |
@@ -224,14 +224,37 @@ jobs:
                 $probe.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $probe.datasetFingerprint -cne $env:FIRST_SEARCH_FIXTURE_SHA256 -or
                 $descriptor.dataset.syntheticOnly -ne $true -or $descriptor.dataset.skillCount -ne 1000 -or $descriptor.dataset.toolCount -ne 100 -or
                 $probe.observationBudgetMs -ne 15000 -or ($probe.completedStatesBeforeRestore -join ',') -cne 'all,search-0000,github' -or
-                $probe.click.clicked -ne $true -or $probe.wheel.scrolledUp -ne $true -or
-                $probe.click.x -ne $probe.controls.allFiltered.x -or $probe.click.y -ne $probe.controls.allFiltered.y -or
-                $probe.wheel.x -ne $probe.controls.search.x -or $probe.wheel.y -ne $probe.controls.search.y -or
-                @($probe.pixels.regions).Count -ne 3 -or ($probe.pixels.regions.role -join ',') -cne 'result-table,result-count,empty-filter-title' -or
-                $probe.semantic.confirmedTwentyTitlesAndVisibleEdit -isnot [bool] -or $probe.exitEvidence.normalExit -ne $true -or
+                $probe.outcome -cnotin @('visible-click-location-unconfirmed','empty-title-change-unconfirmed','click-observed-before-wheel') -or
+                $probe.earlyPoint.sourceName -cne '全部' -or $probe.earlyPoint.sourceScope -cne '来源筛选' -or
+                $probe.exitEvidence.normalExit -ne $true -or
                 $driver.closedNormally -ne $true -or $driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or
                 $driver.dataDirectory -ine $descriptor.dataset.dataDir) { throw 'The diagnostic receipt lacks bound observations and safe exit.' }
 
+            $expectedImages = @('before-click.png')
+            if ($probe.outcome -ceq 'visible-click-location-unconfirmed') {
+              if ($null -ne $probe.click -or $null -ne $probe.wheel) { throw 'Unconfirmed control geometry must accept no click or wheel.' }
+            } else {
+              $expectedImages += 'after-click-before-wheel.png'
+              if ($probe.stablePoint.sameVisibleBounds -ne $true -or $probe.stablePoint.filterClearlyAboveEmpty -ne $true -or
+                  $probe.emptyBeforeClick.matched -ne $true -or $probe.click.clicked -ne $true -or
+                  $probe.click.x -ne $probe.stablePoint.x -or $probe.click.y -ne $probe.stablePoint.y) {
+                throw 'The click is not tied to the rechecked control and unchanged empty state.'
+              }
+              if ($probe.outcome -ceq 'empty-title-change-unconfirmed') {
+                if ($probe.beforeWheel.changed -ne $false -or $null -ne $probe.wheel) { throw 'There must be no wheel before a visible change.' }
+              } else {
+                $expectedImages += 'after-wheel.png'
+                if ($probe.beforeWheel.changed -ne $true -or $probe.beforeWheel.consecutive -lt 2 -or
+                    $probe.beforeWheel.elapsedMs -gt 15000 -or $probe.beforeWheel.lastInputTick -ne $probe.click.lastInputTick -or
+                    $probe.wheel.scrolledUp -ne $true -or $probe.wheel.x -ne $probe.controls.search.x -or
+                    $probe.wheel.y -ne $probe.controls.search.y -or
+                    @($probe.pixels.regions).Count -ne 3 -or ($probe.pixels.regions.role -join ',') -cne 'result-table,result-count,empty-filter-title' -or
+                    $probe.semantic.confirmedTwentyTitlesAndVisibleEdit -isnot [bool]) {
+                  throw 'The delayed wheel needs a bounded pre-wheel pixel change and the original post-wheel observations.'
+                }
+              }
+            }
+            if (($probe.witnesses.fileName -join ',') -cne ($expectedImages -join ',')) { throw 'The synthetic image sequence is incomplete.' }
             foreach ($field in $referenceFrame.Keys) {
               if ($probe.frame.$field -ne $referenceFrame[$field]) { throw 'The diagnostic frame changed.' }
             }
@@ -244,11 +267,22 @@ jobs:
             $output = Join-Path $env:RUNNER_TEMP 'arm-filter-return-diagnostic'
             New-Item -ItemType Directory -Path $output | Out-Null
             Copy-Item -LiteralPath $report -Destination $output
+            foreach ($image in $probe.witnesses) {
+              $path = Join-Path (Join-Path $referenceRoot 'references') $image.fileName
+              $item = Get-Item -LiteralPath $path
+              if ($item -isnot [IO.FileInfo] -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                  ($image.box -join ',') -cne '12,48,936,590' -or $image.pixelSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                  (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $image.sha256) {
+                throw 'A fixed owned synthetic image did not verify.'
+              }
+              Copy-Item -LiteralPath $item.FullName -Destination $output
+            }
             [ordered]@{
               status='filter-restore-observed'; candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$env:CANDIDATE_SHA256
               diagnosticHead=$env:GITHUB_SHA; runId=$env:GITHUB_RUN_ID; runAttempt=[int]$env:GITHUB_RUN_ATTEMPT
               diagnosticSha256=(Get-FileHash -LiteralPath $report -Algorithm SHA256).Hash.ToLowerInvariant()
-              visualOutcome=$probe.pixels.outcome; semanticConfirmed=$probe.semantic.confirmedTwentyTitlesAndVisibleEdit
+              clickOutcome=$probe.outcome; postWheelVisualOutcome=$probe.pixels.outcome
+              postWheelSemanticConfirmed=$probe.semantic.confirmedTwentyTitlesAndVisibleEdit
               normalExit=$probe.exitEvidence.normalExit; fullVisualAcceptance=$false
             } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $output 'receipt.json') -Encoding utf8NoBOM
           } catch {
@@ -266,11 +300,11 @@ jobs:
             [ordered]@{status='filter-restore-diagnostic-failed'; stage='workflow-setup'; candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$env:CANDIDATE_SHA256} |
               ConvertTo-Json | Set-Content -LiteralPath $failure -Encoding utf8NoBOM
           }
-      - name: Upload bounded synthetic diagnostic receipts
+      - name: Upload bounded synthetic diagnostic receipts and owned evidence
         if: ${{ steps.generate.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Agent_Resource_Manager_filter_return_${{ github.run_id }}_${{ github.run_attempt }}
+          name: Agent_Resource_Manager_filter_return_r2_${{ github.run_id }}_${{ github.run_attempt }}
           path: ${{ runner.temp }}/arm-filter-return-diagnostic/
           if-no-files-found: error
           retention-days: 14
@@ -278,7 +312,7 @@ jobs:
         if: ${{ always() && steps.generate.outcome != 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Agent_Resource_Manager_filter_return_failure_${{ github.run_id }}_${{ github.run_attempt }}
+          name: Agent_Resource_Manager_filter_return_r2_failure_${{ github.run_id }}_${{ github.run_attempt }}
           path: ${{ runner.temp }}/arm-visual-reference-failure.json
           if-no-files-found: error
           retention-days: 14

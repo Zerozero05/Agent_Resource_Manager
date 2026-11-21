@@ -306,7 +306,7 @@ export function referenceObservationRows(value) {
 async function references(descriptor) {
     if (hostedFilterRestoreDiagnostic) {
         assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
-        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-filter-return-3536ca0-20261121');
+        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-filter-return-r2-3536ca0-20261121');
         assert.ok(hostedReferenceFrame && hostedFirstSearchReceipt);
     }
     const { NativeUiaSession } = await import('./native-uia-client.mjs');
@@ -499,31 +499,83 @@ async function references(descriptor) {
             return { ...last, outcome: last.empty && !last.all && unchanged >= visualPolicy.stableObservations
                 ? 'last-stable-pixels-match-github-empty' : 'pixels-differ-or-unsettled' };
         }
+        async function filterClickGeometry(deadline) {
+            const empty = ref.states.github.rois[0];
+            const first = await element('全部', '来源筛选', 'ControlType.Button', undefined, deadline);
+            await sleep(visualPolicy.observationGapMs);
+            const second = await element('全部', '来源筛选', 'ControlType.Button', undefined, deadline);
+            const box = unclippedNativeBox(second.bounds, ref.frame);
+            const sameVisibleBounds = first.bounds === second.bounds && validBox(box, ref.frame);
+            const filterClearlyAboveEmpty = box[1] + box[3] <= empty.box[1];
+            return { box, ...boxCenter(box), sameVisibleBounds, filterClearlyAboveEmpty, firstBounds: first.bounds, secondBounds: second.bounds };
+        }
+        async function waitUntilEmptyTitleChanges(deadline, started) {
+            const roi = ref.states.github.rois[0];
+            let previousHash, consecutive = 0, last;
+            while (performance.now() < deadline) {
+                const remaining = Math.floor(deadline - performance.now());
+                if (remaining < 1) break;
+                const result = await visual.call('match', roi, remaining);
+                consecutive = !result.matched ? (result.pixelSha256 === previousHash ? consecutive + 1 : 1) : 0;
+                previousHash = result.pixelSha256;
+                last = { ...result, consecutive, elapsedMs: Math.round(performance.now() - started) };
+                if (performance.now() < deadline && consecutive >= visualPolicy.stableObservations)
+                    return { changed: true, box: roi.box, ...last };
+                await sleep(visualPolicy.observationGapMs);
+            }
+            return { changed: false, box: roi.box, ...last };
+        }
         async function diagnoseFilterReturn() {
-            filterRestoreProbe = { completedStatesBeforeRestore: Object.keys(ref.states), observationBudgetMs: visualPolicy.matchTimeoutMs };
-            filterRestoreProbe.click = await visual.call('click', ref.controls.allFiltered);
-            const afterClick = performance.now();
-            filterRestoreProbe.wheel = await scrollLibrary(true);
-            const afterWheel = performance.now();
-            const deadline = afterWheel + visualPolicy.matchTimeoutMs;
-            filterRestoreProbe.wheelAcknowledgedAfterClickMs = Math.round(afterWheel - afterClick);
-            // Independent screen sampling and the original scoped native read share a deadline.
-            // No AX response, extra wait or second input sits between the recorded click and wheel.
-            const [pixels, semantic] = await Promise.allSettled([
-                filterReturnPixels(deadline, afterWheel),
-                (async () => {
-                    try {
-                        await semanticList(null, deadline);
-                        return { confirmedTwentyTitlesAndVisibleEdit: true, elapsedMs: Math.round(performance.now() - afterWheel) };
-                    } catch (error) {
-                        return { confirmedTwentyTitlesAndVisibleEdit: false, elapsedMs: Math.round(performance.now() - afterWheel),
-                            lastRead, error: error.message };
-                    }
-                })()
-            ]);
-            filterRestoreProbe.pixels = pixels.status === 'fulfilled' ? pixels.value : { error: pixels.reason.message };
-            assert.equal(semantic.status, 'fulfilled');
-            filterRestoreProbe.semantic = semantic.value;
+            const proof = filterRestoreProbe = { completedStatesBeforeRestore: Object.keys(ref.states),
+                observationBudgetMs: visualPolicy.matchTimeoutMs, earlyPoint: ref.controls.allFiltered,
+                witnesses: [] };
+            const imageBox = [12, 48, ref.frame.width - 24, ref.frame.height - 60];
+            async function witness(fileName) {
+                const path = join(descriptor.root, 'references', fileName);
+                const result = await visual.call('save', { path, box: imageBox });
+                assert.equal(result.saved, true);
+                proof.witnesses.push({ fileName, box: imageBox, sha256: await digest(path), pixelSha256: result.pixelSha256 });
+            }
+            referencePhase = 'confirm-stable-github-button-and-empty-title';
+            await witness('before-click.png');
+            const geometryDeadline = performance.now() + visualPolicy.matchTimeoutMs;
+            try {
+                proof.stablePoint = await filterClickGeometry(geometryDeadline);
+            } catch (error) {
+                proof.stablePointError = { lastRead, error: error.message };
+            }
+            const remaining = Math.floor(geometryDeadline - performance.now());
+            if (proof.stablePoint && remaining > 0)
+                proof.emptyBeforeClick = await visual.call('match', ref.states.github.rois[0], remaining);
+            const stable = proof.stablePoint;
+            if (!stable?.sameVisibleBounds || !stable.filterClearlyAboveEmpty || !proof.emptyBeforeClick?.matched) {
+                proof.outcome = 'visible-click-location-unconfirmed';
+            } else {
+                referencePhase = 'observe-click-before-wheel';
+                proof.click = await visual.call('click', { x: stable.x, y: stable.y });
+                const afterClick = performance.now();
+                proof.beforeWheel = await waitUntilEmptyTitleChanges(afterClick + visualPolicy.matchTimeoutMs, afterClick);
+                await witness('after-click-before-wheel.png');
+                if (!proof.beforeWheel.changed) {
+                    proof.outcome = 'empty-title-change-unconfirmed';
+                } else {
+                    referencePhase = 'observe-return-after-delayed-wheel';
+                    proof.wheel = await scrollLibrary(true);
+                    const afterWheel = performance.now(), deadline = afterWheel + visualPolicy.matchTimeoutMs;
+                    proof.wheelAcknowledgedAfterClickMs = Math.round(afterWheel - afterClick);
+                    let semanticElapsedMs;
+                    const [pixels, semantic] = await Promise.allSettled([
+                        filterReturnPixels(deadline, afterWheel),
+                        semanticList(null, deadline).finally(() => { semanticElapsedMs = Math.round(performance.now() - afterWheel); })
+                    ]);
+                    proof.pixels = pixels.status === 'fulfilled' ? pixels.value : { error: pixels.reason.message };
+                    proof.semantic = { confirmedTwentyTitlesAndVisibleEdit: semantic.status === 'fulfilled', elapsedMs: semanticElapsedMs,
+                        ...(semantic.status === 'rejected' ? { lastRead, error: semantic.reason.message } : {}) };
+                    await witness('after-wheel.png');
+                    if (pixels.status === 'rejected') throw pixels.reason;
+                    proof.outcome = 'click-observed-before-wheel';
+                }
+            }
             await visual.finish();
             visual = null;
             try {
@@ -535,7 +587,6 @@ async function references(descriptor) {
             }
             assert.equal(exitEvidence?.normalExit, true);
             filterRestoreProbe.exitEvidence = exitEvidence;
-            if (pixels.status === 'rejected') throw pixels.reason;
             const path = join(descriptor.root, 'filter-restore-diagnostic.json');
             await writeFile(path, json({ status: 'filter-restore-observed', candidateSha256, datasetFingerprint: ref.datasetFingerprint,
                 frame: ref.frame, controls: ref.controls, firstSearchPreflight: ref.firstSearchPreflight,
