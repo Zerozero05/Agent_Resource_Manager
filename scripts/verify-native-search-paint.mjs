@@ -7,16 +7,19 @@ import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { assertNoUserManager } from './native-uia-client.mjs';
 import { VisualSession, inside, requiredStates, validateReferences, visualObserverSource } from './verify-native-visual-stability.mjs';
 
-const source = '37f83f135f9fd8facd90255fa33f58d534f8364d';
-const candidateRun = '44889635017';
+const source = '2d194880f48bbef0fe9613f3d2a5afffc3b2ce15';
+const candidateRun = '44898573141';
 const validation = 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data';
-const branch = 'codex/hosted-search-paint-content-37f83f1-20261121';
+const branch = 'codex/hosted-search-observer-pair-2d19488-20261121';
 const statePair = ['search-0001', 'search-0002'];
-const measuredTrials = 12;
-const maxCheckAttempts = 24;
+const observers = ['pixels', 'uia'];
+const perDirection = 6;
+const measuredTrials = statePair.length * observers.length * perDirection;
+const maxCheckAttempts = 40;
 const expectedSchedulingKeys = 2002;
 const execute = promisify(execFile);
 const shaPattern = /^[a-f0-9]{64}$/;
@@ -83,6 +86,64 @@ export function validatePaintInterval(value, expectedText) {
     assert.ok(Math.abs(value.lowerBoundMs - lowerBoundMs) < .01);
     assert.ok(Math.abs(value.upperBoundMs - upperBoundMs) < .01);
     return { lowerBoundMs, upperBoundMs };
+}
+
+export function validateObserver(value, expectedText, observer) {
+    assert.equal(value.typed, expectedText);
+    assert.equal(value.observer, observer);
+    assert.equal(value.inputMethod, 'ValuePattern.SetValue');
+    assert.equal(value.foreground, true);
+    const ticks = field => {
+        assert.equal(typeof field, 'string');
+        assert.match(field, /^[1-9]\d*$/);
+        return BigInt(field);
+    };
+    const frequency = ticks(value.qpcFrequency);
+    const initialEnd = ticks(value.initial.endQpc);
+    const start = ticks(value.inputStartedQpc), invoked = ticks(value.setValueStartedQpc);
+    const returned = ticks(value.inputReturnedQpc);
+    const confirmationStart = ticks(value.confirmation.startQpc), confirmationEnd = ticks(value.confirmation.endQpc);
+    assert.ok(ticks(value.initial.startQpc) <= initialEnd && initialEnd <= start && start <= invoked && invoked <= returned);
+    assert.ok(returned <= confirmationStart && confirmationStart <= confirmationEnd);
+    const asMs = delta => Number(delta) * 1000 / Number(frequency);
+    const dispatch = {
+        lookupAndInputMs: asMs(returned - start),
+        setValueMs: asMs(returned - invoked),
+        observationConfirmedMs: asMs(confirmationEnd - start),
+    };
+    assert.ok(dispatch.observationConfirmedMs <= 4100);
+    if (observer === 'pixels') return { ...dispatch, ...validatePaintInterval(value, expectedText) };
+    const ready = ticks(value.uiaFirstReadyQpc);
+    assert.ok(returned <= ready && ready <= confirmationStart);
+    assert.ok(Math.abs(value.durationMs - dispatch.observationConfirmedMs) < .01);
+    return { ...dispatch, uiaReadyMs: asMs(ready - start) };
+}
+
+function chooseObserver(previous, samples) {
+    const preferred = previous === statePair[0] ? observers : [...observers].reverse();
+    const count = observer => samples.filter(sample => sample.previous === previous && sample.observer === observer).length;
+    return count(preferred[0]) <= count(preferred[1]) ? preferred[0] : preferred[1];
+}
+
+async function startSearchObserver(identity, executable, descriptor, environment, frame) {
+    const spec = Buffer.from(JSON.stringify({
+        pid: identity.pid, creationFileTime: identity.creationFileTime, executable, root: descriptor.root,
+        frame: [frame.left, frame.top, frame.width, frame.height],
+    })).toString('base64');
+    const helper = fileURLToPath(new URL('native-visual-input.ps1', import.meta.url));
+    const child = spawn('pwsh.exe', ['-NoProfile', '-NonInteractive', '-MTA', '-File', helper, '-Spec', spec, '-AccessibilitySearchPilot'],
+        { env: environment, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const session = new VisualSession(child);
+    const timer = setTimeout(() => {
+        session.readyReject(new Error('Native search observer readiness exceeded thirty seconds.'));
+        child.stdin.end();
+    }, 30000);
+    try {
+        await session.ready;
+        return session;
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 export function taskObserverSource(verifiedSource) {
@@ -216,10 +277,10 @@ async function main(args) {
     assert.equal(args.length, 6);
     const [command, descriptorPath, executable, buildPath, reportPath, arm] = args;
     assert.equal(command, '--run');
-    assert.equal(arm, 'detached');
+    assert.equal(arm, 'paired-observers');
     const { CANDIDATE_SHA256, CANDIDATE_BUILD_INFO_SHA256, REFERENCE_SHA256, APPROVAL_SHA256, RUNNER_TEMP } = process.env;
     assert.match(CANDIDATE_BUILD_INFO_SHA256, shaPattern);
-    assert.ok(RUNNER_TEMP && inside(reportPath, RUNNER_TEMP) && basename(reportPath) === 'search-paint-detached.json');
+    assert.ok(RUNNER_TEMP && inside(reportPath, RUNNER_TEMP) && basename(reportPath) === 'search-observer-pair.json');
     const candidateDir = join(RUNNER_TEMP, 'arm-native-performance');
     assert.ok(samePath(executable, join(candidateDir, 'agent-resource-manager.exe')));
     assert.ok(samePath(buildPath, join(candidateDir, 'BUILD_INFO.native-validation.json')));
@@ -278,15 +339,16 @@ async function main(args) {
         if (/^(SKILL_MANAGER_DATA_DIR|WEBVIEW2_(USER_DATA_FOLDER|ADDITIONAL_BROWSER_ARGUMENTS|WAIT_FOR_SCRIPT_DEBUGGER|PIPE_FOR_SCRIPT_DEBUGGER))$/i.test(key))
             delete env[key];
     const report = {
-        format: 'agent-resource-manager-native-search-paint-diagnostic-v1',
+        format: 'agent-resource-manager-native-search-observer-pair-v1',
         arm, source, candidateRun, executableSha256: CANDIDATE_SHA256,
         referenceSha256: REFERENCE_SHA256, approvalSha256: APPROVAL_SHA256,
         fixtureSha256: dataset.dataFingerprint, statePair, plannedTrials: measuredTrials, maxCheckAttempts, expectedSchedulingKeys,
         status: 'running', startedAt: new Date().toISOString(), attempts: [], samples: [], normalExit: false,
         limitations: [
-            'Detached owned search-to-observed-result-content pixels during an observed real global check. No UI Automation queries occur during these trials.',
+            'Both arms use the same owned ValuePattern.SetValue dispatch. Subsequent pixel or UI Automation observations are mutually exclusive.',
             'Exact RGB compares fixed content rectangles inside the approved title and table ROIs, with the full approved result count. The icon-only strips are excluded from this diagnostic.',
-            'A finite sampling interval brackets a pixel observation, not the exact presentation time.',
+            'Pixel capture starts after SetValue returns. If its first frame matches, the interval cannot locate presentation inside dispatch.',
+            'Finite QPC intervals bracket an observed result, not the exact presentation time or any transient between samples.',
             'One fixed synthetic pair and a bounded sample set. This does not replace the 1200-input benchmark or its original 200 ms gate.',
         ],
     };
@@ -321,7 +383,7 @@ async function main(args) {
         }
         assert.ok(identity, 'Owner-checked backend readiness expired.');
         taskObserver = await startTaskObserver(observerSource, root, identity, executable, dataset, env);
-        visual = await VisualSession.attach(identity, descriptor, env, reference.frame);
+        visual = await startSearchObserver(identity, executable, descriptor, env, reference.frame);
         const owned = await visual.call('prepareForeground');
         assert.equal(owned.pid, identity.pid);
         assert.equal(owned.creationFileTime, identity.creationFileTime);
@@ -359,13 +421,16 @@ async function main(args) {
             y: sy + Math.floor(sh / 2) - reference.frame.top };
         let previous = statePair[0];
         let schedulingKeysSha256 = null;
-        for (let index = 0; index < maxCheckAttempts && report.samples.length < measuredTrials; index++) {
+        const complete = () => statePair.every(previous => observers.every(observer =>
+            report.samples.filter(sample => sample.previous === previous && sample.observer === observer).length >= perDirection));
+        for (let index = 0; index < maxCheckAttempts && !complete(); index++) {
             const existing = await taskObserver.call('tasks');
             assert.ok(existing.tasks.every(task => !active(task.status)), 'Another active backend operation would contaminate the check workload.');
             const known = new Set(existing.tasks.map(task => task.id));
             await visual.call('click', reference.controls.check);
             const focus = await visual.call('click', filteredSearch);
-            const attempt = { index, previous };
+            const observer = chooseObserver(previous, report.samples);
+            const attempt = { index, previous, observer };
             report.attempts.push(attempt);
             let before, taskBefore;
             const runningDeadline = performance.now() + 1000;
@@ -389,10 +454,10 @@ async function main(args) {
             assert.equal(before.lastInputTick, focus.lastInputTick, 'Unexpected input before the measured search.');
             const target = statePair.find(state => state !== previous);
             const value = 'perf-skill-' + target.slice(-4);
-            const fields = { value, previousRois: reference.states[previous].rois, targetRois: reference.states[target].rois };
+            const fields = { value, observer, previousRois: reference.states[previous].rois, targetRois: reference.states[target].rois };
             attempt.target = target;
-            attempt.raw = await visual.call('searchPaint', fields, 15000);
-            attempt.interval = validatePaintInterval(attempt.raw, value);
+            attempt.raw = await visual.call('searchObserver', fields, 15000);
+            attempt.measurement = validateObserver(attempt.raw, value, observer);
             previous = target;
             const after = await taskObserver.call('tasks');
             const taskAfter = after.tasks.find(item => item.id === taskBefore.id);
@@ -402,13 +467,17 @@ async function main(args) {
             attempt.overlap = provenCheckOverlap(before, after, attempt.raw, taskBefore, taskAfter, attempt.durable);
             schedulingKeysSha256 ??= attempt.durable.schedulingKeysSha256;
             assert.equal(attempt.durable.schedulingKeysSha256, schedulingKeysSha256, 'Global checks did not share one fixed scope.');
-            if (attempt.overlap.accepted) report.samples.push(attempt);
+            if (attempt.overlap.accepted) {
+                const admitted = report.samples.filter(sample => sample.previous === attempt.previous && sample.observer === observer).length;
+                attempt.inPilotGroup = admitted < perDirection;
+                if (attempt.inPilotGroup) report.samples.push(attempt);
+            }
             await save();
             await sleep(150);
         }
-        report.status = 'detached-trials-complete';
+        report.status = complete() ? 'paired-trials-complete' : 'paired-incomplete';
     } catch (error) {
-        report.status = 'detached-incomplete';
+        report.status = 'paired-incomplete';
         report.error = error.message;
     } finally {
         if (taskObserver)
@@ -440,9 +509,9 @@ async function main(args) {
         } catch (error) {
             report.integrityError = error.message;
         }
-        const success = report.status === 'detached-trials-complete' && report.samples.length === measuredTrials &&
+        const success = report.status === 'paired-trials-complete' && report.samples.length === measuredTrials &&
             report.normalExit && report.managementDataPreserved && report.runtimeFilesPreserved && !report.driverExitError && !report.taskObserverExitError;
-        report.status = success ? 'detached-paint-observed' : 'detached-incomplete';
+        report.status = success ? 'paired-observers-observed' : 'paired-incomplete';
         report.finishedAt = new Date().toISOString();
         await save();
         console.log(JSON.stringify({ phase: 'search-paint-result', arm, status: report.status, trials: report.samples.length, reportPath }));

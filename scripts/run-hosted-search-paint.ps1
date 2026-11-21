@@ -10,8 +10,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$candidateSource = '37f83f135f9fd8facd90255fa33f58d534f8364d'
-$candidateRun = '44889635017'
+$candidateSource = '2d194880f48bbef0fe9613f3d2a5afffc3b2ce15'
+$candidateRun = '44898573141'
 $candidateArtifact = $env:CANDIDATE_ARTIFACT_ID
 $candidateSha256 = $env:CANDIDATE_SHA256
 $candidateBuildInfoSha256 = $env:CANDIDATE_BUILD_INFO_SHA256
@@ -186,7 +186,7 @@ if ($LASTEXITCODE -ne 0) { throw 'The diagnostic driver did not parse.' }
 function Run-Measurement {
     $phase = 'search-paint'
     $maxMinutes = 8
-    $reportFile = Join-Path $measurements 'search-paint-detached.json'
+    $reportFile = Join-Path $measurements 'search-observer-pair.json'
     $proofFile = Join-Path $measurements 'search-paint-normal-quit.json'
     $lineCount = 0
     $quitProof = $null
@@ -200,7 +200,7 @@ function Run-Measurement {
     $startInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
     $startInfo.Environment['REFERENCE_SHA256'] = $receipt.referenceSha256
     $startInfo.Environment['APPROVAL_SHA256'] = $ApprovalSha256
-    foreach ($arg in @($diagnostic, '--run', $localDescriptor, $executable, $buildInfo, $reportFile, 'detached')) {
+    foreach ($arg in @($diagnostic, '--run', $localDescriptor, $executable, $buildInfo, $reportFile, 'paired-observers')) {
         $startInfo.ArgumentList.Add($arg)
     }
     foreach ($name in @('GH_TOKEN', 'GITHUB_TOKEN')) { [void]$startInfo.Environment.Remove($name) }
@@ -223,13 +223,13 @@ function Run-Measurement {
             $signal = $line | ConvertFrom-Json -ErrorAction Stop
             $inProgress = Get-Content -Raw -LiteralPath $reportFile | ConvertFrom-Json
             $identity = $inProgress.identity
-            if ($signal.phase -cne 'ready-for-owned-normal-quit' -or $signal.arm -cne 'detached' -or
+            if ($signal.phase -cne 'ready-for-owned-normal-quit' -or $signal.arm -cne 'paired-observers' -or
                 $signal.reportPath -ine $reportFile -or $signal.executable -ine $executable -or $signal.waitMs -ne 120000 -or
-                $inProgress.arm -cne 'detached' -or $inProgress.executableSha256 -cne $candidateSha256 -or
+                $inProgress.arm -cne 'paired-observers' -or $inProgress.executableSha256 -cne $candidateSha256 -or
                 $inProgress.referenceSha256 -cne $receipt.referenceSha256 -or $inProgress.approvalSha256 -cne $ApprovalSha256 -or
                 $identity.pid -ne $signal.pid -or $identity.creationFileTime -cne $signal.creationFileTime -or
                 $identity.pid -le 0 -or $identity.windowHandle -le 0 -or $identity.creationFileTime -cnotmatch '^[1-9][0-9]+$') {
-                throw 'The detached diagnostic did not bind an exact normal-quit owner.'
+                throw 'The paired diagnostic did not bind an exact normal-quit owner.'
             }
             $spec = [ordered]@{ pid=$identity.pid; creationFileTime=$identity.creationFileTime; windowHandle=$identity.windowHandle
                 executable=$executable; sha256=$candidateSha256 }
@@ -248,13 +248,21 @@ function Run-Measurement {
         if ($null -eq $quitProof -or $sourceReport.normalExit -ne $true -or $sourceReport.runtimeFilesPreserved -ne $true -or
             $sourceReport.managementDataPreserved -ne $true -or $sourceReport.executableSha256 -cne $candidateSha256 -or
             $sourceReport.fixtureSha256 -cne $reference.datasetFingerprint -or $sourceReport.referenceSha256 -cne $receipt.referenceSha256 -or
-            $sourceReport.approvalSha256 -cne $ApprovalSha256 -or $sourceReport.arm -cne 'detached') {
+            $sourceReport.approvalSha256 -cne $ApprovalSha256 -or $sourceReport.arm -cne 'paired-observers') {
             throw 'The diagnostic report failed its identity, data, observer mode, or exit checks.'
         }
-        if ($process.ExitCode -ne 0 -or $sourceReport.status -cne 'detached-paint-observed' -or
-            $sourceReport.plannedTrials -ne 12 -or $sourceReport.maxCheckAttempts -ne 24 -or
-            @($sourceReport.samples).Count -ne 12 -or @($sourceReport.attempts).Count -gt 24) {
-            throw 'Search-paint diagnostic did not collect sufficient valid observations.'
+        if ($process.ExitCode -ne 0 -or $sourceReport.status -cne 'paired-observers-observed' -or
+            $sourceReport.plannedTrials -ne 24 -or $sourceReport.maxCheckAttempts -ne 40 -or
+            @($sourceReport.samples).Count -ne 24 -or @($sourceReport.attempts).Count -gt 40) {
+            throw 'Search observer pair did not collect enough valid observations.'
+        }
+        foreach ($observer in @('pixels','uia')) {
+            foreach ($previous in @('search-0001','search-0002')) {
+                $samples = @($sourceReport.samples | Where-Object { $_.observer -ceq $observer -and $_.previous -ceq $previous })
+                if ($samples.Count -ne 6 -or @($samples | Where-Object {
+                    $_.overlap.accepted -ne $true -or $_.durable.status -cne 'succeeded' -or $_.raw.inputMethod -cne 'ValuePattern.SetValue'
+                }).Count -ne 0) { throw 'An observer and direction did not prove six exact native inputs and durable overlaps.' }
+            }
         }
         return $sourceReport
     } finally {
@@ -267,7 +275,7 @@ function Run-Measurement {
                 $bytes = [IO.File]::ReadAllBytes($item.FullName)
                 if (([Convert]::ToHexString($bytes,0,8)) -cne '89504E470D0A1A0A') { throw 'The diagnostic frame is not a PNG.' }
                 $failure = Get-Content -Raw -LiteralPath $reportFile | ConvertFrom-Json
-                if ($failure.status -cne 'detached-incomplete' -or $failure.arm -cne 'detached' -or
+                if ($failure.status -cne 'paired-incomplete' -or $failure.arm -cne 'paired-observers' -or
                     $failure.executableSha256 -cne $candidateSha256 -or
                     $failure.error -cnotmatch 'Saved search-paint-mismatch\.png at bounds=\[([0-9]+),([0-9]+),([0-9]+),([0-9]+)\]\.') {
                     throw 'The capture is not bound to the failed owned diagnostic.'
@@ -302,9 +310,9 @@ Save-Json (Join-Path $measurements 'diagnostic-provenance.json') ([ordered]@{
     referenceRunId=$ReferenceRunId; referenceCommit=$ReferenceCommit; referenceSha256=$receipt.referenceSha256
     referenceReceiptSha256=$ReferenceReceiptSha256; approvalSha256=$ApprovalSha256; fixture=$reference.datasetFingerprint
     diagnosticWorkflowCommit=$overlay.workflowCommit; diagnosticDriverSha256=$overlay.driverSha256
-    diagnosticNativeSha256=$overlay.nativeSha256; scope='owned native search paint with detached UIA'
+    diagnosticNativeSha256=$overlay.nativeSha256; scope='same native accessibility input paired observers under real global checks'
     originalLatencyGateEvaluated=$false; originalStabilityGateEvaluated=$false
-    reportSha256=(Get-FileHash -LiteralPath (Join-Path $measurements 'search-paint-detached.json')).Hash.ToLowerInvariant()
+    reportSha256=(Get-FileHash -LiteralPath (Join-Path $measurements 'search-observer-pair.json')).Hash.ToLowerInvariant()
     runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion; windowsVersion=[Environment]::OSVersion.Version.ToString()
 })
 Write-Host 'Owned Windows paint diagnostic collected; this does not score the original latency or stability gates.'

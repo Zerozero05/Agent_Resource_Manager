@@ -1,9 +1,16 @@
-param([string]$Spec, [switch]$CompileOnly)
+param([string]$Spec, [switch]$CompileOnly, [switch]$AccessibilitySearchPilot)
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $refs = @((Get-ChildItem -LiteralPath (Join-Path $PSHOME 'ref') -Filter '*.dll').FullName) + @('System.Drawing.Common.dll','System.Private.Windows.GdiPlus.dll','System.Private.Windows.Core.dll' | ForEach-Object { Join-Path $PSHOME $_ })
-Add-Type -ReferencedAssemblies $refs -TypeDefinition @'
+$compile = @{}
+if ($AccessibilitySearchPilot) {
+  Add-Type -AssemblyName UIAutomationClient
+  Add-Type -AssemblyName UIAutomationTypes
+  $refs += @('UIAutomationClient.dll','UIAutomationTypes.dll','WindowsBase.dll' | ForEach-Object { Join-Path $PSHOME $_ })
+  $compile.CompilerOptions = '/define:AX_SEARCH_PILOT'
+}
+Add-Type @compile -ReferencedAssemblies $refs -TypeDefinition @'
 using System;
 using System.Diagnostics;
 using System.Drawing;
@@ -12,6 +19,9 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+#if AX_SEARCH_PILOT
+using System.Windows.Automation;
+#endif
 public sealed class NativeVisualInput : IDisposable {
   [StructLayout(LayoutKind.Sequential)] struct RECT { public int l,t,r,b; }
   [StructLayout(LayoutKind.Sequential)] struct POINT { public int x,y; public POINT(int a,int b){x=a;y=b;} }
@@ -469,7 +479,76 @@ public sealed class NativeVisualInput : IDisposable {
       return " A new mismatch PNG could not be written.";
     }
   }
-  public object SearchPaint(string value,SearchRoi[] previousRois,SearchRoi[] targetRois) {
+#if AX_SEARCH_PILOT
+  static AutomationElement SearchPilotFind(AutomationElement owner,string name,ControlType type,bool visible=true) {
+    var conditions=new System.Collections.Generic.List<Condition>{new PropertyCondition(AutomationElement.NameProperty,name)};
+    if(type!=null)conditions.Add(new PropertyCondition(AutomationElement.ControlTypeProperty,type));
+    if(visible)conditions.Add(new PropertyCondition(AutomationElement.IsOffscreenProperty,false));
+    try {
+      return owner.FindFirst(TreeScope.Descendants,conditions.Count==1?conditions[0]:new AndCondition(conditions.ToArray()));
+    } catch(ElementNotAvailableException) {return null;}
+  }
+  AutomationElement SearchPilotRoot() {
+    Guard();
+    return AutomationElement.FromHandle(window);
+  }
+  ValuePattern SearchPilotPattern() {
+    AutomationElement edit=SearchPilotFind(SearchPilotRoot(),"搜索 Skill",ControlType.Edit);
+    if(edit==null||!edit.TryGetCurrentPattern(ValuePattern.Pattern,out object pattern))return null;
+    return (ValuePattern)pattern;
+  }
+  bool SearchPilotMatches(string value) {
+    ValuePattern search=SearchPilotPattern();
+    if(search==null||search.Current.Value!=value)return false;
+    AutomationElement table=SearchPilotFind(SearchPilotRoot(),"可横向滚动的 Skill 列表",null,false);
+    if(table==null)return false;
+    int rowCount=0;
+    var cache=new CacheRequest();
+    cache.Add(AutomationElement.NameProperty);
+    using(cache.Activate()) {
+      var buttons=table.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button));
+      foreach(AutomationElement row in buttons)
+        if(row.Cached.Name.StartsWith("Perf Skill ",StringComparison.Ordinal))rowCount++;
+    }
+    return rowCount==1&&SearchPilotFind(SearchPilotRoot(),"Perf Skill "+value.Substring(11),ControlType.Button,false)!=null;
+  }
+  (long start,long invocation,long end) DispatchAccessibilitySearch(string value) {
+    Guard();
+    long start=Stopwatch.GetTimestamp();
+    AutomationElement edit=SearchPilotFind(SearchPilotRoot(),"搜索 Skill",ControlType.Edit);
+    if(edit==null||!edit.Current.IsEnabled||!edit.TryGetCurrentPattern(ValuePattern.Pattern,out object pattern)||((ValuePattern)pattern).Current.IsReadOnly)
+      throw new InvalidOperationException("The owned search input is not editable.");
+    Guard();
+    long invocation=Stopwatch.GetTimestamp();
+    ((ValuePattern)pattern).SetValue(value);
+    long end=Stopwatch.GetTimestamp();
+    Guard();
+    return(start,invocation,end);
+  }
+  object ObserveAccessibilitySearch(string value,SearchFrame initial,(long start,long invocation,long end) dispatch) {
+    long deadline=dispatch.start+Stopwatch.Frequency*4;
+    while(Stopwatch.GetTimestamp()<deadline) {
+      Guard();
+      if(SearchPilotMatches(value)) {
+        long ready=Stopwatch.GetTimestamp();
+        Paint();
+        long confirmationStart=Stopwatch.GetTimestamp();
+        if(SearchPilotMatches(value)) {
+          long confirmationEnd=Stopwatch.GetTimestamp();
+          if(confirmationEnd>deadline)break;
+          Guard();
+          return new{typed=value,observer="uia",inputMethod="ValuePattern.SetValue",qpcFrequency=Stopwatch.Frequency.ToString(),
+            inputStartedQpc=dispatch.start.ToString(),setValueStartedQpc=dispatch.invocation.ToString(),inputReturnedQpc=dispatch.end.ToString(),
+            initial=initial.Receipt(),uiaFirstReadyQpc=ready.ToString(),confirmation=new SearchFrame(confirmationStart,confirmationEnd).Receipt(),
+            durationMs=(confirmationEnd-dispatch.start)*1000.0/Stopwatch.Frequency,foreground=true,lastInputTick=inputTick};
+        }
+      }
+      System.Threading.Thread.Sleep(1);
+    }
+    throw new TimeoutException("The formal UIA search predicate and its DWM confirmation did not complete within the pilot bound.");
+  }
+#endif
+  public object SearchPaint(string value,SearchRoi[] previousRois,SearchRoi[] targetRois,string observer=null) {
     Guard();
     ValidateSearch(value);
     if(dpi!=96)throw new InvalidOperationException("The exact search content crops require 96 DPI.");
@@ -479,7 +558,16 @@ public sealed class NativeVisualInput : IDisposable {
     RequireDistinctSearchTitles(previous,target);
     int[] bounds=SearchBounds(previousParents,targetParents);
     Unobscured(bounds);
-    INPUT[] input=SearchKeys(value);
+    INPUT[] input=observer==null?SearchKeys(value):null;
+#if AX_SEARCH_PILOT
+    if(observer!=null) {
+      if(observer!="pixels"&&observer!="uia")throw new InvalidOperationException("The search pilot requires one native observer.");
+      AutomationElement owner=SearchPilotRoot();
+      if(owner==null||owner.Current.ProcessId!=process.Id)throw new InvalidOperationException("The search input root is not the owned native window.");
+    }
+#else
+    if(observer!=null)throw new InvalidOperationException("The native accessibility search pilot was not enabled.");
+#endif
     var pixels=new byte[bounds[2]*bounds[3]*4];
     using(var bitmap=new Bitmap(bounds[2],bounds[3],PixelFormat.Format32bppArgb))
     using(var graphics=Graphics.FromImage(bitmap)) {
@@ -488,8 +576,20 @@ public sealed class NativeVisualInput : IDisposable {
         throw new InvalidOperationException("The previous search must be visible and the target absent before any input."+
           SearchMismatch(pixels,bounds,previous,target)+" Full parent comparison:"+
           SearchMismatch(pixels,bounds,previousParents,targetParents)+PreserveSearchMismatch(bounds,bitmap,pixels));
-      GuardSearchFocus();
-      var dispatch=Send(input,false);
+      (long start,long end) dispatch;
+      long? invocation=null;
+#if AX_SEARCH_PILOT
+      if(observer!=null) {
+        var ax=DispatchAccessibilitySearch(value);
+        if(observer=="uia")return ObserveAccessibilitySearch(value,initial,ax);
+        dispatch=(ax.start,ax.end);
+        invocation=ax.invocation;
+      } else
+#endif
+      {
+        GuardSearchFocus();
+        dispatch=Send(input,false);
+      }
       const int timeoutMs=4000;
       const int maxObservations=160;
       long deadline=dispatch.start+Stopwatch.Frequency*timeoutMs/1000;
@@ -505,6 +605,12 @@ public sealed class NativeVisualInput : IDisposable {
           Guard();
           long lower=lastMiss==null?dispatch.start:Math.Max(dispatch.start,lastMiss.start);
           int[][] contentBoxes={target[0].box,target[1].box,target[2].box};
+          if(observer!=null)return new{typed=value,observer,inputMethod="ValuePattern.SetValue",qpcFrequency=Stopwatch.Frequency.ToString(),
+            inputStartedQpc=dispatch.start.ToString(),setValueStartedQpc=invocation.Value.ToString(),inputReturnedQpc=dispatch.end.ToString(),
+            initial=initial.Receipt(),lastMiss=lastMiss?.Receipt(),firstHit=firstHit.Receipt(),confirmation=frame.Receipt(),observations=count,
+            contentBoxes,fullParentTargetMatched=SearchMatches(pixels,bounds,targetParents),
+            lowerBoundMs=(lower-dispatch.start)*1000.0/Stopwatch.Frequency,
+            upperBoundMs=(firstHit.end-dispatch.start)*1000.0/Stopwatch.Frequency,foreground=true,lastInputTick=inputTick};
           return new{typed=value,qpcFrequency=Stopwatch.Frequency.ToString(),inputStartedQpc=dispatch.start.ToString(),
             inputReturnedQpc=dispatch.end.ToString(),initial=initial.Receipt(),lastMiss=lastMiss?.Receipt(),
             firstHit=firstHit.Receipt(),confirmation=frame.Receipt(),observations=count,
@@ -660,6 +766,14 @@ try {
           $previousRois=[NativeVisualInput+SearchRoi[]]@(Read-SearchRois $request.previousRois)
           $targetRois=[NativeVisualInput+SearchRoi[]]@(Read-SearchRois $request.targetRois)
           $session.SearchPaint($request.value,$previousRois,$targetRois)
+        }
+        'searchObserver' {
+          if(!$AccessibilitySearchPilot -or $request.value -isnot [string] -or $request.observer -cnotin @('pixels','uia')) {
+            throw 'An enabled native accessibility search pilot and one exact observer are required'
+          }
+          $previousRois=[NativeVisualInput+SearchRoi[]]@(Read-SearchRois $request.previousRois)
+          $targetRois=[NativeVisualInput+SearchRoi[]]@(Read-SearchRois $request.targetRois)
+          $session.SearchPaint($request.value,$previousRois,$targetRois,$request.observer)
         }
         'save' {$session.Save([string]$request.path,[int[]]$request.box)}
         'match' {$session.Match([string]$request.path,[int[]]$request.box,[string]$request.sha256)}
