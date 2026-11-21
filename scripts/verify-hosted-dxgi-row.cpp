@@ -260,6 +260,26 @@ struct Frame {
     }
 };
 
+class IdleFrameWait {
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                          TIMER_MODIFY_STATE | SYNCHRONIZE);
+public:
+    IdleFrameWait() {
+        if (!timer) throw std::runtime_error("high-resolution frame timer unavailable");
+    }
+    ~IdleFrameWait() { CloseHandle(timer); }
+    IdleFrameWait(const IdleFrameWait&) = delete;
+    IdleFrameWait& operator=(const IdleFrameWait&) = delete;
+
+    void Wait() const {
+        LARGE_INTEGER after{};
+        after.QuadPart = -10000; // Relative, one millisecond in 100-nanosecond units.
+        if (!SetWaitableTimer(timer, &after, 0, nullptr, nullptr, FALSE) ||
+            WaitForSingleObject(timer, 32) != WAIT_OBJECT_0)
+            throw std::runtime_error("high-resolution frame wait failed");
+    }
+};
+
 enum class SampleKind { Desktop, Unchanged, PointerOnly };
 const char* Name(SampleKind kind) {
     if (kind == SampleKind::Desktop) return "desktop";
@@ -269,6 +289,7 @@ const char* Name(SampleKind kind) {
 struct Sample {
     SampleKind kind{};
     int64_t begin{}, end{}, present{};
+    int64_t acquireReturned{}, rowRead{}, released{};
     UINT accumulated{};
     Pixels pixels{};
 };
@@ -329,6 +350,7 @@ public:
         DXGI_OUTDUPL_FRAME_INFO info{};
         ComPtr<IDXGIResource> resource;
         const auto result = duplication->AcquireNextFrame(0, &info, &resource);
+        sample.acquireReturned = Counter();
         if (result == DXGI_ERROR_WAIT_TIMEOUT) {
             sample.kind = SampleKind::Unchanged;
         } else {
@@ -343,8 +365,10 @@ public:
             } else {
                 if (info.ProtectedContentMaskedOut) throw std::runtime_error("masked desktop capture");
                 sample.pixels = ReadRow(resource.Get(), sample.begin);
+                sample.rowRead = Counter();
             }
             frame.Close();
+            sample.released = Counter();
         }
         target.Verify();
         sample.end = Counter();
@@ -426,29 +450,33 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
     const auto frequency = Frequency();
     while (DeltaMs(neutralArrived, Counter(), frequency) < 250) Sleep(4);
     Capture capture(target);
+    const IdleFrameWait idleWait;
     const auto primeStarted = Counter();
     Sample anchor{};
     do {
         anchor = capture.Poll();
         if (anchor.kind == SampleKind::Desktop) break;
-        Sleep(1);
+        if (anchor.kind == SampleKind::Unchanged) idleWait.Wait();
     } while (DeltaMs(primeStarted, Counter(), capture.frequency) < 250);
     if (anchor.kind != SampleKind::Desktop || DeltaMs(anchor.begin, anchor.end, capture.frequency) > CaptureLimitMs)
         throw std::runtime_error("no timestamped baseline row within capture budget");
 
     std::vector<Sample> trace;
-    trace.reserve(136);
+    trace.reserve(1024);
     const auto baselineStarted = Counter();
     while (DeltaMs(baselineStarted, Counter(), capture.frequency) < 95) {
-        trace.push_back(capture.Poll());
-        Sleep(4);
+        const auto sample = capture.Poll();
+        trace.push_back(sample);
+        if (sample.kind == SampleKind::Unchanged) idleWait.Wait();
     }
     const auto triggerBegin = Counter();
     target.MovePointer(hover);
     const auto triggerEnd = Counter();
     while (DeltaMs(triggerBegin, Counter(), capture.frequency) < 430) {
-        trace.push_back(capture.Poll());
-        Sleep(4);
+        const auto sample = capture.Poll();
+        trace.push_back(sample);
+        // Acquiring the next frame immediately avoids adding a scheduler tick to a successful read.
+        if (sample.kind == SampleKind::Unchanged) idleWait.Wait();
     }
     const auto observationEnd = Counter();
     target.MovePointer(neutral);
@@ -460,8 +488,10 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
         capture.width, capture.systemMemory() ? "true" : "false");
     const auto printSample = [](const Sample& value) {
         std::printf("{\"kind\":\"%s\",\"begin\":%lld,\"end\":%lld,\"present\":%lld,"
+                    "\"acquireReturned\":%lld,\"rowRead\":%lld,\"released\":%lld,"
                     "\"accumulated\":%u,\"first\":%lu,\"second\":%lu}",
-            Name(value.kind), value.begin, value.end, value.present, value.accumulated,
+            Name(value.kind), value.begin, value.end, value.present,
+            value.acquireReturned, value.rowRead, value.released, value.accumulated,
             value.pixels.first, value.pixels.second);
     };
     printSample(anchor);

@@ -19,10 +19,11 @@ $report = [ordered]@{ candidateSha256=$ExpectedSha256; syntheticOnly=$true; stat
     policy=$policy; arms=@(); attemptedSystemChange=$false; systemRestored=$false; closedNormally=$false
     previousRun=[ordered]@{id='44854495440'; status='inconclusive'; reason='A two-update DXGI batch interrupted the first positive control under that run''s policy.'}
     previousR2=[ordered]@{id='44855333628'; status='incomplete'; passedArms=2; totalArms=4}
+    previousR3=[ordered]@{id='44857754039'; status='incomplete'; qualifiedTrialsPerArm=@(1,1,3,0); reason='Coalesced updates and over-budget compositor gaps in seven positive trials.'}
     notificationProbe=[ordered]@{id='44857288176'; setterFlags=2; stateChanged=$true; matchingNotifications=0}
     setterFlags=3; motionChanges=@()
     notificationScope='A separate hidden top-level window observes real settings broadcasts in the hosted session. WebView-specific receipt is not inferred.'
-    capture='One DXGI duplication over each trial. No-update and pointer-only polls retain the last timestamped desktop row.'
+    capture='One DXGI duplication over each trial. Successful acquisitions are followed immediately by another poll; only no-update polls use a 1 ms high-resolution wait. No-update and pointer-only polls retain the last timestamped desktop row. Raw QPC timestamps identify acquisition, row read and release.'
     runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion
     scope='Native foreground hover pixels on one inactive sidebar control. No DOM or CSS readback and no display-DPI or whole-app animation claim.' }
 function Write-Report { $report | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $output -Encoding utf8NoBOM }

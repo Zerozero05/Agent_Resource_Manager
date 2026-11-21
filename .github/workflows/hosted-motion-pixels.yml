@@ -1,17 +1,17 @@
-name: Verify Windows reduced motion after confirmed settings broadcasts
+name: Verify Windows reduced motion with continuous frame acquisition
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44394986153'
-  CANDIDATE_SOURCE: 65b14b96b7243e0339b3eb5f2fd4f92ae1898df6
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_65b14b96b7243e0339b3eb5f2fd4f92ae1898df6
-  CANDIDATE_ARTIFACT_ID: '14470108635'
-  CANDIDATE_SHA256: '090dc7a9e4298b0153baee53c2f2f8329a2dc1a95708b4a9cfbf840e2d46ab91'
+  CANDIDATE_RUN_ID: '44862742843'
+  CANDIDATE_SOURCE: 2314ea88080a401be1acfa150d029f1a928b99aa
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_2314ea88080a401be1acfa150d029f1a928b99aa
+  CANDIDATE_ARTIFACT_ID: '14691310680'
+  CANDIDATE_SHA256: 'b95ad24619e1d00e8d100777739afd70323fb827e272b31ef549124bd0063e97'
 jobs:
   motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-dxgi-motion-broadcast-65b14b9' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-cadence-2314ea8-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:
@@ -85,7 +85,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_dxgi_motion_broadcast_${{ github.run_id }}_${{ github.run_attempt }}
+          name: Agent_Resource_Manager_dxgi_motion_cadence_${{ github.run_id }}_${{ github.run_attempt }}
           path: ${{ runner.temp }}/arm-motion-pixels-evidence/motion-pixels.json
           if-no-files-found: warn
           retention-days: 14
