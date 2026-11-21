@@ -1,0 +1,133 @@
+name: Probe Windows display mode capabilities
+on: create
+permissions: {}
+env:
+  TEST_ONE_MODE: 'true'
+jobs:
+  probe:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-display-capability-0ac5e79-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Enumerate current and reported display modes without changing them
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne 'Zerozero05/Agent_Resource_Manager' -or
+              $env:GITHUB_EVENT_NAME -cne 'create' -or
+              $env:GITHUB_REF -cne 'refs/heads/codex/hosted-display-capability-0ac5e79-20261121' -or
+              $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or
+              $env:RUNNER_OS -cne 'Windows' -or -not [Environment]::UserInteractive -or
+              [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
+            throw 'This probe requires the exact approved branch in an isolated, interactive, hosted Windows VM.'
+          }
+          if ($env:TEST_ONE_MODE -cnotmatch '^(false|true)$') { throw 'TEST_ONE_MODE must be true or false.' }
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+
+          public static class DisplayCapabilityProbe {
+              private const uint Attached = 1, Primary = 4, Mirroring = 8;
+              private const uint CurrentSettings = 0xffffffff, TestOnly = 2;
+
+              [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+              private struct DisplayDevice {
+                  public uint size;
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string name;
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string description;
+                  public uint state;
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string id;
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string key;
+              }
+              [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+              private struct DisplayMode {
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string driver;
+                  public ushort specVersion, driverVersion, size, driverExtra;
+                  public uint fields;
+                  public int x, y;
+                  public uint orientation, fixedOutput;
+                  public short color, duplex, resolution, ttOption, collate;
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string form;
+                  public ushort logPixels;
+                  public uint bits, width, height, flags, hz, icmMethod, icmIntent, mediaType,
+                      ditherType, reserved1, reserved2, panningWidth, panningHeight;
+              }
+
+              [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+              [return: MarshalAs(UnmanagedType.Bool)]
+              private static extern bool EnumDisplayDevicesW(string device, uint index, ref DisplayDevice result, uint flags);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+              [return: MarshalAs(UnmanagedType.Bool)]
+              private static extern bool EnumDisplaySettingsExW(string device, uint index, ref DisplayMode mode, uint flags);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+              private static extern int ChangeDisplaySettingsExW(string device, ref DisplayMode mode,
+                  IntPtr reservedWindow, uint flags, IntPtr reservedParameters);
+
+              private static bool ReadMode(string name, uint index, out DisplayMode mode) {
+                  mode = new DisplayMode { size = (ushort)Marshal.SizeOf<DisplayMode>() };
+                  return EnumDisplaySettingsExW(name, index, ref mode, 0);
+              }
+              private static object Description(DisplayMode mode) {
+                  return new { mode.width, mode.height, mode.hz, mode.bits, mode.orientation, mode.flags };
+              }
+              private static string ModeKey(DisplayMode mode) {
+                  return string.Join("/", mode.width, mode.height, mode.hz, mode.bits, mode.orientation, mode.flags);
+              }
+
+              public static object[] Read(bool testOneMode) {
+                  if (Marshal.SizeOf<DisplayDevice>() != 840 || Marshal.SizeOf<DisplayMode>() != 220 ||
+                      Marshal.OffsetOf<DisplayMode>("width").ToInt32() != 172)
+                      throw new InvalidOperationException("Unexpected Win32 display structure layout.");
+                  var displays = new List<object>();
+                  for (uint displayIndex = 0; displayIndex < 32; displayIndex++) {
+                      var device = new DisplayDevice { size = (uint)Marshal.SizeOf<DisplayDevice>() };
+                      if (!EnumDisplayDevicesW(null, displayIndex, ref device, 0)) return displays.ToArray();
+                      if ((device.state & Attached) == 0 || (device.state & Mirroring) != 0) continue;
+                      if (!ReadMode(device.name, CurrentSettings, out var current))
+                          throw new InvalidOperationException("The driver did not return the current mode.");
+                      bool primary = (device.state & Primary) != 0;
+                      var modes = new List<object>();
+                      var seen = new HashSet<string> { ModeKey(current) };
+                      DisplayMode? selected = null;
+                      uint modeIndex = 0;
+                      for (; modeIndex < 4096 && ReadMode(device.name, modeIndex, out var mode); modeIndex++) {
+                          if (!seen.Add(ModeKey(mode))) continue;
+                          modes.Add(Description(mode));
+                          if (testOneMode && primary && !selected.HasValue && mode.width >= 960 && mode.height >= 700 &&
+                              (mode.width != current.width || mode.height != current.height) &&
+                              mode.hz == current.hz && mode.bits == current.bits &&
+                              mode.orientation == current.orientation && mode.flags == current.flags) selected = mode;
+                      }
+                      int? testResult = null;
+                      object tested = null;
+                      if (selected.HasValue) {
+                          var probe = selected.Value;
+                          probe.driverExtra = 0;
+                          tested = Description(probe);
+                          // CDS_TEST is the only accepted flag here. Nothing is applied or persisted.
+                          testResult = ChangeDisplaySettingsExW(device.name, ref probe, IntPtr.Zero, TestOnly, IntPtr.Zero);
+                      }
+                      if (!ReadMode(device.name, CurrentSettings, out var after) ||
+                          ModeKey(current) != ModeKey(after) || current.x != after.x || current.y != after.y)
+                          throw new InvalidOperationException("Current mode or position changed during the read-only probe.");
+                      displays.Add(new {
+                          device = device.name, primary, current = Description(current),
+                          alternatives = modes, enumerationComplete = modeIndex < 4096,
+                          tested, testResult, currentModeUnchanged = true
+                      });
+                  }
+                  throw new InvalidOperationException("The bounded display enumeration did not finish.");
+              }
+          }
+          '@
+          $tested = $env:TEST_ONE_MODE -ceq 'true'
+          $displays = @([DisplayCapabilityProbe]::Read($tested))
+          $summary = [ordered]@{
+            format = 'hosted-display-capability-v1'
+            windowsVersion = [Environment]::OSVersion.Version.ToString()
+            runnerImage = $env:ImageOS
+            runnerImageVersion = $env:ImageVersion
+            testOneModeRequested = $tested
+            displays = $displays
+          }
+          Write-Output ('ARM_DISPLAY_CAPABILITY ' + ($summary | ConvertTo-Json -Depth 8 -Compress))
