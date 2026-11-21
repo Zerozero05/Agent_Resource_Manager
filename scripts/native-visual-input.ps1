@@ -38,6 +38,8 @@ public sealed class NativeVisualInput : IDisposable {
   [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr handle,uint command);
   [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr handle,uint flags);
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr handle,out RECT value);
+  [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr handle,out RECT value);
+  [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr handle,ref POINT point);
   [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr handle,IntPtr insertAfter,int x,int y,int width,int height,uint flags);
   [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr handle);
   [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
@@ -49,7 +51,8 @@ public sealed class NativeVisualInput : IDisposable {
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder path,ref uint size);
   [DllImport("dwmapi.dll")] static extern int DwmFlush();
   [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr handle,uint attribute,out uint value,uint size);
-  readonly Process process; readonly string created,image,root; readonly IntPtr window; readonly RECT rectangle; readonly uint dpi;
+  [DllImport("dwmapi.dll",EntryPoint="DwmGetWindowAttribute")] static extern int DwmGetFrameBounds(IntPtr handle,uint attribute,out RECT value,uint size);
+  readonly Process process; readonly string created,image,root; readonly IntPtr window; readonly RECT rectangle,captureRectangle; readonly uint dpi;
   uint inputTick;
   bool foregroundPrepared;
   public NativeVisualInput(int pid,string creation,string executable,string directory,int[] frozenBounds) {
@@ -72,7 +75,27 @@ public sealed class NativeVisualInput : IDisposable {
       throw new InvalidOperationException("Windows did not retain the predetermined reference frame.");
     dpi=GetDpiForWindow(window);
     if(dpi==0)throw new InvalidOperationException("Owned DPI unavailable.");
+    Paint();
+    captureRectangle=CaptureRectangle();
     if(ReadInputTick()!=inputTick)throw new InvalidOperationException("Input changed during owned window preparation.");
+  }
+  RECT CaptureRectangle() {
+    // GetWindowRect includes hit-testable invisible resize borders. Capture only visible client pixels.
+    const uint extendedFrameBounds=9;
+    if(!GetClientRect(window,out RECT client)||
+       DwmGetFrameBounds(window,extendedFrameBounds,out RECT visible,(uint)Marshal.SizeOf(typeof(RECT)))!=0)
+      throw new InvalidOperationException("Visible owned client geometry is unavailable.");
+    var first=new POINT(client.l,client.t);
+    var last=new POINT(client.r,client.b);
+    if(!ClientToScreen(window,ref first)||!ClientToScreen(window,ref last))
+      throw new InvalidOperationException("Owned client geometry could not be mapped to screen pixels.");
+    var result=new RECT {
+      l=Math.Max(rectangle.l,Math.Max(visible.l,first.x)), t=Math.Max(rectangle.t,Math.Max(visible.t,first.y)),
+      r=Math.Min(rectangle.r,Math.Min(visible.r,last.x)), b=Math.Min(rectangle.b,Math.Min(visible.b,last.y))
+    };
+    if(result.r-result.l<2||result.b-result.t<2)
+      throw new InvalidOperationException("The exact owned window has no visible capture area.");
+    return result;
   }
   static uint ReadInputTick(){var value=new LASTINPUT{size=(uint)Marshal.SizeOf(typeof(LASTINPUT))};if(!GetLastInputInfo(ref value))throw new InvalidOperationException("Input observation unavailable.");return value.time;}
   void CheckProcess(){process.Refresh();if(process.HasExited||process.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()!=created)throw new InvalidOperationException("Owned process identity changed.");var path=new StringBuilder(32768);uint size=(uint)path.Capacity;if(!QueryFullProcessImageName(process.Handle,0,path,ref size)||!String.Equals(Path.GetFullPath(path.ToString()),image,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Owned executable changed.");}
@@ -145,7 +168,7 @@ public sealed class NativeVisualInput : IDisposable {
     Guard();
     return Identity();
   }
-  public object Identity(){CheckProcess();return new{pid=process.Id,creationFileTime=created,windowHandle=window.ToInt64(),left=rectangle.l,top=rectangle.t,width=rectangle.r-rectangle.l,height=rectangle.b-rectangle.t,dpi=dpi,lastInputTick=inputTick,foreground=GetAncestor(GetForegroundWindow(),2)==window};}
+  public object Identity(){CheckProcess();return new{pid=process.Id,creationFileTime=created,windowHandle=window.ToInt64(),left=rectangle.l,top=rectangle.t,width=rectangle.r-rectangle.l,height=rectangle.b-rectangle.t,dpi=dpi,captureBounds=new[]{captureRectangle.l-rectangle.l,captureRectangle.t-rectangle.t,captureRectangle.r-captureRectangle.l,captureRectangle.b-captureRectangle.t},lastInputTick=inputTick,foreground=GetAncestor(GetForegroundWindow(),2)==window};}
   public object Observe(){Guard();return Identity();}
   void Paint(){if(DwmFlush()!=0||DwmFlush()!=0)throw new InvalidOperationException("Desktop composition failed.");}
   void Send(INPUT[] values) {
@@ -224,6 +247,10 @@ public sealed class NativeVisualInput : IDisposable {
   void Unobscured(int[] box) {
     Guard();Box(box);
     int left=rectangle.l+box[0],top=rectangle.t+box[1],right=left+box[2],bottom=top+box[3];
+    RECT visible=CaptureRectangle();
+    if(visible.l!=captureRectangle.l||visible.t!=captureRectangle.t||visible.r!=captureRectangle.r||visible.b!=captureRectangle.b||
+       left<visible.l||top<visible.t||right>visible.r||bottom>visible.b)
+      throw new InvalidOperationException("A frozen ROI is outside the unchanged visible client area.");
     int screenLeft=GetSystemMetrics(76),screenTop=GetSystemMetrics(77);
     if(left<screenLeft||top<screenTop||right>screenLeft+GetSystemMetrics(78)||bottom>screenTop+GetSystemMetrics(79))
       throw new InvalidOperationException("A frozen ROI is outside the current desktop.");

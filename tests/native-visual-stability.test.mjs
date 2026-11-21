@@ -153,7 +153,7 @@ test('visual requests use one JSON line for the PowerShell ReadLine protocol', a
 });
 function reference() {
     const boxes = { 'result-table': [100, 140, 600, 400], 'result-count': [100, 70, 440, 56], 'result-title': [110, 170, 160, 30], 'closed-tab-slot': [160, 15, 100, 30], 'active-document-tab': [160, 15, 100, 30] };
-    return { format: 'agent-resource-manager-native-visual-stability-v1', root, datasetFingerprint: 'fixed', candidateSha256: '9436a75a4cf40316f80702e43c7b4da35067ec9e16a0ce592846599433e9b1aa', semanticReferencePhaseCompleted: true, capture: 'foreground-owned-CopyFromScreen', frame: { left: 60, top: 60, width: 1296, height: 889, dpi: 96 }, policy: visualPolicy,
+    return { format: 'agent-resource-manager-native-visual-stability-v1', root, datasetFingerprint: 'fixed', candidateSha256: '9436a75a4cf40316f80702e43c7b4da35067ec9e16a0ce592846599433e9b1aa', semanticReferencePhaseCompleted: true, capture: 'foreground-owned-CopyFromScreen', frame: { left: 60, top: 60, width: 1296, height: 889, dpi: 96, captureBounds: [8, 10, 1280, 872] }, policy: visualPolicy,
         documentReading: { point: { x: 125, y: 85 }, descriptionBox: [100, 70, 50, 30], initialBox: [100, 940, 50, 30],
             steps: [{ wheelDelta: -120, paragraphBox: [100, 820, 50, 30] }, { wheelDelta: -120, paragraphBox: [100, 140, 50, 30] }],
             returnedBox: [100, 140, 50, 30] },
@@ -177,6 +177,14 @@ test('all 66 distinct searches and six shared states are mandatory', () => {
     const missing = reference();
     delete missing.states['search-0017'];
     assert.throws(() => validateReferences(missing, descriptor));
+});
+test('a frozen ROI cannot extend into the hit-testable invisible resize border', () => {
+    const value = reference();
+    value.states.all.rois[0].box = [100, 140, 600, 749];
+    assert.equal(validBox(value.states.all.rois[0].box, value.frame), true);
+    assert.throws(() => validateReferences(value, descriptor), /outside|leaves the visible client area/);
+    value.states.all.rois[0].box[3] -= 7;
+    assert.equal(validateReferences(value, descriptor), true);
 });
 test('every state has exactly its original ordered ROI roles and semantic source keys', () => {
     const value = reference();

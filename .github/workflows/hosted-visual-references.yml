@@ -19,7 +19,7 @@ env:
   FIRST_SEARCH_RESULT_BOUNDS: '433,671,201,31'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-r2-3536ca0-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-r3-3536ca0-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
@@ -230,6 +230,13 @@ jobs:
             foreach ($field in $referenceFrame.Keys) {
               if ($refs.frame.$field -ne $referenceFrame[$field]) { throw 'The captured reference frame differs from the hosted preflight.' }
             }
+            $captureBounds = @($refs.frame.captureBounds)
+            if ($captureBounds.Count -ne 4 -or $captureBounds[0] -lt 0 -or $captureBounds[1] -lt 0 -or
+                $captureBounds[2] -lt 2 -or $captureBounds[3] -lt 2 -or
+                ($captureBounds[0] + $captureBounds[2]) -gt $referenceFrame.width -or
+                ($captureBounds[1] + $captureBounds[3]) -gt $referenceFrame.height) {
+              throw 'Reference crops are not bound to the visible client area.'
+            }
             foreach ($field in $firstSearch.Keys) {
               if ($refs.firstSearchPreflight.$field -cne $firstSearch[$field]) { throw 'The captured references do not bind to the verified first-search observation.' }
             }
@@ -308,6 +315,7 @@ jobs:
               driverSha256 = (Get-FileHash -LiteralPath $driverPath -Algorithm SHA256).Hash.ToLowerInvariant()
               desktop = $desktop
               referenceFrame = $referenceFrame
+              captureBounds = $captureBounds
               hostedFirstSearchReceipt = $firstSearch
               referenceWorkflow = [ordered]@{
                 repository=$env:GITHUB_REPOSITORY; headSha=$env:GITHUB_SHA; runId=$env:GITHUB_RUN_ID; attempt=[int]$env:GITHUB_RUN_ATTEMPT

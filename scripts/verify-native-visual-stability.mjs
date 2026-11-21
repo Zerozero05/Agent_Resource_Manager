@@ -80,6 +80,11 @@ async function ordinary(path) {
 export function validBox(box, frame) {
     return Array.isArray(box) && box.length === 4 && box.every(Number.isSafeInteger) && box[0] >= 0 && box[1] >= 0 && box[2] >= 2 && box[3] >= 2 && box[0] + box[2] <= frame.width && box[1] + box[3] <= frame.height && box[2] * box[3] <= 2000000;
 }
+function fitsCapture(box, frame) {
+    if (!validBox(box, frame) || !validBox(frame.captureBounds, frame)) return false;
+    const [left, top, width, height] = frame.captureBounds;
+    return box[0] >= left && box[1] >= top && box[0] + box[2] <= left + width && box[1] + box[3] <= top + height;
+}
 export function validateReferences(ref, descriptor) {
     assert.equal(ref.format, format);
     assert.equal(ref.candidateSha256, candidateSha256);
@@ -89,6 +94,7 @@ export function validateReferences(ref, descriptor) {
     if (hostedFirstSearchReceipt) assert.deepEqual(ref.firstSearchPreflight, hostedFirstSearchReceipt);
     assert.ok(Number.isSafeInteger(ref.frame.left) && Number.isSafeInteger(ref.frame.top));
     assert.ok(Number.isSafeInteger(ref.frame.width) && ref.frame.width >= 600 && Number.isSafeInteger(ref.frame.height) && ref.frame.height >= 400 && Number.isSafeInteger(ref.frame.dpi) && ref.frame.dpi > 0);
+    assert.ok(validBox(ref.frame.captureBounds, ref.frame), 'The frozen visible client geometry is missing or invalid.');
     assert.deepEqual(Object.keys(ref.states).sort(), [...requiredStates].sort());
     assert.deepEqual(Object.keys(ref.controls).sort(), [...requiredControls].sort());
     for (const point of Object.values(ref.controls))
@@ -98,7 +104,7 @@ export function validateReferences(ref, descriptor) {
         assert.ok(Array.isArray(state.rois));
         assert.deepEqual(state.rois.map(({ role, source }) => ({ role, source })), requiredRegions(name), `Missing, replaced or reordered reference ROI in ${name}.`);
         for (const roi of state.rois) {
-            assert.ok(validBox(roi.box, ref.frame));
+            assert.ok(fitsCapture(roi.box, ref.frame), `A frozen ROI leaves the visible client area in ${name}.`);
             assert.ok(inside(roi.path, ref.root) && roi.path.endsWith('.png'));
             assert.match(roi.sha256, /^[a-f0-9]{64}$/);
         }
@@ -115,7 +121,7 @@ export function validateReferences(ref, descriptor) {
         }
     }
     const { point, descriptionBox, initialBox, steps, returnedBox } = ref.documentReading;
-    assert.ok(validBox(descriptionBox, ref.frame));
+    assert.ok(fitsCapture(descriptionBox, ref.frame));
     assert.deepEqual(point, boxCenter(descriptionBox), 'The native document wheel must target the observed description tab.');
     const canRecordBounds = box => Array.isArray(box) && box.length === 4 && box.every(Number.isSafeInteger) && box[2] >= 2 && box[3] >= 2;
     assert.ok(canRecordBounds(initialBox));
@@ -240,7 +246,7 @@ export class VisualSession {
             clearTimeout(deadline);
         }
     }
-    call(op, fields = {}) {
+    call(op, fields = {}, timeoutMs = 20000) {
         assert.ok(!this.exited, 'Visual driver has exited.');
         const id = this.nextId++;
         return new Promise((resolve, reject) => {
@@ -248,7 +254,7 @@ export class VisualSession {
                 this.pending.delete(id);
                 reject(new Error('Visual operation timed out. No input was replayed.'));
                 this.child.stdin.end();
-            }, 20000);
+            }, timeoutMs);
             this.pending.set(id, { resolve, reject, timer });
             this.child.stdin.write(JSON.stringify({ id, op, ...fields }) + '\n');
         });
@@ -296,6 +302,19 @@ function relativeBox(text, frame) {
     assert.ok(validBox(box, frame));
     return box;
 }
+function visibleTableBox(bounds, frame) {
+    const [x, y, width, height] = unclippedNativeBox(bounds, frame);
+    const [left, top, clientWidth, clientHeight] = frame.captureBounds;
+    const clipped = [Math.max(x, left), Math.max(y, top)];
+    clipped.push(Math.min(x + width, left + clientWidth) - clipped[0], Math.min(y + height, top + clientHeight) - clipped[1]);
+    assert.ok(fitsCapture(clipped, frame) && clipped[1] === y, 'The top of the result table must remain visible.');
+    return clipped;
+}
+function completeCaptureBox(bounds, frame, name) {
+    const box = unclippedNativeBox(bounds, frame);
+    assert.ok(fitsCapture(box, frame), `${name} must fit entirely in the visible client area. Element=${box}; client=${frame.captureBounds}.`);
+    return box;
+}
 async function waitForEmptyFilterToChange(visual, roi) {
     const deadline = performance.now() + visualPolicy.matchTimeoutMs;
     let lastDifferent;
@@ -303,9 +322,10 @@ async function waitForEmptyFilterToChange(visual, roi) {
         const remaining = Math.floor(deadline - performance.now());
         if (remaining < 1) break;
         const current = await visual.call('match', roi, remaining);
+        if (performance.now() >= deadline) break;
         if (!current.matched && current.pixelSha256 === lastDifferent) return;
         lastDifferent = current.matched ? undefined : current.pixelSha256;
-        await sleep(visualPolicy.observationGapMs);
+        await sleep(Math.min(visualPolicy.observationGapMs, deadline - performance.now()));
     } while (performance.now() < deadline);
     throw new Error('The empty filter state did not visibly change after the owned reset. No wheel was sent.');
 }
@@ -354,6 +374,7 @@ async function references(descriptor) {
         if (hostedReferenceFrame) assert.equal(visual.identity.dpi, hostedReferenceFrame.dpi, 'Hosted display DPI changed before reference input.');
         await visual.call('prepareForeground');
         ref.frame = visual.identity;
+        assert.ok(validBox(ref.frame.captureBounds, ref.frame), 'Expected exact visible client geometry.');
         if (hostedFirstSearchReceipt) {
             assert.equal(descriptor.dataset.dataFingerprint, hostedFirstSearchReceipt.datasetFingerprint);
             ref.firstSearchPreflight = hostedFirstSearchReceipt;
@@ -378,7 +399,12 @@ async function references(descriptor) {
             throw new Error(`Expected one ready visible reference element ${name}.`);
         }
         async function point(key, name, scope, type = 'ControlType.Button') { const box = relativeBox((await element(name, scope, type)).bounds, ref.frame); ref.controls[key] = { x: box[0] + Math.floor(box[2] / 2), y: box[1] + Math.floor(box[3] / 2), sourceName: name, sourceScope: scope, box }; return box; }
-        async function tableRois() { const box = relativeBox((await element('可横向滚动的 Skill 列表')).bounds, ref.frame); const counter = [box[0], Math.max(0, box[1] - 70), Math.min(440, box[2]), 56]; assert.ok(validBox(counter, ref.frame)); return [box, counter]; }
+        async function tableRois() {
+            const box = visibleTableBox((await element(tableName)).bounds, ref.frame);
+            const counter = [box[0], Math.max(0, box[1] - 70), Math.min(440, box[2]), 56];
+            assert.ok(fitsCapture(counter, ref.frame), `The result count must fit entirely in the visible client area. Count=${counter}; client=${ref.frame.captureBounds}.`);
+            return [box, counter];
+        }
         async function documentPosition(deadline, previousBox) {
             let stable;
             do {
@@ -397,7 +423,7 @@ async function references(descriptor) {
             throw new Error(previousBox ? 'The exact paragraph did not settle higher after one guarded wheel event.' : 'The exact native document paragraph was not observed.');
         }
         function paragraphVisible(paragraph, descriptionBox) {
-            return !paragraph.offscreen && validBox(paragraph.box, ref.frame) && paragraph.box[1] >= descriptionBox[1] + descriptionBox[3];
+            return !paragraph.offscreen && fitsCapture(paragraph.box, ref.frame) && paragraph.box[1] >= descriptionBox[1] + descriptionBox[3];
         }
         async function docRois() {
             const activeDocument = await element('Perf Skill 0000', '工作区标签', 'ControlType.TabItem', true);
@@ -405,15 +431,14 @@ async function references(descriptor) {
             const selected = await element('说明', 'Skill 详情', 'ControlType.TabItem', true);
             assert.equal(selected.selected, true, 'The native description tab must be selected.');
             const paragraph = await documentPosition(performance.now() + visualPolicy.matchTimeoutMs);
-            assert.ok(paragraphVisible(paragraph, relativeBox(selected.bounds, ref.frame)), 'The exact native document paragraph is not fully visible below the selected description tab.');
-            return [relativeBox(activeDocument.bounds, ref.frame), paragraph.box];
+            assert.ok(paragraphVisible(paragraph, completeCaptureBox(selected.bounds, ref.frame, 'The description tab')), 'The exact native document paragraph is not fully visible below the selected description tab.');
+            return [completeCaptureBox(activeDocument.bounds, ref.frame, 'The active document tab'), paragraph.box];
         }
         async function prepareDocumentReading() {
             const deadline = performance.now() + visualPolicy.matchTimeoutMs;
             await element('Perf Skill 0000', '工作区标签', 'ControlType.TabItem', true, deadline);
             let selected = await element('说明', 'Skill 详情', 'ControlType.TabItem', true, deadline);
-            let descriptionBox = unclippedNativeBox(selected.bounds, ref.frame);
-            assert.ok(validBox(descriptionBox, ref.frame), 'The selected description tab must fit the owned frame before reading.');
+            let descriptionBox = completeCaptureBox(selected.bounds, ref.frame, 'The selected description tab');
             const point = boxCenter(descriptionBox);
             let paragraph = await documentPosition(deadline);
             ref.documentReading = { point, descriptionBox, initialBox: paragraph.box, steps: [] };
@@ -426,7 +451,7 @@ async function references(descriptor) {
                 paragraph = await documentPosition(deadline, paragraph.box);
                 ref.documentReading.steps.push({ wheelDelta: input.wheelDelta, paragraphBox: paragraph.box });
                 selected = await element('说明', 'Skill 详情', 'ControlType.TabItem', true, deadline);
-                descriptionBox = relativeBox(selected.bounds, ref.frame);
+                descriptionBox = completeCaptureBox(selected.bounds, ref.frame, 'The selected description tab');
             }
         }
         async function semanticList(index) {
@@ -472,6 +497,7 @@ async function references(descriptor) {
             await sleep(visualPolicy.referenceSettleMs);
             const rois = [];
             for (const [index, box] of boxes.entries()) {
+                assert.ok(fitsCapture(box, ref.frame), `A frozen ROI leaves the visible client area in ${name}.`);
                 const path = join(descriptor.root, 'references', `${name}-${index}.png`);
                 await visual.call('save', { path, box });
                 const sha256 = await digest(path);
@@ -509,7 +535,7 @@ async function references(descriptor) {
                 await point('clear', '清空搜索');
                 await point('openDocument', 'Perf Skill 0000', '可横向滚动的 Skill 列表');
             }
-            const titleBox = relativeBox(result.bounds, ref.frame);
+            const titleBox = completeCaptureBox(result.bounds, ref.frame, title);
             await capture(`search-${String(index).padStart(4, '0')}`, [titleBox, ...await tableRois()], `Native one-row result and exact title ${title} confirmed.`);
             referencePhase = 'clear-' + referencePhase;
             await clearSearch();
@@ -517,7 +543,7 @@ async function references(descriptor) {
         referencePhase = 'github-empty';
         await nativeClick('github');
         await scrollLibrary(false);
-        const emptyTitle = relativeBox((await element('当前筛选无结果')).bounds, ref.frame);
+        const emptyTitle = completeCaptureBox((await element('当前筛选无结果')).bounds, ref.frame, 'The empty filter title');
         await capture('github', [emptyTitle], 'Native GitHub filter confirmed empty result.');
         if (hostedReferenceFrame) {
             const candidates = (await observeRows('state', { name: '清除筛选' }))
@@ -603,7 +629,7 @@ async function references(descriptor) {
         else
             process.env.TMP = savedTmp;
         if (failure)
-            await writeFile(join(descriptor.root, 'reference-failure.json'), json({ status: 'failed-references', error: failure.message, referencePhase, lastRead, documentReading: ref.documentReading, completedStates: Object.keys(ref.states), exitEvidence, cleanupErrors }), { flag: 'wx' });
+            await writeFile(join(descriptor.root, 'reference-failure.json'), json({ status: 'failed-references', error: failure.message, referencePhase, lastRead, captureBounds: ref.frame?.captureBounds, documentReading: ref.documentReading, completedStates: Object.keys(ref.states), exitEvidence, cleanupErrors }), { flag: 'wx' });
     }
 }
 async function run(descriptor, pilot) {
@@ -663,22 +689,29 @@ async function run(descriptor, pilot) {
         visual = await VisualSession.attach(identity, descriptor, env, ref.frame);
         for (const field of ['left', 'top', 'width', 'height', 'dpi'])
             assert.equal(visual.identity[field], ref.frame[field], `Frozen window ${field} changed.`);
+        assert.deepEqual(visual.identity.captureBounds, ref.frame.captureBounds, 'The frozen visible client geometry changed.');
         await visual.call('prepareForeground');
         report.identity = visual.identity;
         baseline = protectedData(descriptor.dataset);
-        async function waitState(name, role) { const state = ref.states[name], deadline = performance.now() + visualPolicy.matchTimeoutMs; let consecutive = 0; do {
-            const matches = [];
-            for (const roi of state.rois)
-                if (!role || roi.role === role) matches.push(await visual.call('match', roi));
-            assert.ok(matches.length > 0, 'The pre-scroll readiness ROI must be present in the verified reference.');
-            if (matches.every(value => value.matched)) {
-                if (++consecutive === visualPolicy.stableObservations)
-                    return;
+        async function waitState(name, role) {
+            const rois = ref.states[name].rois.filter(roi => !role || roi.role === role);
+            assert.ok(rois.length > 0, 'The pre-scroll readiness ROI must be present in the verified reference.');
+            const deadline = performance.now() + visualPolicy.matchTimeoutMs;
+            let consecutive = 0;
+            while (performance.now() < deadline) {
+                let allMatch = true;
+                for (const roi of rois) {
+                    const remaining = Math.floor(deadline - performance.now());
+                    if (remaining < 1) throw new Error(`Frozen visible state ${name} exceeded its observation deadline.`);
+                    if (!(await visual.call('match', roi, remaining)).matched) allMatch = false;
+                }
+                if (performance.now() >= deadline) break;
+                consecutive = allMatch ? consecutive + 1 : 0;
+                if (consecutive === visualPolicy.stableObservations) return;
+                await sleep(Math.min(visualPolicy.observationGapMs, deadline - performance.now()));
             }
-            else
-                consecutive = 0;
-            await sleep(visualPolicy.observationGapMs);
-        } while (performance.now() < deadline); throw new Error(`Frozen visible state ${name} did not match. References were not adapted.`); }
+            throw new Error(`Frozen visible state ${name} did not match. References were not adapted.`);
+        }
         async function click(key) { const result = await visual.call('click', ref.controls[key]); report.actions.push({ key, result }); }
         async function scrollLibrary(up) { const result = await visual.call('scrollLibrary', { ...ref.controls.search, up }); report.actions.push({ key: 'scrollLibrary', result }); }
         async function search(index) { await click('search'); await visual.call('text', { value: `perf-skill-${String(index).padStart(4, '0')}` }); await waitState(`search-${String(index).padStart(4, '0')}`); }
