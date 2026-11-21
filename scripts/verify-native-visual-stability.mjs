@@ -287,6 +287,23 @@ async function observe(descriptor, identity, env, mode) {
     }
     return result;
 }
+async function observeNewCheck(descriptor, identity, env, click) {
+    const before = await observe(descriptor, identity, env, 'tasks');
+    const known = new Set(before.tasks.map(task => task.id));
+    await click('check');
+    const deadline = performance.now() + 20000;
+    for (;;) {
+        const value = await observe(descriptor, identity, env, 'tasks');
+        const added = value.tasks.filter(task => !known.has(task.id) && task.action === 'check_now');
+        assert.ok(added.length <= 1, 'The check click created multiple matching tasks.');
+        if (added.length === 1) {
+            return { taskId: added[0].id, action: added[0].action, initialStatus: added[0].status, observedAt: new Date().toISOString() };
+        }
+        if (performance.now() >= deadline)
+            throw new Error('The check task was not observed. The click was not replayed.');
+        await sleep(30);
+    }
+}
 function unclippedNativeBox(text, frame) {
     const numbers = text.split(',').map(Number);
     assert.equal(numbers.length, 4);
@@ -328,6 +345,25 @@ async function waitForEmptyFilterToChange(visual, roi) {
         await sleep(Math.min(visualPolicy.observationGapMs, deadline - performance.now()));
     } while (performance.now() < deadline);
     throw new Error('The empty filter state did not visibly change after the owned reset. No wheel was sent.');
+}
+async function waitForFrozenState(visual, ref, name, role) {
+    const rois = ref.states[name].rois.filter(roi => !role || roi.role === role);
+    assert.ok(rois.length > 0, 'The pre-scroll readiness ROI must be present in the verified reference.');
+    const deadline = performance.now() + visualPolicy.matchTimeoutMs;
+    let consecutive = 0;
+    while (performance.now() < deadline) {
+        let allMatch = true;
+        for (const roi of rois) {
+            const remaining = Math.floor(deadline - performance.now());
+            if (remaining < 1) throw new Error(`Frozen visible state ${name} exceeded its observation deadline.`);
+            if (!(await visual.call('match', roi, remaining)).matched) allMatch = false;
+        }
+        if (performance.now() >= deadline) break;
+        consecutive = allMatch ? consecutive + 1 : 0;
+        if (consecutive === visualPolicy.stableObservations) return;
+        await sleep(Math.min(visualPolicy.observationGapMs, deadline - performance.now()));
+    }
+    throw new Error(`Frozen visible state ${name} did not match. References were not adapted.`);
 }
 
 export function referenceObservationRows(value) {
@@ -511,6 +547,33 @@ async function references(descriptor) {
             }
             ref.states[name] = { semanticConfirmedByNativeDriver: true, semantic, rois };
         }
+        async function captureGitHub() {
+            referencePhase = 'github-empty';
+            await nativeClick('github');
+            await scrollLibrary(false);
+            const emptyTitle = completeCaptureBox((await element('当前筛选无结果')).bounds, ref.frame, 'The empty filter title');
+            if (hostedReferenceFrame) {
+                // Confirm the predetermined same-frame result seen after the pilot entry.
+                assert.deepEqual(emptyTitle, [530, 253, 151, 36], 'The exact GitHub empty-state frame did not reproduce.');
+            }
+            await capture('github', [emptyTitle], 'Native GitHub filter confirmed empty result.');
+            if (hostedReferenceFrame) {
+                assert.equal(ref.states.github.rois[0].sha256,
+                    '4a5bc0029d43fe9d1c552f80ca05aa187b112b4eca33fbefe61dbb043fc72825',
+                    'The exact GitHub empty-state pixels did not reproduce.');
+                const candidates = (await observeRows('state', { name: '清除筛选' }))
+                    .filter(row => row.type === 'ControlType.Button' && row.enabled && !row.offscreen)
+                    .map(row => unclippedNativeBox(row.bounds, ref.frame))
+                    .filter(box => validBox(box, ref.frame) && box[1] >= emptyTitle[1] + emptyTitle[3]);
+                assert.equal(candidates.length, 1, 'Expected one visible reset below the confirmed empty heading.');
+                ref.controls.allFiltered = { ...boxCenter(candidates[0]), sourceName: '清除筛选', box: candidates[0] };
+            } else await point('allFiltered', '全部', '来源筛选');
+            referencePhase = 'restore-all-after-github';
+            await nativeClick('allFiltered');
+            if (hostedReferenceFrame) await waitForEmptyFilterToChange(visual, ref.states.github.rois[0]);
+            await scrollLibrary(true);
+            await semanticList(null);
+        }
         referencePhase = 'initial-library';
         const initialSearchBounds = (await element('搜索 Skill', undefined, 'ControlType.Edit')).bounds;
         await point('search', '搜索 Skill', undefined, 'ControlType.Edit');
@@ -518,6 +581,11 @@ async function references(descriptor) {
         await point('check', '检查本地与 GitHub 变化');
         await semanticList(null);
         await capture('all', await tableRois(), 'Native initial list readiness and fixed 1000-Skill fixture.');
+        if (hostedReferenceFrame) {
+            referencePhase = 'github-pilot-entry-check';
+            const { pid, creationFileTime, windowHandle } = visual.identity;
+            ref.githubEntryCheck = await observeNewCheck(descriptor, { pid, creationFileTime, windowHandle }, env, nativeClick);
+        }
         for (let index = 0; index < 66; index++) {
             referencePhase = 'search-' + String(index).padStart(4, '0');
             await nativeSearch(index);
@@ -536,28 +604,17 @@ async function references(descriptor) {
                 await point('openDocument', 'Perf Skill 0000', '可横向滚动的 Skill 列表');
             }
             const titleBox = completeCaptureBox(result.bounds, ref.frame, title);
-            await capture(`search-${String(index).padStart(4, '0')}`, [titleBox, ...await tableRois()], `Native one-row result and exact title ${title} confirmed.`);
+            const searchState = `search-${String(index).padStart(4, '0')}`;
+            await capture(searchState, [titleBox, ...await tableRois()], `Native one-row result and exact title ${title} confirmed.`);
             referencePhase = 'clear-' + referencePhase;
-            await clearSearch();
+            if (hostedReferenceFrame && index === 0) {
+                await nativeClick('clear');
+                await scrollLibrary(true);
+                await waitForFrozenState(visual, ref, 'all');
+                await captureGitHub();
+            } else await clearSearch();
         }
-        referencePhase = 'github-empty';
-        await nativeClick('github');
-        await scrollLibrary(false);
-        const emptyTitle = completeCaptureBox((await element('当前筛选无结果')).bounds, ref.frame, 'The empty filter title');
-        await capture('github', [emptyTitle], 'Native GitHub filter confirmed empty result.');
-        if (hostedReferenceFrame) {
-            const candidates = (await observeRows('state', { name: '清除筛选' }))
-                .filter(row => row.type === 'ControlType.Button' && row.enabled && !row.offscreen)
-                .map(row => unclippedNativeBox(row.bounds, ref.frame))
-                .filter(box => validBox(box, ref.frame) && box[1] >= emptyTitle[1] + emptyTitle[3]);
-            assert.equal(candidates.length, 1, 'Expected one visible reset below the confirmed empty heading.');
-            ref.controls.allFiltered = { ...boxCenter(candidates[0]), sourceName: '清除筛选', box: candidates[0] };
-        } else await point('allFiltered', '全部', '来源筛选');
-        referencePhase = 'restore-all-after-github';
-        await nativeClick('allFiltered');
-        if (hostedReferenceFrame) await waitForEmptyFilterToChange(visual, ref.states.github.rois[0]);
-        await scrollLibrary(true);
-        await semanticList(null);
+        if (!hostedReferenceFrame) await captureGitHub();
         referencePhase = 'search-0000-before-open';
         await nativeSearch(0);
         assert.deepEqual(relativeBox((await element('Perf Skill 0000', '可横向滚动的 Skill 列表', 'ControlType.Button')).bounds, ref.frame), ref.controls.openDocument.box);
@@ -595,7 +652,8 @@ async function references(descriptor) {
         await clearSearch();
         referencePhase = 'create-and-verify-review-sheets';
         ref.reviewSheets = [];
-        const reviewCrops = Object.entries(ref.states).flatMap(([name, state]) => state.rois.map(roi => ({ name: `${name} ${roi.role}`, path: roi.path })));
+        const reviewOrder = ['all', ...requiredStates.filter(name => name !== 'all')];
+        const reviewCrops = reviewOrder.flatMap(name => ref.states[name].rois.map(roi => ({ name: `${name} ${roi.role}`, path: roi.path })));
         for (let index = 0; index < reviewCrops.length; index += 24) {
             const crops = reviewCrops.slice(index, index + 24);
             const path = join(descriptor.root, 'references', `review-${String(index / 24 + 1).padStart(2, '0')}.png`);
@@ -693,25 +751,7 @@ async function run(descriptor, pilot) {
         await visual.call('prepareForeground');
         report.identity = visual.identity;
         baseline = protectedData(descriptor.dataset);
-        async function waitState(name, role) {
-            const rois = ref.states[name].rois.filter(roi => !role || roi.role === role);
-            assert.ok(rois.length > 0, 'The pre-scroll readiness ROI must be present in the verified reference.');
-            const deadline = performance.now() + visualPolicy.matchTimeoutMs;
-            let consecutive = 0;
-            while (performance.now() < deadline) {
-                let allMatch = true;
-                for (const roi of rois) {
-                    const remaining = Math.floor(deadline - performance.now());
-                    if (remaining < 1) throw new Error(`Frozen visible state ${name} exceeded its observation deadline.`);
-                    if (!(await visual.call('match', roi, remaining)).matched) allMatch = false;
-                }
-                if (performance.now() >= deadline) break;
-                consecutive = allMatch ? consecutive + 1 : 0;
-                if (consecutive === visualPolicy.stableObservations) return;
-                await sleep(Math.min(visualPolicy.observationGapMs, deadline - performance.now()));
-            }
-            throw new Error(`Frozen visible state ${name} did not match. References were not adapted.`);
-        }
+        const waitState = (name, role) => waitForFrozenState(visual, ref, name, role);
         async function click(key) { const result = await visual.call('click', ref.controls[key]); report.actions.push({ key, result }); }
         async function scrollLibrary(up) { const result = await visual.call('scrollLibrary', { ...ref.controls.search, up }); report.actions.push({ key: 'scrollLibrary', result }); }
         async function search(index) { await click('search'); await visual.call('text', { value: `perf-skill-${String(index).padStart(4, '0')}` }); await waitState(`search-${String(index).padStart(4, '0')}`); }
@@ -749,17 +789,7 @@ async function run(descriptor, pilot) {
                 await waitState('closed');
             }
         } report.cycles.push({ index, completedAt: new Date().toISOString() }); }
-        async function check() { const before = await observe(descriptor, identity, env, 'tasks'), known = new Set(before.tasks.map(task => task.id)); await click('check'); const deadline = performance.now() + 20000; for (;;) {
-            const value = await observe(descriptor, identity, env, 'tasks'), added = value.tasks.filter(task => !known.has(task.id) && task.action === 'check_now');
-            assert.ok(added.length <= 1, 'The check click created multiple matching tasks.');
-            if (added.length === 1) {
-                report.checks.push({ taskId: added[0].id, action: added[0].action, initialStatus: added[0].status, observedAt: new Date().toISOString() });
-                return;
-            }
-            if (performance.now() >= deadline)
-                throw new Error('The check task was not observed. The click was not replayed.');
-            await sleep(30);
-        } }
+        async function check() { report.checks.push(await observeNewCheck(descriptor, identity, env, click)); }
         async function sample(elapsedMs) { const deadline = performance.now() + 60000; for (;;) {
             const value = await observe(descriptor, identity, env, 'tasks');
             if (!value.tasks.some(task => ['running', 'queued'].includes(task.status)))

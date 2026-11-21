@@ -308,8 +308,10 @@ test('reference generation alone imports AX; run needs explicit root visual appr
     assert.match(run, /result\.status, 'pilot-passed'/);
     assert.match(run, /result\.normalExit, true/);
     assert.match(run, /stabilityVerdict\(report\.samples, report\.bounds, PERFORMANCE_POLICY\.warmupCycles\)/);
-    assert.match(run, /task\.action === 'check_now'/);
-    assert.match(run, /added\.length <= 1/);
+    assert.match(run, /report\.checks\.push\(await observeNewCheck\(descriptor, identity, env, click\)\)/);
+    const observedCheck = source.slice(source.indexOf('async function observeNewCheck('), source.indexOf('function unclippedNativeBox('));
+    assert.match(observedCheck, /task\.action === 'check_now'/);
+    assert.match(observedCheck, /added\.length <= 1/);
     assert.match(run, /index % 2 === 0/);
     assert.match(run, /protectedData\(descriptor\.dataset\), baseline/);
 });
