@@ -4,15 +4,15 @@ permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44866595695'
-  CANDIDATE_SOURCE: 3536ca0e5cf7c897b860b5ce32d8b415904b9e45
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_3536ca0e5cf7c897b860b5ce32d8b415904b9e45
-  CANDIDATE_ARTIFACT_ID: '14692802883'
-  CANDIDATE_SHA256: 'aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7'
-  CANDIDATE_ARCHIVE_SHA256: '6b8afaf8ca811c866b1ecb46ae778bf1fc1c8c715e176b32101d5a3f0f2ab2a6'
+  CANDIDATE_RUN_ID: '44880393531'
+  CANDIDATE_SOURCE: 0ac5e79b7a3d1184e7602f241793f240b0609d44
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_0ac5e79b7a3d1184e7602f241793f240b0609d44
+  CANDIDATE_ARTIFACT_ID: '14698411078'
+  CANDIDATE_SHA256: 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24'
+  CANDIDATE_ARCHIVE_SHA256: '5ea596eb7d95de7df46bc1929c8694e56c8c5b72f7ded2915987aefa83ce152e'
 jobs:
   compact:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-narrow-detail-3536ca0-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-narrow-detail-0ac5e79-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 12
     defaults:
