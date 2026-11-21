@@ -1,0 +1,150 @@
+name: Compare retained and released UIA client lifetime on hosted Windows
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  CANDIDATE_RUN_ID: '44853682116'
+  CANDIDATE_SOURCE: afdcc146bce08db6ef3082be4b1fbcd59beb5d8b
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_afdcc146bce08db6ef3082be4b1fbcd59beb5d8b
+  CANDIDATE_ARTIFACT_ID: '14687451764'
+  CANDIDATE_SHA256: '2a4b27faf9b2aed958760dc30d5f4ad980b8f62a9e3be6e38d321382f8d89db3'
+jobs:
+  compare:
+    if: ${{ github.repository == 'Zerozero05/Agent_Resource_Manager' && github.ref_type == 'branch' && github.ref_name == 'codex/hosted-observer-lifetime-afdcc14-20261121' }}
+    runs-on: windows-latest
+    timeout-minutes: 14
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify hosted runner and exact candidate provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no existing manager on the isolated runner.' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
+              $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push' -or
+              $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+          $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID) { throw 'The exact Windows candidate artifact is missing.' }
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-observer-lifetime'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }
+          $exe = Join-Path $candidate 'agent-resource-manager.exe'
+          $source = Join-Path $candidate 'BUILD_INFO.json'
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:CANDIDATE_SHA256 -or $info.executableSha256 -cne $digest -or
+              $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or
+              $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
+              $info.candidate -ne $true -or $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the pinned executable.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+          & pwsh.exe -NoProfile -NonInteractive -File scripts/verify-native-uia.ps1 -CompileOnly
+          if ($LASTEXITCODE -ne 0) { throw 'The independent native driver failed to compile.' }
+      - name: Measure two matched observer-lifetime arms serially
+        timeout-minutes: 11
+        run: |
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-observer-lifetime'
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          if (Test-Path -LiteralPath $root) { throw 'Expected a fresh synthetic comparison directory.' }
+          & node --check scripts/verify-native-observer-memory.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'The comparison driver has invalid syntax.' }
+          $prepared = & node scripts/verify-native-observer-memory.mjs --phase prepare --workload client-lifetime
+          if ($LASTEXITCODE -ne 0 -or @($prepared).Count -ne 1) { throw 'Synthetic comparison preparation failed.' }
+          $descriptor = $prepared | ConvertFrom-Json
+          if ($descriptor.status -cne 'prepared-not-run' -or $descriptor.noNativeLaunch -ne $true -or
+              -not $descriptor.prepared.StartsWith($root + '\native-observer-memory-', [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected synthetic comparison descriptor.' }
+          $PSNativeCommandUseErrorActionPreference = $false
+          $runs = @('churn-client-retained','churn-client-released')
+          foreach ($variant in $runs) {
+            if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'A prior manager is still running. The next arm was not started.' }
+            & node scripts/verify-native-observer-memory.mjs --phase run --prepared $descriptor.prepared --variant $variant --candidate (Join-Path $candidate 'agent-resource-manager.exe') --candidate-build-info (Join-Path $candidate 'BUILD_INFO.native-validation.json')
+            if ($LASTEXITCODE -ne 0) { throw "Lifetime arm $variant did not complete normally." }
+          }
+      - name: Preserve only synthetic evidence and compare matched numeric sampling
+        if: ${{ always() }}
+        run: |
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          $outputs = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'native-observer-memory-*' -ErrorAction SilentlyContinue)
+          if ($outputs.Count -ne 1) { throw 'Expected one isolated comparison directory.' }
+          $out = $outputs[0].FullName
+          $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-observer-lifetime-evidence')
+          Copy-Item -LiteralPath (Join-Path $out 'observer-fixture.json') -Destination $evidence.FullName
+          $summary = [ordered]@{scope='Synthetic one-machine comparison of UIA driver lifetime after identical navigation'; diagnosticOnly=$true; stabilityAcceptance=$false; armOrder=@(); arms=@()}
+          $fingerprint = $null
+          foreach ($variant in @('churn-client-retained','churn-client-released')) {
+            $source = Join-Path $out $variant
+            $target = New-Item -ItemType Directory -Path (Join-Path $evidence.FullName $variant)
+            foreach ($name in @('observer-result.json','native-driver.json','dataset.json')) {
+              $file = Join-Path $source $name
+              if (Test-Path -LiteralPath $file -PathType Leaf) { Copy-Item -LiteralPath $file -Destination $target.FullName }
+            }
+          }
+          foreach ($variant in @('churn-client-retained','churn-client-released')) {
+            $source = Join-Path $evidence.FullName $variant
+            $report = Get-Content -LiteralPath (Join-Path $source 'observer-result.json') -Raw | ConvertFrom-Json
+            $driver = Get-Content -LiteralPath (Join-Path $source 'native-driver.json') -Raw | ConvertFrom-Json
+            $dataset = Get-Content -LiteralPath (Join-Path $source 'dataset.json') -Raw | ConvertFrom-Json
+            $released = $variant -ceq 'churn-client-released'
+            if ($report.candidate.sha256 -cne $env:CANDIDATE_SHA256 -or $report.candidate.sourceIdentity -cne $env:CANDIDATE_SOURCE -or
+                $driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or $driver.pid -ne $report.native.pid -or
+                $driver.creationFileTime -cne $report.native.creationFileTime -or $driver.windowHandle -ne $report.native.windowHandle -or
+                $driver.readinessMode -cne 'strict-skill-list' -or $driver.dataDirectory -ne $dataset.dataDir -or
+                $report.status -cne 'diagnostic-measurements-collected' -or $report.lifetimeCondition -cne $variant -or
+                $report.completedCycles -ne 40 -or $report.normalExit -ne $true -or $report.harnessChangedDuringRun -ne $false -or
+                $report.navigationInvariantsAndTaskHistoryUnchanged -ne $true -or
+                $report.diagnosticOnly -ne $true -or $report.convergenceClaim -ne $false -or
+                $report.systemKeyboardOrMouseInput -ne $false -or $report.applicationGcRequested -ne $false -or
+                $report.postInterventionSamples.Count -ne 3 -or
+                $dataset.syntheticOnly -ne $true -or $dataset.skillCount -ne 1000 -or $dataset.toolCount -ne 100 -or
+                $report.fixture.dataFingerprint -cne $dataset.dataFingerprint -or
+                ($released -and ($driver.clientReleasedForExternalObservation -ne $true -or $report.clientExitedNormally -ne $true -or $report.publicQuitResult.exitCode -ne 0)) -or
+                (-not $released -and $driver.closedNormally -ne $true)) { throw "Unqualified lifetime evidence for $variant." }
+            if ($fingerprint -and $fingerprint -cne $dataset.dataFingerprint) { throw 'The two arms did not use matching fixture contents.' }
+            $fingerprint = $dataset.dataFingerprint
+            $initial = @($report.preInterventionSample.ownedProcesses | Where-Object role -CEQ 'webview-browser')
+            if ($initial.Count -ne 1) { throw 'Each arm must have one attributable WebView browser process before intervention.' }
+            $timeline = foreach ($i in 0..2) {
+              $item = $report.postInterventionSamples[$i]
+              $rows = @($item.sample.ownedProcesses | Where-Object role -CEQ 'webview-browser')
+              if ($item.scheduledOffsetMs -ne $i*10000 -or $item.clientExited -ne $released -or
+                  $item.startedSinceInterventionMs -lt ($i*10000-5) -or $item.startedSinceInterventionMs -gt ($i*10000+2000) -or
+                  $rows.Count -ne 1 -or $rows[0].pid -ne $initial[0].pid -or $rows[0].creationFileTime -cne $initial[0].creationFileTime) {
+                throw "Browser identity or numeric sampling cadence changed in $variant."
+              }
+              [ordered]@{scheduledMs=$item.scheduledOffsetMs; actualStartMs=$item.startedSinceInterventionMs; finishMs=$item.finishedSinceInterventionMs;
+                browserPrivateBytes=$rows[0].privateBytes; browserDeltaBytes=$rows[0].privateBytes-$initial[0].privateBytes; totalPrivateBytes=$item.sample.privateBytes}
+            }
+            $summary.armOrder += $variant
+            $summary.arms += [ordered]@{name=$variant; normalExit=$true; processId=$report.native.pid; creationFileTime=$report.native.creationFileTime;
+              browserPid=$initial[0].pid; browserCreationFileTime=$initial[0].creationFileTime; baselineBrowserPrivateBytes=$initial[0].privateBytes;
+              samples=@($timeline)}
+          }
+          if ($summary.arms[0].processId -eq $summary.arms[1].processId -and $summary.arms[0].creationFileTime -ceq $summary.arms[1].creationFileTime) {
+            throw 'The arms did not use separate native launches.'
+          }
+          $summary.dataFingerprint = $fingerprint
+          $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $evidence.FullName 'comparison.json') -Encoding utf8NoBOM
+          $summary | ConvertTo-Json -Depth 10 -Compress
+      - name: Upload only observer comparison evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Agent_Resource_Manager_observer_lifetime_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-observer-lifetime-evidence/
+          if-no-files-found: warn
+          retention-days: 14
