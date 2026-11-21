@@ -1,0 +1,199 @@
+name: Prepare hosted visual references for afdcc14
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  CANDIDATE_RUN_ID: '44853682116'
+  CANDIDATE_SOURCE: afdcc146bce08db6ef3082be4b1fbcd59beb5d8b
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_afdcc146bce08db6ef3082be4b1fbcd59beb5d8b
+  CANDIDATE_ARTIFACT_ID: '14687451764'
+  CANDIDATE_SHA256: '2a4b27faf9b2aed958760dc30d5f4ad980b8f62a9e3be6e38d321382f8d89db3'
+jobs:
+  references:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-afdcc14-20261121' }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify hosted runner and exact candidate provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Pin the independently verified candidate artifact ID and executable SHA256 before reference generation.'
+          }
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no existing manager in the isolated runner.' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
+              $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push' -or
+              $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+          $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID) { throw 'The exact Windows candidate artifact is missing.' }
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+          ./scripts/native-visual-input.ps1 -CompileOnly
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }
+          $exe = Join-Path $candidate 'agent-resource-manager.exe'
+          $source = Join-Path $candidate 'BUILD_INFO.json'
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:CANDIDATE_SHA256 -or $info.executableSha256 -cne $digest -or
+              $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or
+              $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
+              $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the pinned executable.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+          Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
+      - name: Generate owned synthetic ROI references only
+        id: generate
+        timeout-minutes: 18
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          $exe = Join-Path $candidate 'agent-resource-manager.exe'
+          $buildInfo = Join-Path $candidate 'BUILD_INFO.native-validation.json'
+          $infoDigest = (Get-FileHash -LiteralPath $buildInfo -Algorithm SHA256).Hash.ToLowerInvariant()
+          $approved = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          $failure = Join-Path $env:RUNNER_TEMP 'arm-visual-reference-failure.json'
+          $stage = 'bind-verified-inputs'
+          $referenceError = $null
+          try {
+            if (Test-Path -LiteralPath $approved) { throw 'Expected a fresh synthetic visual reference root.' }
+            [IO.Directory]::CreateDirectory($approved) | Out-Null
+            if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:CANDIDATE_SHA256) {
+              throw 'The verified executable changed before reference generation.'
+            }
+            # Freeze the existing script with only its local-candidate constants rebound.
+            $module = (Resolve-Path -LiteralPath 'scripts/verify-native-visual-stability.mjs').Path
+            $entries = [ordered]@{
+              executable = $exe
+              buildInfo = $buildInfo
+              candidateSha256 = $env:CANDIDATE_SHA256
+              buildInfoSha256 = $infoDigest
+              transportSha256 = $env:CANDIDATE_SHA256
+            }
+            $text = [IO.File]::ReadAllText($module)
+            foreach ($key in $entries.Keys) {
+              $pattern = "(?m)^const $key = [^\r\n]+;(?=\r?$)"
+              if ([regex]::Matches($text, $pattern).Count -ne 1) { throw "Expected one local constant: $key." }
+              $literal = ConvertTo-Json -InputObject $entries[$key] -Compress
+              $text = [regex]::Replace($text, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($match) "const $key = $literal;" })
+            }
+            [IO.File]::WriteAllText($module, $text, [Text.UTF8Encoding]::new($false))
+            & node --check $module
+            if ($LASTEXITCODE -ne 0) { throw 'Bound reference script did not parse.' }
+            $stage = 'prepare-synthetic-fixture'
+            $prepare = @(& node $module --prepare)
+            if ($LASTEXITCODE -ne 0) { throw 'The original visual fixture preparation did not complete.' }
+            $prepared = ($prepare -join [Environment]::NewLine) | ConvertFrom-Json
+            $descriptorPath = (Resolve-Path -LiteralPath $prepared.descriptor).Path
+            $referenceRoot = Split-Path -Parent $descriptorPath
+            if ($prepared.status -cne 'prepared-no-gui-run' -or [IO.Path]::GetFileName($descriptorPath) -cne 'visual-dataset.json' -or
+                (Split-Path -Parent $referenceRoot) -ine $approved -or (Split-Path -Leaf $referenceRoot) -cnotmatch '^native-visual-[A-Za-z0-9]+$') {
+              throw 'Expected the exact generated visual descriptor.'
+            }
+            $stage = 'capture-owned-references'
+            $capture = @(& node $module --references $descriptorPath)
+            if ($LASTEXITCODE -ne 0) {
+              $detail = Join-Path $referenceRoot 'reference-failure.json'
+              if (Test-Path -LiteralPath $detail -PathType Leaf) {
+                $referenceError = Get-Content -LiteralPath $detail -Raw | ConvertFrom-Json
+              }
+              throw 'The original reference generation did not complete.'
+            }
+            $result = ($capture -join [Environment]::NewLine) | ConvertFrom-Json
+            $referencePath = Join-Path $referenceRoot 'visual-references.json'
+            $driverPath = Join-Path $referenceRoot 'reference-driver.json'
+            $descriptor = Get-Content -LiteralPath $descriptorPath -Raw | ConvertFrom-Json
+            $refs = Get-Content -LiteralPath $referencePath -Raw | ConvertFrom-Json
+            $driver = Get-Content -LiteralPath $driverPath -Raw | ConvertFrom-Json
+            $stage = 'validate-reference-receipt'
+            if ($result.status -cne 'references-generated-review-required' -or $result.referenceCount -ne 72 -or
+                $result.visualApprovalRequired -ne $true -or $result.pilotRequired -ne $true -or (Resolve-Path -LiteralPath $result.path).Path -ine $referencePath -or
+                $descriptor.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $descriptor.buildInfoSha256 -cne $infoDigest -or
+                $descriptor.dataset.syntheticOnly -ne $true -or $descriptor.dataset.skillCount -ne 1000 -or $descriptor.dataset.toolCount -ne 100 -or
+                $refs.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $refs.datasetFingerprint -cne $descriptor.dataset.dataFingerprint -or
+                $refs.semanticReferencePhaseCompleted -ne $true -or $refs.capture -cne 'foreground-owned-CopyFromScreen' -or
+                $driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or $driver.closedNormally -ne $true -or $driver.dataDirectory -ine $descriptor.dataset.dataDir) {
+              throw 'The reference receipt does not bind to a completed synthetic session and graceful exit.'
+            }
+            $sheets = @($refs.reviewSheets)
+            $roiCount = @($refs.states.PSObject.Properties.Value | ForEach-Object { $_.rois }).Count
+            if ($sheets.Count -ne 9 -or $roiCount -ne 210) { throw 'Expected exactly nine montage sheets from 210 synthetic crops.' }
+            $sheetPaths = for ($i = 0; $i -lt $sheets.Count; $i++) {
+              $sheet = $sheets[$i]
+              $path = Join-Path $referenceRoot ("references/review-{0:D2}.png" -f ($i + 1))
+              if ((Resolve-Path -LiteralPath $sheet.path).Path -ine $path -or
+                  ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                  (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sheet.sha256) {
+                throw 'A synthetic ROI review sheet failed its exact path or digest check.'
+              }
+              $path
+            }
+            $output = Join-Path $env:RUNNER_TEMP 'arm-visual-reference-review'
+            New-Item -ItemType Directory -Path $output | Out-Null
+            foreach ($path in @($descriptorPath, $referencePath, $driverPath) + $sheetPaths) { Copy-Item -LiteralPath $path -Destination $output }
+            $receipt = [ordered]@{
+              status = 'references-generated-review-required'
+              candidateSource = $env:CANDIDATE_SOURCE
+              candidateSha256 = $env:CANDIDATE_SHA256
+              candidateRunId = $env:CANDIDATE_RUN_ID
+              candidateArtifactId = $env:CANDIDATE_ARTIFACT_ID
+              buildInfoSha256 = $infoDigest
+              referenceSha256 = (Get-FileHash -LiteralPath $referencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+              descriptorSha256 = (Get-FileHash -LiteralPath $descriptorPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              driverSha256 = (Get-FileHash -LiteralPath $driverPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              referenceCount = 72
+              roiCount = $roiCount
+              sheets = $sheets.Count
+              normalExit = $true
+              visualReviewCompleted = $false
+              pilotRun = $false
+            }
+            $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'receipt.json') -Encoding utf8NoBOM
+            $receipt | ConvertTo-Json -Compress
+          } catch {
+            [ordered]@{status='reference-preflight-failed'; stage=$stage; candidateSource=$env:CANDIDATE_SOURCE;
+              candidateSha256=$env:CANDIDATE_SHA256; message=$_.Exception.Message; referenceError=$referenceError} |
+              ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $failure -Encoding utf8NoBOM
+            throw
+          }
+      - name: Record a pre-reference failure
+        if: ${{ always() && steps.generate.outcome != 'success' }}
+        run: |
+          $failure = Join-Path $env:RUNNER_TEMP 'arm-visual-reference-failure.json'
+          if (!(Test-Path -LiteralPath $failure -PathType Leaf)) {
+            [ordered]@{status='reference-preflight-failed'; stage='workflow-setup-or-candidate-preflight'; candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$env:CANDIDATE_SHA256} |
+              ConvertTo-Json | Set-Content -LiteralPath $failure -Encoding utf8NoBOM
+          }
+      - name: Upload only synthetic reference sheets and bound manifests
+        if: ${{ steps.generate.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Agent_Resource_Manager_visual_references_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-visual-reference-review/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload only the synthetic preflight failure receipt
+        if: ${{ always() && steps.generate.outcome != 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Agent_Resource_Manager_visual_reference_failure_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-visual-reference-failure.json
+          if-no-files-found: error
+          retention-days: 14
