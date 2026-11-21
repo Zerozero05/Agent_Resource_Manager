@@ -204,6 +204,7 @@ D3D11_TEXTURE2D_DESC RowDescription(UINT width, D3D11_USAGE usage) {
 }
 
 struct Pixels { COLORREF first; COLORREF second; };
+struct RowTiming { int64_t mapBegin{}, mapEnd{}, unmapBegin{}, unmapEnd{}; };
 Pixels ReadEndpoints(const void* data, UINT rowBytes, UINT width) {
     if (!data || rowBytes < width * 4 || width < 2)
         throw std::runtime_error("unsafe mapped row span");
@@ -211,15 +212,19 @@ Pixels ReadEndpoints(const void* data, UINT rowBytes, UINT width) {
     const auto* last = bytes + (width - 1) * 4;
     return {RGB(bytes[2], bytes[1], bytes[0]), RGB(last[2], last[1], last[0])};
 }
-bool TryReadStaging(Device& device, ID3D11Texture2D* texture, UINT width, Pixels& result) {
+bool TryReadStaging(Device& device, ID3D11Texture2D* texture, UINT width, Pixels& result, RowTiming* timing = nullptr) {
     D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (timing) timing->mapBegin = Counter();
     const HRESULT status = device.context->Map(texture, 0, D3D11_MAP_READ,
         D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+    if (timing) timing->mapEnd = Counter();
     if (status == DXGI_ERROR_WAS_STILL_DRAWING) return false;
     Check(status, "Map(staging)");
     try { result = ReadEndpoints(mapped.pData, mapped.RowPitch, width); }
     catch (...) { device.context->Unmap(texture, 0); throw; }
+    if (timing) timing->unmapBegin = Counter();
     device.context->Unmap(texture, 0);
+    if (timing) timing->unmapEnd = Counter();
     return true;
 }
 
@@ -281,6 +286,7 @@ public:
 };
 
 enum class SampleKind { Desktop, Unchanged, PointerOnly };
+enum class RowMethod { Automatic, SystemMemory, Staging };
 const char* Name(SampleKind kind) {
     if (kind == SampleKind::Desktop) return "desktop";
     return kind == SampleKind::Unchanged ? "no-update" : "pointer-only";
@@ -292,6 +298,7 @@ struct Sample {
     int64_t acquireReturned{}, rowRead{}, released{};
     UINT accumulated{};
     Pixels pixels{};
+    RowTiming rowTiming{};
 };
 
 Output FindOwnedOutput(const OwnedWindow& target) {
@@ -319,12 +326,13 @@ class Capture {
     ComPtr<IDXGIOutputDuplication> duplication;
     DXGI_OUTDUPL_DESC description{};
     ComPtr<ID3D11Texture2D> staging;
+    bool directMap{};
 
 public:
     const UINT width;
     const int64_t frequency;
 
-    explicit Capture(OwnedWindow& owned): target(owned), output(FindOwnedOutput(owned)),
+    explicit Capture(OwnedWindow& owned, RowMethod method = RowMethod::Automatic): target(owned), output(FindOwnedOutput(owned)),
         x(static_cast<UINT>(static_cast<int64_t>(owned.first.x) - output.bounds.left)),
         y(static_cast<UINT>(static_cast<int64_t>(owned.first.y) - output.bounds.top)),
         device(output.adapter.Get()), width(RowWidth(owned)), frequency(Frequency()) {
@@ -335,13 +343,17 @@ public:
             description.ModeDesc.Width < width || x > description.ModeDesc.Width - width ||
             y >= description.ModeDesc.Height)
             throw std::runtime_error("unsupported or changed output geometry");
-        if (!systemMemory()) {
+        if (method == RowMethod::SystemMemory && !systemMemory())
+            throw std::runtime_error("the requested system-memory mapping is unavailable");
+        directMap = systemMemory() && method != RowMethod::Staging;
+        if (!directMap) {
             const auto row = RowDescription(width, D3D11_USAGE_STAGING);
             Check(device.device->CreateTexture2D(&row, nullptr, &staging), "CreateTexture2D(staging)");
         }
     }
 
     bool systemMemory() const { return description.DesktopImageInSystemMemory != FALSE; }
+    const char* rowMethod() const { return directMap ? "system-memory-map" : "staging-copy"; }
 
     Sample Poll() {
         Sample sample{};
@@ -364,7 +376,7 @@ public:
                     throw std::runtime_error("invalid pointer-only metadata");
             } else {
                 if (info.ProtectedContentMaskedOut) throw std::runtime_error("masked desktop capture");
-                sample.pixels = ReadRow(resource.Get(), sample.begin);
+                sample.pixels = ReadRow(resource.Get(), sample.begin, sample.rowTiming);
                 sample.rowRead = Counter();
             }
             frame.Close();
@@ -379,25 +391,29 @@ public:
     }
 
 private:
-    Pixels ReadRow(IDXGIResource* resource, int64_t begin) {
+    Pixels ReadRow(IDXGIResource* resource, int64_t begin, RowTiming& timing) {
         Pixels pixels{};
-        if (systemMemory()) {
+        if (directMap) {
             DXGI_MAPPED_RECT mapped{};
+            timing.mapBegin = Counter();
             Check(duplication->MapDesktopSurface(&mapped), "MapDesktopSurface");
+            timing.mapEnd = Counter();
             try {
                 if (mapped.Pitch < 0 || static_cast<UINT>(mapped.Pitch) < (x + width) * 4 || !mapped.pBits)
                     throw std::runtime_error("unsafe mapped desktop pitch");
                 pixels = ReadEndpoints(mapped.pBits + static_cast<size_t>(y) * mapped.Pitch + x * 4,
                     static_cast<UINT>(mapped.Pitch) - x * 4, width);
             } catch (...) { duplication->UnMapDesktopSurface(); throw; }
+            timing.unmapBegin = Counter();
             Check(duplication->UnMapDesktopSurface(), "UnMapDesktopSurface");
+            timing.unmapEnd = Counter();
         } else {
             ComPtr<ID3D11Texture2D> texture;
             Check(resource->QueryInterface(IID_PPV_ARGS(&texture)), "QueryInterface(ID3D11Texture2D)");
             const D3D11_BOX source{x, y, 0, x + width, y + 1, 1};
             device.context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture.Get(), 0, &source);
             device.context->Flush();
-            while (!TryReadStaging(device, staging.Get(), width, pixels)) {
+            while (!TryReadStaging(device, staging.Get(), width, pixels, &timing)) {
                 if (DeltaMs(begin, Counter(), frequency) > CaptureLimitMs)
                     throw std::runtime_error("first clipped GPU row exceeded capture budget");
                 SwitchToThread();
@@ -438,7 +454,7 @@ int RunHosted(OwnedWindow& target) {
     return 2;
 }
 
-int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
+int RunHover(OwnedWindow& target, POINT neutral, POINT hover, RowMethod method) {
     target.Verify();
     target.VerifyPoint(neutral);
     target.VerifyPoint(hover);
@@ -449,7 +465,7 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
     const auto neutralArrived = Counter();
     const auto frequency = Frequency();
     while (DeltaMs(neutralArrived, Counter(), frequency) < 250) Sleep(4);
-    Capture capture(target);
+    Capture capture(target, method);
     const IdleFrameWait idleWait;
     const auto primeStarted = Counter();
     Sample anchor{};
@@ -483,15 +499,17 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
 
     std::printf("{\"qpcFrequency\":%lld,\"neutralArrivedQpc\":%lld,\"baselineStartedQpc\":%lld,"
                 "\"triggerBeginQpc\":%lld,\"triggerEndQpc\":%lld,\"observationEndQpc\":%lld,"
-                "\"rowWidth\":%u,\"systemMemory\":%s,\"baseline\":",
+                "\"rowWidth\":%u,\"systemMemory\":%s,\"rowMethod\":\"%s\",\"baseline\":",
         capture.frequency, neutralArrived, baselineStarted, triggerBegin, triggerEnd, observationEnd,
-        capture.width, capture.systemMemory() ? "true" : "false");
+        capture.width, capture.systemMemory() ? "true" : "false", capture.rowMethod());
     const auto printSample = [](const Sample& value) {
         std::printf("{\"kind\":\"%s\",\"begin\":%lld,\"end\":%lld,\"present\":%lld,"
                     "\"acquireReturned\":%lld,\"rowRead\":%lld,\"released\":%lld,"
+                    "\"mapBegin\":%lld,\"mapEnd\":%lld,\"unmapBegin\":%lld,\"unmapEnd\":%lld,"
                     "\"accumulated\":%u,\"first\":%lu,\"second\":%lu}",
             Name(value.kind), value.begin, value.end, value.present,
-            value.acquireReturned, value.rowRead, value.released, value.accumulated,
+            value.acquireReturned, value.rowRead, value.released,
+            value.rowTiming.mapBegin, value.rowTiming.mapEnd, value.rowTiming.unmapBegin, value.rowTiming.unmapEnd, value.accumulated,
             value.pixels.first, value.pixels.second);
     };
     printSample(anchor);
@@ -509,7 +527,10 @@ int wmain(int argc, wchar_t** argv) {
     try {
         if (argc == 2 && std::wcscmp(argv[1], L"--synthetic") == 0) return RunSynthetic();
         const bool row = argc == 8 && std::wcscmp(argv[1], L"--hosted") == 0;
-        const bool hover = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover") == 0;
+        const bool hoverMap = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover-map") == 0;
+        const bool hoverStaging = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover-staging") == 0;
+        const bool hover = hoverMap || hoverStaging ||
+            (argc == 12 && std::wcscmp(argv[1], L"--hosted-hover") == 0);
         if ((!row && !hover) ||
             !EnvEquals(L"GITHUB_ACTIONS", L"true") || !EnvEquals(L"RUNNER_ENVIRONMENT", L"github-hosted") ||
             !EnvEquals(L"RUNNER_OS", L"Windows")) {
@@ -525,8 +546,11 @@ int wmain(int argc, wchar_t** argv) {
         OwnedWindow target(reinterpret_cast<HWND>(window), static_cast<DWORD>(pid),
             ParseUnsigned(argv[3]), {ParseCoordinate(argv[5]), y}, {ParseCoordinate(argv[7]), y});
         if (row) return RunHosted(target);
+        auto method = RowMethod::Automatic;
+        if (hoverMap) method = RowMethod::SystemMemory;
+        if (hoverStaging) method = RowMethod::Staging;
         return RunHover(target, {ParseCoordinate(argv[8]), ParseCoordinate(argv[9])},
-            {ParseCoordinate(argv[10]), ParseCoordinate(argv[11])});
+            {ParseCoordinate(argv[10]), ParseCoordinate(argv[11])}, method);
     } catch (const Error& error) {
         std::fprintf(stderr, "%s failed (HRESULT 0x%08lx)\n", error.operation,
             static_cast<unsigned long>(error.result));
