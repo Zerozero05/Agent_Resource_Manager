@@ -984,6 +984,16 @@ fn auto_associate_selected(
     snapshots: &BTreeMap<String, Snapshot>,
     selected: &Option<BTreeSet<String>>,
 ) {
+    // An empty remote catalogue cannot produce a pair. Pending records still
+    // go through the existing selection and source-completeness checks.
+    if !m.state.skills.iter().any(|skill| {
+        skill["associationPending"] == true
+            || (skill["id"].as_str().is_some()
+                && skill["localPath"].as_str().is_none()
+                && skill["sourceId"].as_str().is_some())
+    }) {
+        return;
+    }
     let records = m.state.skills.clone();
     let mut local_identities = Vec::new();
     let mut remote_identities = Vec::new();
@@ -3769,6 +3779,34 @@ mod association_behavior_tests {
         assert_ne!(m.state.skills[0]["status"], "synced");
         assert!(m.state.skills[0]["baselineCommit"].is_null());
     }
+    #[test]
+    fn empty_remote_catalogue_clears_pending_only_for_selected_complete_checks() {
+        let d = fixture();
+        let root = package(&d.path().join("local"), "local-only", "Local instructions");
+        let mut m = Manager::new(d.path().join("data")).unwrap();
+        let mut pending = local_record(&root, false);
+        pending["associationPending"] = json!(true);
+        pending["associationNote"] = json!("Existing pending state");
+        m.state.skills = vec![pending.clone()];
+
+        auto_associate_selected(
+            &mut m,
+            &BTreeMap::new(),
+            &Some(BTreeSet::from(["another-skill".into()])),
+        );
+        assert_eq!(m.state.skills[0], pending);
+
+        m.state.sources = vec![json!({"id":"unverified-source","error":"offline"})];
+        auto_associate_selected(&mut m, &BTreeMap::new(), &None);
+        assert_eq!(m.state.skills[0], pending);
+
+        m.state.sources.clear();
+        auto_associate_selected(&mut m, &BTreeMap::new(), &None);
+        pending["associationPending"] = json!(false);
+        pending["associationNote"] = Value::Null;
+        assert_eq!(m.state.skills[0], pending);
+    }
+
     #[test]
     fn local_declared_version_refreshes_for_full_and_local_checks_without_changing_provenance() {
         let d = fixture();

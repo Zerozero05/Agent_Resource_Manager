@@ -203,6 +203,9 @@ pub(crate) fn discover(manager: &mut Manager, request: &Value) -> Result<Discove
             }
         }
     }
+    if candidates.is_empty() {
+        return Ok(result);
+    }
     let mut known: BTreeSet<String> = manager
         .state
         .skills
