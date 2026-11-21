@@ -35,7 +35,7 @@ function Save-Json([string]$path, $value) {
 
 $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).ProviderPath
 Set-Location -LiteralPath $workspace
-if ($env:GITHUB_REF_NAME -cne 'codex/hosted-short-history-pair-r2-930ec22-20261121' -or
+if ($env:GITHUB_REF_NAME -cne 'codex/hosted-check-merge-pair-37f83f1-20261121' -or
     (git rev-parse HEAD) -cne $env:GITHUB_SHA -or $LASTEXITCODE -ne 0) {
     throw 'The exact paired diagnostic checkout is required.'
 }
@@ -275,6 +275,7 @@ $before = $reports.before
 $after = $reports.after
 if ($locations.before -ieq $locations.after -or $arms[0].sha256 -ceq $arms[1].sha256 -or
     ($before.cycles.index -join ',') -cne ($after.cycles.index -join ',') -or
+    $before.history.normalizedKeySha256 -cnotmatch '^[a-f0-9]{64}$' -or
     $before.history.normalizedKeySha256 -cne $after.history.normalizedKeySha256 -or
     $before.history.keysPerJob -ne $after.history.keysPerJob -or
     $before.finishedAt -gt $after.startedAt) {
@@ -283,7 +284,8 @@ if ($locations.before -ieq $locations.after -or $arms[0].sha256 -ceq $arms[1].sh
 function Summarize-Arm($report) {
     if ($report.status -cne 'retention-short-completed' -or $report.normalExit -ne $true -or
         $report.measurementsUseAccessibility -ne $false -or $report.samples.Count -ne 14 -or
-        $report.cycles.Count -ne 13 -or $report.checks.Count -ne 12 -or $report.history.jobs -ne 12) {
+        $report.cycles.Count -ne 13 -or $report.checks.Count -ne 12 -or $report.history.jobs -ne 12 -or
+        $report.history.keysPerJob -ne 2002) {
         throw 'An arm was incomplete or escaped its explicit short scope.'
     }
     $first, $last = $report.samples[0], $report.samples[-1]
@@ -291,7 +293,8 @@ function Summarize-Arm($report) {
     $endKeys = $last.cache.taskRetention.byAction.check_now
     if ($null -eq $report.samples[-1].cache.taskRetention -or $null -eq $endKeys -or $endKeys.activeJobs -ne 0 -or
         [long]$endKeys.recordedJobs - [long]$startKeys.recordedJobs -ne 12 -or
-        [long]$endKeys.schedulingKeys - [long]$startKeys.schedulingKeys -ne 12 * $report.history.keysPerJob) {
+        [long]$endKeys.schedulingKeys - [long]$startKeys.schedulingKeys -ne 12 * $report.history.keysPerJob -or
+        $endKeys.uniqueKeySets -ne 1 -or $endKeys.uniqueSchedulingKeys -ne $report.history.keysPerJob) {
         throw 'The process-side metrics do not account for all durable measured checks.'
     }
     $roleDeltas = [ordered]@{}
@@ -317,17 +320,23 @@ function Summarize-Arm($report) {
 }
 $beforeStats = Summarize-Arm $before
 $afterStats = Summarize-Arm $after
-$sharingObserved = $null -eq $beforeStats.uniqueCheckKeys -and $null -ne $afterStats.uniqueCheckKeys -and
-    $afterStats.uniqueCheckKeySets -ge 1 -and $afterStats.uniqueCheckKeysGrowth -ge 0 -and
-    $afterStats.uniqueCheckKeysGrowth -le $after.history.keysPerJob -and
-    $afterStats.keyCapacityGrowthBytes -lt $beforeStats.keyCapacityGrowthBytes
+$roleDifference = [ordered]@{}
+foreach ($role in $beforeStats.privateGrowthByRole.Keys) {
+    $roleDifference[$role] = $afterStats.privateGrowthByRole[$role] - $beforeStats.privateGrowthByRole[$role]
+}
+$sampleSkew = for ($index = 0; $index -lt $before.samples.Count; $index++) {
+    [Math]::Abs($after.samples[$index].elapsedMs - $before.samples[$index].elapsedMs)
+}
 Save-Json (Join-Path $measurements 'comparison.json') ([ordered]@{
-    status=if ($sharingObserved) {'paired-short-diagnostic-completed'} else {'key-sharing-unverified'}
-    historyRetentionOnly=$true; convergenceGateEvaluated=$false; previousFailureReplaced=$false
+    status='paired-short-check-merge-diagnostic-completed'
+    interpretation='Same-host short comparison with fixed arm order and fresh data. Private-byte differences are observations; no convergence or latency acceptance.'
+    convergenceGateEvaluated=$false; previousFailureReplaced=$false
     sameHost=[ordered]@{runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion; node=(& node --version); windows=[Environment]::OSVersion.Version.ToString()}
     referenceSha256=$receipt.referenceSha256; referenceSource=$candidateSource; approvalSha256=$ApprovalSha256
     fixtureSha256=$reference.datasetFingerprint; checkKeySha256=$before.history.normalizedKeySha256
+    maximumObservedSampleSkewMs=($sampleSkew | Measure-Object -Maximum).Maximum
     before=[ordered]@{sourceCommit=$arms[0].source; workflowRunId=$arms[0].run; observations=$beforeStats}
     after=[ordered]@{sourceCommit=$arms[1].source; workflowRunId=$arms[1].run; observations=$afterStats}
+    afterMinusBeforeFamilyPrivateGrowthBytes=$afterStats.processFamilyPrivateGrowthBytes - $beforeStats.processFamilyPrivateGrowthBytes
+    afterMinusBeforePrivateGrowthByRole=$roleDifference
 })
-if (!$sharingObserved) { throw 'Durable repeated checks completed, but the target runtime did not prove reduced key retention.' }
