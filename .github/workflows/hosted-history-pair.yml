@@ -27,7 +27,7 @@ env:
   APPROVAL_SHA256: '4e9493b679f7be75f0137900f9963fafa71c67de0d94ab99746fa88d79eda33a'
 jobs:
   short-history-pair:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-short-history-pair-930ec22-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-short-history-pair-r2-930ec22-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 22
     defaults:

@@ -35,7 +35,7 @@ function Save-Json([string]$path, $value) {
 
 $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).ProviderPath
 Set-Location -LiteralPath $workspace
-if ($env:GITHUB_REF_NAME -cne 'codex/hosted-short-history-pair-930ec22-20261121' -or
+if ($env:GITHUB_REF_NAME -cne 'codex/hosted-short-history-pair-r2-930ec22-20261121' -or
     (git rev-parse HEAD) -cne $env:GITHUB_SHA -or $LASTEXITCODE -ne 0) {
     throw 'The exact paired diagnostic checkout is required.'
 }
@@ -111,7 +111,6 @@ if (@(Get-ChildItem -LiteralPath $RoiBundle -Recurse -File -Force).Count -ne 211
 $measurements = Join-Path $env:RUNNER_TEMP 'arm-retention-result'
 New-Item -ItemType Directory -Path $measurements | Out-Null
 [IO.Directory]::CreateDirectory($approved) | Out-Null
-foreach ($relative in $roiFiles.Keys) { Copy-Item -LiteralPath $roiFiles[$relative] -Destination (Join-Path $root $relative) }
 
 $referenceRoot = $root
 $module = Join-Path $workspace 'scripts/verify-native-visual-stability.mjs'
