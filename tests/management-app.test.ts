@@ -422,6 +422,46 @@ const readingSnapshot = (skills: LibraryItem[], sort = 'name', revision = 1) => 
 });
 const row = (scope: Element, id: string) => scope.querySelector<HTMLElement>(`[data-skill-id="${id}"]`)!;
 
+test('typing a Skill search reveals an offscreen title without moving focus or horizontal scroll', async () => {
+  const f = await fixture();
+  const pane = f.pane();
+  const search = pane.querySelector<HTMLInputElement>('[aria-label="搜索 Skill"]')!;
+  const scroller = pane.querySelector<HTMLElement>('[data-pane-scroll]')!;
+  const table = pane.querySelector<HTMLElement>('.skill-table-scroll')!;
+  Object.defineProperties(scroller, { clientHeight: { value: 500 }, offsetHeight: { value: 500 } });
+  const original = dom.window.HTMLElement.prototype.getBoundingClientRect;
+  let titleTop = 792, inputTop = 415;
+  dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+    if (this === scroller) return new dom.window.DOMRect(0, 135, 960, 575);
+    if (this === search.closest('.library-search')) return new dom.window.DOMRect(433, inputTop - scroller.scrollTop * 1.15, 240, 52);
+    if (this.matches('.skill-name-button') && pane.contains(this)) return new dom.window.DOMRect(433, titleTop - scroller.scrollTop * 1.15, 201, 31);
+    return original.call(this);
+  };
+  try {
+    table.scrollLeft = 25;
+    await act(async () => search.focus());
+    await change(search, 'beta-original');
+    assert.deepEqual(results(pane), ['beta']);
+    assert(Math.abs(scroller.scrollTop - 113 / 1.15) < 0.01, 'scroll only far enough to reveal the result at 115% scale');
+    assert.equal(document.activeElement, search);
+    assert.equal(table.scrollLeft, 25);
+
+    const revealedTop = scroller.scrollTop;
+    await change(search, 'beta-origina');
+    assert.equal(scroller.scrollTop, revealedTop, 'typing again keeps an already visible result in place');
+    titleTop += 200;
+    await f.updateSnapshot({ ...snapshot(), stateRevision: 2 });
+    assert.equal(scroller.scrollTop, revealedTop, 'a background refresh does not replay the reveal');
+    assert.equal(document.activeElement, search);
+
+    inputTop = 160 + revealedTop * 1.15;
+    await change(search, 'beta-origin');
+    assert.deepEqual(results(pane), ['beta']);
+    assert.equal(scroller.scrollTop, revealedTop, 'a short viewport must not scroll the focused input out of view');
+    assert.equal(document.activeElement, search);
+  } finally { dom.window.HTMLElement.prototype.getBoundingClientRect = original; }
+});
+
 test('status updates preserve attention-filter members, checked selection, focus and scroll until the reader reorganizes', async () => {
   const skills = [
     { id: 'alpha', name: 'alpha', status: 'error' },

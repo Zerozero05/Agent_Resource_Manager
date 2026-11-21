@@ -49,7 +49,7 @@ import { DestinationChoice } from './DestinationChoice';
 import { destinationAfterPicker, destinationDraft, destinationReady, type DestinationDraft } from './destination';
 import { CLIENT_MANAGEMENT_COPY } from './client-selection';
 import { captureSectionFolds, restoreSectionFolds } from './folds';
-import type { WorkspaceNavigation } from './workspace';
+import { paneScrollScale, type WorkspaceNavigation } from './workspace';
 import { useExportSelection, type ExportSelectionDraft } from './useExportSelection';
 import { bridgeMessage } from './bridge-recovery';
 import { useExportPlan } from './useExportPlan';
@@ -346,6 +346,11 @@ export default function SessionApp() {
   function setView(next: View) { if (isHome) setLocalView(next); else sessionRef.current.goHome(next); }
   const [filter, setFilter] = useState<Filter>(seed('filter', 'all'));
   const [query, setQuery] = useState(seed('query', ''));
+  const searchReveal = useRef<{ input: HTMLInputElement; query: string } | null>(null);
+  function editLibraryQuery(input: HTMLInputElement) {
+    searchReveal.current = { input, query: input.value };
+    setQuery(input.value);
+  }
   const [libraryMode, setLibraryMode] = useState<LibraryMode>(seed('libraryMode', 'list'));
   const [librarySort, setLibrarySort] = useState<LibrarySort>(seed('librarySort', 'name'));
   const [libraryPageSize, setLibraryPageSize] = useState<LibraryPageSize>(seed('libraryPageSize', 20));
@@ -1448,6 +1453,27 @@ export default function SessionApp() {
     scrollTop.current = top; viewScrollPositions.current[currentView.current] = top; clearTimeout(scrollSaveTimer.current);
     scrollSaveTimer.current = setTimeout(() => sessionRef.current.updateNavigation(pane.id, { scrollTop: top }), 500);
   }
+  useLayoutEffect(() => {
+    const edit = searchReveal.current;
+    if (!edit) return;
+    if (isHome && view === 'skills' && session.visible && edit.query === query && !ready) return;
+    searchReveal.current = null;
+    if (!isHome || view !== 'skills' || !session.visible || edit.query !== query || !query.trim() || edit.input.ownerDocument.activeElement !== edit.input) return;
+    const scroller = edit.input.closest<HTMLElement>('[data-pane-scroll]');
+    const row = edit.input.closest('.library-panel')?.querySelector<HTMLElement>('[data-skill-id]');
+    if (!scroller?.clientHeight || !row) return;
+    const target = row.querySelector<HTMLElement>('.skill-name-button, .library-card-name, .skill-row') || row;
+    const viewport = scroller.getBoundingClientRect(), bounds = target.getBoundingClientRect();
+    const scale = paneScrollScale(viewport.height, scroller.offsetHeight);
+    const top = viewport.top + scroller.clientTop * scale;
+    const bottom = top + scroller.clientHeight * scale;
+    if (bounds.height <= 0 || bounds.top < bottom) return;
+    const distance = bounds.bottom - bottom;
+    const inputBounds = (edit.input.closest('.library-search') || edit.input).getBoundingClientRect();
+    if (inputBounds.height <= 0 || inputBounds.top - distance < top || inputBounds.bottom - distance > bottom) return;
+    homeRestorePending.current = false;
+    scroller.scrollTop += distance / scale;
+  }, [isHome, query, ready, session.visible, view]);
   useEffect(() => () => clearTimeout(scrollSaveTimer.current), []);
   useEffect(() => {
     if (!isHome || !homeRestorePending.current) return;
@@ -1743,7 +1769,7 @@ export default function SessionApp() {
         <div className={`library-panel library-${libraryMode}`}>
           <div className="library-controls">
             {reading.pending && <div className="library-reading-status" role="status"><span>状态已更新，阅读位置已保留。</span><button className="text-button" onClick={() => { setReadingRefresh(value => value + 1); setLibraryPage(1); }}>重新整理列表</button></div>}
-            <div className="library-search-row"><label className="search library-search"><Search size={17} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 Skill、别名、用途…" title="可搜索名称、别名、备注、用途、仓库与本地路径" aria-label="搜索 Skill" />{query && <button className="icon-button" aria-label="清空搜索" onClick={() => setQuery('')}><X size={15} /></button>}</label><div className="segmented library-mode" aria-label="技能库视图"><button className={libraryMode === 'list' ? 'selected' : ''} aria-pressed={libraryMode === 'list'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'list' })}><List size={16} />列表</button><button className={libraryMode === 'cards' ? 'selected' : ''} aria-pressed={libraryMode === 'cards'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'cards' })}><LayoutGrid size={16} />卡片</button><button className={libraryMode === 'details' ? 'selected' : ''} aria-pressed={libraryMode === 'details'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'details' })}><LayoutPanelLeft size={16} />详情</button></div></div>
+            <div className="library-search-row"><label className="search library-search"><Search size={17} /><input value={query} onChange={event => editLibraryQuery(event.currentTarget)} placeholder="搜索 Skill、别名、用途…" title="可搜索名称、别名、备注、用途、仓库与本地路径" aria-label="搜索 Skill" />{query && <button className="icon-button" aria-label="清空搜索" onClick={() => setQuery('')}><X size={15} /></button>}</label><div className="segmented library-mode" aria-label="技能库视图"><button className={libraryMode === 'list' ? 'selected' : ''} aria-pressed={libraryMode === 'list'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'list' })}><List size={16} />列表</button><button className={libraryMode === 'cards' ? 'selected' : ''} aria-pressed={libraryMode === 'cards'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'cards' })}><LayoutGrid size={16} />卡片</button><button className={libraryMode === 'details' ? 'selected' : ''} aria-pressed={libraryMode === 'details'} disabled={busy} onClick={() => void saveLibraryPreference({ libraryMode: 'details' })}><LayoutPanelLeft size={16} />详情</button></div></div>
             <div className="library-filter-row"><div className="segmented source-filters" aria-label="来源筛选">{([{ id: 'all', label: '全部' }, { id: 'local', label: '本地' }, { id: 'github', label: 'GitHub' }, { id: 'linked', label: '已关联' }] as const).map(item => <button key={item.id} className={filter === item.id ? 'selected' : ''} aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}</button>)}</div><label className="compact-select"><span>状态</span><select aria-label="按状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value as LibraryStatusFilter)}>{statusOptions.map(option => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}</select></label><label className="compact-select library-sort"><span>排序</span><select aria-label="Skill 排序" value={librarySort} disabled={busy} onChange={event => void saveLibraryPreference({ librarySort: event.target.value as LibrarySort })}><option value="name">名称 A–Z</option><option value="status">状态优先</option><option value="checked">最近检查</option></select></label>{(query || filter !== 'all' || statusFilter !== 'all') && <button className="text-button clear-filters" onClick={clearLibraryFilters}><X size={13} />清除筛选</button>}</div>
             <div className="library-selection-bar">
               {ready && matching.length > 0 && libraryMode !== 'details' && <>
