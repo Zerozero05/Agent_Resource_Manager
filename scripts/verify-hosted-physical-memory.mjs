@@ -119,7 +119,7 @@ async function calibrate(dataset, context) {
   const db = new DatabaseSync(dataset.dbPath, { readOnly: true });
   const query = db.prepare('SELECT payload FROM workspace_state WHERE id=1');
   const workspace = () => readWorkspace(query);
-  let app, visual;
+  let app, visual, failure;
   try {
     calibration.stage = 'launch-isolated-reference-session';
     app = await NativeUiaSession.launch({ executable, sha256, dataDir: dataset.dataDir, reportPath: join(root, 'calibration-driver.json') });
@@ -130,7 +130,8 @@ async function calibrate(dataset, context) {
     const rows = (name, scope, deadline) => {
       const referenceReadBudgetMs = Math.floor(deadline - performance.now());
       assert.ok(referenceReadBudgetMs > 0);
-      return app.call('state', { name, ...(scope ? { scope } : {}), referenceReadBudgetMs }, referenceReadBudgetMs).then(referenceObservationRows);
+      const scoped = scope ? { scope, referenceAllowPendingScope: true } : {};
+      return app.call('state', { name, ...scoped, referenceReadBudgetMs }, referenceReadBudgetMs).then(referenceObservationRows);
     };
     async function element(name, scope, type, selected) {
       const deadline = performance.now() + 15000;
@@ -164,11 +165,16 @@ async function calibrate(dataset, context) {
     assert.equal(searchValue.matchesExpected, true);
     const result = await freeze('filtered-result', title);
     const open = center(title);
-    calibration.stage = 'verify-document-and-fixed-tabs';
-    await verifyAction(workspace, visual, open, 'open', performance.now() + 12000);
-    await element('说明', 'Skill 详情', tabs, true);
-    const document = center(await rect(skillTitle, tabScope, tabs, true));
+    calibration.stage = 'verify-persisted-open';
+    calibration.openTransition = await verifyAction(workspace, visual, open, 'open', performance.now() + 12000);
+    calibration.stage = 'wait-visible-selected-workspace-tab';
+    calibration.selectedDetail = await element(skillTitle, tabScope, tabs, true);
+    const document = center(boxAt(calibration.selectedDetail.bounds, frame));
+    calibration.stage = 'wait-visible-selected-description';
+    calibration.selectedDescription = await element('说明', 'Skill 详情', tabs, true);
+    calibration.stage = 'freeze-visible-document-paragraph';
     const body = await freeze('document-body', await rect(paragraph, null, 'ControlType.Text'));
+    calibration.stage = 'locate-exact-home-and-close-controls';
     const names = referenceObservationRows(await app.call('names', { referenceReadBudgetMs: 12000 }, 12000));
     const homeNames = [...new Set(names.filter(row => row.type === tabs && (row.name === '工作台' || row.name.startsWith('工作台 '))).map(row => row.name))];
     assert.equal(homeNames.length, 1);
@@ -184,15 +190,30 @@ async function calibrate(dataset, context) {
       if (action === 'close') await match(visual, result);
     }
     calibration.stage = 'complete';
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
-    try {
-      if (visual) await visual.finish();
-    } finally {
-      db.close();
-      if (app) {
-        await app.quit();
-        calibration.normalExit = true;
+    const cleanupErrors = [];
+    if (visual) await visual.finish().catch(error => cleanupErrors.push(error.message));
+    db.close();
+    if (app) {
+      let receipt;
+      try {
+        ({ driverReport: receipt } = await app.quit());
+      } catch (error) {
+        cleanupErrors.push(error.message);
+        receipt = app.driverReport;
       }
+      calibration.normalExit = receipt?.closedNormally === true && receipt.pid === app.identity.pid
+        && receipt.creationFileTime === app.identity.creationFileTime && receipt.windowHandle === app.identity.windowHandle
+        && receipt.executableSha256 === sha256 && receipt.dataDirectory?.toLowerCase() === dataset.dataDir.toLowerCase();
+      calibration.quit = { driverStatus: receipt?.status, recoveryUsed: receipt?.recoveryExitUsedInvoke === true, closeError: receipt?.closeError };
+      if (!calibration.normalExit) cleanupErrors.push('Calibration did not prove exact normal exit.');
+    }
+    if (cleanupErrors.length) {
+      calibration.cleanupErrors = cleanupErrors;
+      if (!failure) throw new Error(cleanupErrors.join(' / '));
     }
   }
 }
@@ -345,7 +366,7 @@ async function main() {
   assert.equal(process.env.GITHUB_ACTIONS, 'true');
   assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
   assert.equal(process.env.GITHUB_REPOSITORY?.toLowerCase(), 'zerozero05/agent_resource_manager');
-  assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-physical-memory-2314ea8-20261121');
+  assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-physical-memory-2314ea8-r2-20261121');
   const [givenExe, givenInfo, sha256, artifactId, frameJson, reportPath] = process.argv.slice(2);
   assert.match(sha256, /^[a-f0-9]{64}$/);
   assert.match(artifactId, /^\d+$/);

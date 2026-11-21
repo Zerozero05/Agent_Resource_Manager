@@ -16,7 +16,7 @@ env:
   FIRST_SEARCH_REPORT_SHA256: d461a7ce3a1bcb3ed38c4846e99fda4831a2599104712a3c3f77e9ac9bc45ccf
 jobs:
   paired:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-physical-memory-2314ea8-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-physical-memory-2314ea8-r2-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 16
     defaults:
