@@ -329,6 +329,7 @@ class Capture {
     bool directMap{};
 
 public:
+    double warmupMs{};
     const UINT width;
     const int64_t frequency;
 
@@ -355,6 +356,33 @@ public:
     bool systemMemory() const { return description.DesktopImageInSystemMemory != FALSE; }
     const char* rowMethod() const { return directMap ? "system-memory-map" : "staging-copy"; }
 
+    void WarmStaging() {
+        if (!staging || directMap) throw std::runtime_error("warmup needs the scored staging texture");
+        constexpr double warmupLimitMs = 50.0;
+        const auto warmupDescription = RowDescription(width, D3D11_USAGE_DEFAULT);
+        std::vector<uint32_t> colors(width, 0xff102030);
+        colors.back() = 0xffedcba9;
+        const D3D11_SUBRESOURCE_DATA initial{colors.data(), width * 4, 0};
+        ComPtr<ID3D11Texture2D> source;
+        Check(device.device->CreateTexture2D(&warmupDescription, &initial, &source), "create offscreen warmup row");
+        const D3D11_BOX row{0, 0, 0, width, 1, 1};
+        const auto begin = Counter();
+        device.context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, source.Get(), 0, &row);
+        device.context->Flush();
+        Pixels pixels{};
+        while (!TryReadStaging(device, staging.Get(), width, pixels)) {
+            if (DeltaMs(begin, Counter(), frequency) > warmupLimitMs) break;
+            SwitchToThread();
+        }
+        warmupMs = DeltaMs(begin, Counter(), frequency);
+        if (warmupMs <= 0 || warmupMs > warmupLimitMs ||
+            pixels.first != RGB(0x10, 0x20, 0x30) || pixels.second != RGB(0xed, 0xcb, 0xa9)) {
+            std::fprintf(stderr, "ARM-DXGI-WARMUP {\"elapsedMs\":%.6f,\"limitMs\":%.0f}\n",
+                warmupMs, warmupLimitMs);
+            throw std::runtime_error("the same-device offscreen staging warmup did not qualify");
+        }
+    }
+
     Sample Poll() {
         Sample sample{};
         sample.begin = Counter();
@@ -376,7 +404,7 @@ public:
                     throw std::runtime_error("invalid pointer-only metadata");
             } else {
                 if (info.ProtectedContentMaskedOut) throw std::runtime_error("masked desktop capture");
-                sample.pixels = ReadRow(resource.Get(), sample.begin, sample.rowTiming);
+                sample.pixels = ReadRow(resource.Get(), sample);
                 sample.rowRead = Counter();
             }
             frame.Close();
@@ -391,7 +419,8 @@ public:
     }
 
 private:
-    Pixels ReadRow(IDXGIResource* resource, int64_t begin, RowTiming& timing) {
+    Pixels ReadRow(IDXGIResource* resource, Sample& sample) {
+        auto& timing = sample.rowTiming;
         Pixels pixels{};
         if (directMap) {
             DXGI_MAPPED_RECT mapped{};
@@ -414,8 +443,18 @@ private:
             device.context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture.Get(), 0, &source);
             device.context->Flush();
             while (!TryReadStaging(device, staging.Get(), width, pixels, &timing)) {
-                if (DeltaMs(begin, Counter(), frequency) > CaptureLimitMs)
-                    throw std::runtime_error("first clipped GPU row exceeded capture budget");
+                const auto checked = Counter();
+                if (DeltaMs(sample.begin, checked, frequency) > CaptureLimitMs) {
+                    if (warmupMs > 0) {
+                        std::fprintf(stderr,
+                            "ARM-DXGI-STAGING {\"warmupMs\":%.6f,\"qpcFrequency\":%lld,\"present\":%lld,"
+                            "\"begin\":%lld,\"acquireReturned\":%lld,\"mapBegin\":%lld,\"mapEnd\":%lld,"
+                            "\"budgetCheck\":%lld,\"accumulated\":%u}\n",
+                            warmupMs, frequency, sample.present, sample.begin, sample.acquireReturned,
+                            timing.mapBegin, timing.mapEnd, checked, sample.accumulated);
+                    }
+                    throw std::runtime_error("clipped GPU row exceeded capture budget");
+                }
                 SwitchToThread();
             }
         }
@@ -454,7 +493,7 @@ int RunHosted(OwnedWindow& target) {
     return 2;
 }
 
-int RunHover(OwnedWindow& target, POINT neutral, POINT hover, RowMethod method) {
+int RunHover(OwnedWindow& target, POINT neutral, POINT hover, RowMethod method, bool warmStaging) {
     target.Verify();
     target.VerifyPoint(neutral);
     target.VerifyPoint(hover);
@@ -466,6 +505,11 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover, RowMethod method) 
     const auto frequency = Frequency();
     while (DeltaMs(neutralArrived, Counter(), frequency) < 250) Sleep(4);
     Capture capture(target, method);
+    if (warmStaging) {
+        target.Verify();
+        capture.WarmStaging();
+        target.Verify();
+    }
     const IdleFrameWait idleWait;
     const auto primeStarted = Counter();
     Sample anchor{};
@@ -499,9 +543,10 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover, RowMethod method) 
 
     std::printf("{\"qpcFrequency\":%lld,\"neutralArrivedQpc\":%lld,\"baselineStartedQpc\":%lld,"
                 "\"triggerBeginQpc\":%lld,\"triggerEndQpc\":%lld,\"observationEndQpc\":%lld,"
-                "\"rowWidth\":%u,\"systemMemory\":%s,\"rowMethod\":\"%s\",\"baseline\":",
+                "\"rowWidth\":%u,\"systemMemory\":%s,\"rowMethod\":\"%s\","
+                "\"sameDeviceOffscreenWarmupMs\":%.6f,\"baseline\":",
         capture.frequency, neutralArrived, baselineStarted, triggerBegin, triggerEnd, observationEnd,
-        capture.width, capture.systemMemory() ? "true" : "false", capture.rowMethod());
+        capture.width, capture.systemMemory() ? "true" : "false", capture.rowMethod(), capture.warmupMs);
     const auto printSample = [](const Sample& value) {
         std::printf("{\"kind\":\"%s\",\"begin\":%lld,\"end\":%lld,\"present\":%lld,"
                     "\"acquireReturned\":%lld,\"rowRead\":%lld,\"released\":%lld,"
@@ -529,9 +574,15 @@ int wmain(int argc, wchar_t** argv) {
         const bool row = argc == 8 && std::wcscmp(argv[1], L"--hosted") == 0;
         const bool hoverMap = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover-map") == 0;
         const bool hoverStaging = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover-staging") == 0;
-        const bool hover = hoverMap || hoverStaging ||
+        const bool warmStaging = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover-warm-staging") == 0;
+        const bool hover = hoverMap || hoverStaging || warmStaging ||
             (argc == 12 && std::wcscmp(argv[1], L"--hosted-hover") == 0);
-        if ((!row && !hover) ||
+        const bool qualificationBranch = EnvEquals(L"GITHUB_REF_NAME", L"codex/hosted-dxgi-staging-0ac5e79-20261121");
+        if ((!row && !hover) || warmStaging != qualificationBranch ||
+            (warmStaging &&
+                (!EnvEquals(L"GITHUB_REPOSITORY", L"Zerozero05/Agent_Resource_Manager") ||
+                 !EnvEquals(L"ImageOS", L"win25-vs2026") || !EnvEquals(L"ImageVersion", L"20261116.315.1") ||
+                 !EnvEquals(L"CANDIDATE_SOURCE", L"0ac5e79b7a3d1184e7602f241793f240b0609d44"))) ||
             !EnvEquals(L"GITHUB_ACTIONS", L"true") || !EnvEquals(L"RUNNER_ENVIRONMENT", L"github-hosted") ||
             !EnvEquals(L"RUNNER_OS", L"Windows")) {
             throw std::runtime_error("desktop access is limited to the exact foreground synthetic GitHub-hosted window");
@@ -548,9 +599,9 @@ int wmain(int argc, wchar_t** argv) {
         if (row) return RunHosted(target);
         auto method = RowMethod::Automatic;
         if (hoverMap) method = RowMethod::SystemMemory;
-        if (hoverStaging) method = RowMethod::Staging;
+        if (hoverStaging || warmStaging) method = RowMethod::Staging;
         return RunHover(target, {ParseCoordinate(argv[8]), ParseCoordinate(argv[9])},
-            {ParseCoordinate(argv[10]), ParseCoordinate(argv[11])}, method);
+            {ParseCoordinate(argv[10]), ParseCoordinate(argv[11])}, method, warmStaging);
     } catch (const Error& error) {
         std::fprintf(stderr, "%s failed (HRESULT 0x%08lx)\n", error.operation,
             static_cast<unsigned long>(error.result));

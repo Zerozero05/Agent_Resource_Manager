@@ -1,23 +1,28 @@
 param(
     [Parameter(Mandatory)][string]$Candidate,
     [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{64}$')][string]$ExpectedSha256,
-    [switch]$RowMethodDiagnostic
+    [switch]$GpuQualification
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:ImageOS -cne 'win25-vs2026' -or $env:ImageVersion -cne '20261116.315.1' -or
+    -not $GpuQualification -or $env:GITHUB_REPOSITORY -cne 'Zerozero05/Agent_Resource_Manager' -or
+    $env:GITHUB_REF_NAME -cne 'codex/hosted-dxgi-staging-0ac5e79-20261121' -or
+    $env:CANDIDATE_SOURCE -cne '0ac5e79b7a3d1184e7602f241793f240b0609d44' -or
+    $env:CANDIDATE_RUN_ID -cne '44880393531' -or $env:CANDIDATE_ARTIFACT_ID -cne '14698411078' -or
+    $ExpectedSha256 -cne 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24' -or
     -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
     throw 'This can run only in a fresh interactive GitHub-hosted Windows VM.'
 }
 
 $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-motion-pixels-evidence')
 $output = Join-Path $evidence.FullName 'motion-pixels.json'
-$policy = [ordered]@{ trials=3; neutralSettleMs=250; beforeMs=95; afterMs=430; maxCaptureMs=15; maxGapMs=32; latestReducedEndpointMs=105;
+$policy = [ordered]@{ neutralSettleMs=250; beforeMs=95; afterMs=430; maxCaptureMs=15; maxGapMs=32; latestReducedEndpointMs=105;
     minimumEndpointSamples=4; minimumRgbDistance=12; minimumIntermediateColors=2 }
-$report = [ordered]@{ candidateSha256=$ExpectedSha256; syntheticOnly=$true; status='incomplete'; phase='preflight'
-    policy=$policy; arms=@(); attemptedSystemChange=$false; systemRestored=$false; closedNormally=$false
+$report = [ordered]@{ candidateSource=$env:CANDIDATE_SOURCE; candidateRunId=$env:CANDIDATE_RUN_ID; candidateArtifactId=$env:CANDIDATE_ARTIFACT_ID; candidateSha256=$ExpectedSha256; syntheticOnly=$true; status='incomplete'; phase='preflight'
+    policy=$policy; trial=$null; attemptedSystemChange=$false; systemRestored=$false; closedNormally=$false
     previousRun=[ordered]@{id='44854495440'; status='inconclusive'; reason='A two-update DXGI batch interrupted the first positive control under that run''s policy.'}
     previousR2=[ordered]@{id='44855333628'; status='incomplete'; passedArms=2; totalArms=4}
     previousR3=[ordered]@{id='44857754039'; status='incomplete'; qualifiedTrialsPerArm=@(1,1,3,0); reason='Coalesced updates and over-budget compositor gaps in seven positive trials.'}
@@ -26,12 +31,9 @@ $report = [ordered]@{ candidateSha256=$ExpectedSha256; syntheticOnly=$true; stat
     notificationScope='A separate hidden top-level window observes real settings broadcasts in the hosted session. WebView-specific receipt is not inferred.'
     capture='One DXGI duplication over each trial. Successful acquisitions are followed immediately by another poll; only no-update polls use a 1 ms high-resolution wait. No-update and pointer-only polls retain the last timestamped desktop row. Raw QPC timestamps identify acquisition, row read and release.'
     runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion
-    scope='Native foreground hover pixels on one inactive sidebar control. No DOM or CSS readback and no display-DPI or whole-app animation claim.' }
-if ($RowMethodDiagnostic) {
-    $report.scope = 'Paired DXGI row acquisition calibration on one exact owned window and one unchanged motion setting. No Windows settings change or four-condition acceptance.'
-    $report.previousCadenceRun = '44865977127'
-    $report.rowMethodTrials = @()
-}
+    scope='One positive hover on the exact owned window after offscreen same-device warmup. The result qualifies only this capture method preflight.'
+    qualificationPolicy=[ordered]@{ trials=1; maxWarmupMs=50; maxPresentToCpuMs=32; minTriggerToEndpointMs=120; maxTriggerToEndpointMs=180 }
+    previousRowMethodRun='44867272357' }
 function Write-Report { $report | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $output -Encoding utf8NoBOM }
 Write-Report
 
@@ -339,9 +341,10 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         $raw = $trial.rawDxgi
         $scale = 1000.0 / [long]$raw.qpcFrequency
         $trial.timing = [ordered]@{ maxDesktopCaptureMs=0.0; maxRowMs=0.0; maxMapMs=0.0; maxUnmapMs=0.0
-            desktopSamples=0; afterTriggerCoalesced=0 }
+            desktopSamples=0; afterTriggerCoalesced=0; maxPresentToCpuMs=0.0 }
         foreach ($sample in @($raw.baseline) + @($raw.samples | Where-Object kind -CEQ 'desktop')) {
-            if ($sample.begin -gt $sample.acquireReturned -or $sample.acquireReturned -gt $sample.mapBegin -or
+            if ($sample.present -le 0 -or $sample.present -gt $sample.acquireReturned -or
+                $sample.begin -gt $sample.acquireReturned -or $sample.acquireReturned -gt $sample.mapBegin -or
                 $sample.mapBegin -gt $sample.mapEnd -or $sample.mapEnd -gt $sample.unmapBegin -or
                 $sample.unmapBegin -gt $sample.unmapEnd -or $sample.unmapEnd -gt $sample.rowRead -or
                 $sample.rowRead -gt $sample.released -or $sample.released -gt $sample.end) {
@@ -353,98 +356,62 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
             }
             $trial.timing.maxDesktopCaptureMs = [Math]::Max($trial.timing.maxDesktopCaptureMs, ($sample.end - $sample.begin) * $scale)
             $trial.timing.maxRowMs = [Math]::Max($trial.timing.maxRowMs, ($sample.rowRead - $sample.acquireReturned) * $scale)
+            $trial.timing.maxPresentToCpuMs = [Math]::Max($trial.timing.maxPresentToCpuMs, ($sample.rowRead - $sample.present) * $scale)
             $trial.timing.maxMapMs = [Math]::Max($trial.timing.maxMapMs, ($sample.mapEnd - $sample.mapBegin) * $scale)
             $trial.timing.maxUnmapMs = [Math]::Max($trial.timing.maxUnmapMs, ($sample.unmapEnd - $sample.unmapBegin) * $scale)
         }
     }
 
-    function Run-RowMethodDiagnostic([bool]$initialState) {
-        $report.phase = 'row-method-calibration'
-        Select-Motion '轻动效'
-        Start-Sleep -Milliseconds 550
-        $methods = @{ 'system-memory-map'='--hosted-hover-map'; 'staging-copy'='--hosted-hover-staging' }
-        foreach ($method in @('system-memory-map', 'staging-copy', 'staging-copy', 'system-memory-map')) {
-            if ($button.Current.IsOffscreen -or $button.Current.BoundingRectangle -ne $geometry -or
-                $session.WindowIdentity().foregroundHandle -ne $session.Handle -or
-                [HostedMotionNotifications]::AnimationsEnabled() -ne $initialState) {
-                throw 'The paired calibration lost its owned target or unchanged OS motion setting.'
-            }
-            $trial = [ordered]@{ attempt=1+$report.rowMethodTrials.Count; requestedMethod=$method; status='started'; qualifies=$false }
-            $report.rowMethodTrials += $trial
-            try {
-                Read-CapturedTrial $trial $methods[$method] $report.points $true
-                if ($trial.rawDxgi.rowMethod -cne $method) { throw 'The native probe did not use the exact requested row method.' }
-                Measure-RowTiming $trial
-                $trial.qualifies = $trial.status -ceq 'observed' -and $trial.timing.afterTriggerCoalesced -eq 0
-            } catch {
-                $trial.status = 'inconclusive'
-                $trial.error = $_.Exception.GetBaseException().Message
-                if (@($trial.diagnostic | Where-Object { $_ -match 'foreground test window|owned cursor|pointer target is outside' }).Count) {
-                    throw 'The native guard stopped the calibration for loss of input or window ownership.'
-                }
-            }
-            Write-Report
-        }
-        $report.status = 'row-method-diagnostic-recorded'
-    }
-
-    function Run-Arm([string]$name,[bool]$expectedEnabled,[bool]$expectTransition) {
-        $report.phase = $name
-        $arm = [ordered]@{ name=$name; osAnimationsEnabled=$expectedEnabled; expectTransition=$expectTransition; trials=@() }
-        $report.arms += $arm
+    function Run-GpuQualification([bool]$expectedEnabled) {
+        $report.phase = 'one-warmed-staging-positive-hover'
         $verified = $report.motionChanges[-1]
         if (-not $verified.confirmed -or $verified.requested -ne $expectedEnabled -or
-            [HostedMotionNotifications]::AnimationsEnabled() -ne $expectedEnabled) {
-            throw 'The current OS state lacks verified broadcast evidence before this arm.'
+            [HostedMotionNotifications]::AnimationsEnabled() -ne $expectedEnabled -or
+            $button.Current.IsOffscreen -or $button.Current.BoundingRectangle -ne $geometry -or
+            $session.WindowIdentity().foregroundHandle -ne $session.Handle) {
+            throw 'The qualification lost its owned target or verified Windows motion setting.'
         }
-        $arm.osNotification = $verified.number
-        $points = $report.points
-        for ($attempt=1; $attempt -le $policy.trials; $attempt++) {
-            if ($button.Current.IsOffscreen -or $button.Current.BoundingRectangle -ne $geometry) {
-                throw 'The original navigation target moved or became unavailable.'
-            }
-            $trial = [ordered]@{ attempt=$attempt; status='started' }
-            $arm.trials += $trial
-            Read-CapturedTrial $trial '--hosted-hover' $points $expectTransition
-            Write-Report
-        }
-
-        if ([HostedMotionNotifications]::AnimationsEnabled() -ne $expectedEnabled) { throw 'OS setting changed during this arm.' }
-        $arm.pairedObservationPassed = ($arm.trials.Count -eq $policy.trials -and
-            @($arm.trials | Where-Object { $_.status -cne 'observed' }).Count -eq 0)
+        $criteria = $report.qualificationPolicy
+        $trial = [ordered]@{ attempt=1; status='started'; qualifies=$false; osNotification=$verified.number }
+        $report.trial = $trial
         Write-Report
+        Read-CapturedTrial $trial '--hosted-hover-warm-staging' $report.points $true
+        $raw = $trial.rawDxgi
+        if ($raw.rowMethod -cne 'staging-copy' -or $raw.sameDeviceOffscreenWarmupMs -le 0 -or
+            $raw.sameDeviceOffscreenWarmupMs -gt $criteria.maxWarmupMs) {
+            throw 'No valid offscreen warmup on the actual scored staging device and texture.'
+        }
+        Measure-RowTiming $trial
+        $scale = 1000.0 / [long]$raw.qpcFrequency
+        $previous = $raw.triggerBeginQpc
+        $trial.maxTriggerToEndpointPresentGapMs = 0.0
+        foreach ($frame in $raw.samples | Where-Object { $_.kind -ceq 'desktop' -and $_.present -ge $raw.triggerBeginQpc }) {
+            $trial.maxTriggerToEndpointPresentGapMs = [Math]::Max($trial.maxTriggerToEndpointPresentGapMs, ($frame.present - $previous) * $scale)
+            $previous = $frame.present
+            if ($frame.first -eq 3879984 -and $frame.second -eq 3879984) {
+                $trial.triggerToFirstVisibleEndpointMs = ($frame.present - $raw.triggerBeginQpc) * $scale
+                break
+            }
+        }
+        $trial.qualifies = $trial.status -ceq 'observed' -and $trial.timing.afterTriggerCoalesced -eq 0 -and
+            $trial.timing.maxPresentToCpuMs -le $criteria.maxPresentToCpuMs -and
+            $trial.maxTriggerToEndpointPresentGapMs -le $policy.maxGapMs -and
+            $trial.triggerToFirstVisibleEndpointMs -ge $criteria.minTriggerToEndpointMs -and
+            $trial.triggerToFirstVisibleEndpointMs -le $criteria.maxTriggerToEndpointMs -and
+            [HostedMotionNotifications]::AnimationsEnabled() -eq $expectedEnabled
+        if (-not $trial.qualifies) { throw 'The single warmed GPU observation did not meet the capture qualification.' }
+        $report.status = 'qualified-one-warmed-staging-observation'
     }
 
     $report.phase = 'preflight-motion-notification'
     $original = [HostedMotionNotifications]::AnimationsEnabled()
     $report.originalAnimationsEnabled = $original
-    if ($RowMethodDiagnostic) {
-        Run-RowMethodDiagnostic $original
-    } else {
-        $receiver = [HostedMotionNotifications]::new()
-        Select-Motion '轻动效'
-        Set-ObservedMotion (-not $original) 'preflight-opposite'
-        Set-ObservedMotion $original 'preflight-original'
-        Start-Sleep -Milliseconds 550
-        Run-Arm 'explicit-light-preflight' $original $true
-
-        $report.phase = 'system-enabled-notification'
-        Select-Motion '跟随系统（默认）'
-        if (-not $original) { Set-ObservedMotion $true 'system-enabled' }
-        Start-Sleep -Milliseconds 550
-        Run-Arm 'system-animations-enabled' $true $true
-        $report.phase = 'system-disabled-notification'
-        Set-ObservedMotion $false 'system-disabled'
-        Start-Sleep -Milliseconds 550
-        Run-Arm 'system-animations-disabled' $false $false
-        Select-Motion '轻动效'
-        Run-Arm 'explicit-light-with-os-disabled' $false $true
-        if ($report.arms.Count -eq 4 -and @($report.arms | Where-Object { -not $_.pairedObservationPassed }).Count -eq 0) {
-            $report.status = 'observed-visible-system-motion'
-        } else {
-            $report.error = 'At least one of the four conditions lacked three qualifying trials.'
-        }
-    }
+    $receiver = [HostedMotionNotifications]::new()
+    Select-Motion '轻动效'
+    Set-ObservedMotion (-not $original) 'preflight-opposite'
+    Set-ObservedMotion $original 'preflight-original'
+    Start-Sleep -Milliseconds 550
+    Run-GpuQualification $original
 } catch {
     $report.error = $_.Exception.GetBaseException().Message
 } finally {
@@ -477,18 +444,9 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
     $report.finishedAt = [DateTime]::UtcNow.ToString('o')
     Write-Report
 }
-$outcomes = @($report.arms | ForEach-Object {
-    [ordered]@{ name=$_.name; passed=$_.pairedObservationPassed
-        trials=@($_.trials | ForEach-Object { [ordered]@{status=$_.status; error=$_.error; batches=$_.postTriggerCoalescedSamples} }) }
-})
 $summary = [ordered]@{status=$report.status; phase=$report.phase; systemRestored=$report.systemRestored; closedNormally=$report.closedNormally
-    arms=$outcomes; setterFlags=$report.setterFlags; motionChanges=$report.motionChanges; candidateSha256=$ExpectedSha256; error=$report.error}
-if ($RowMethodDiagnostic) {
-    $summary.rowMethodTrials = @($report.rowMethodTrials | ForEach-Object {
-        [ordered]@{ method=$_.requestedMethod; status=$_.status; qualifies=$_.qualifies; timing=$_.timing
-            maxTransitionPresentGapMs=$_.maxTransitionPresentGapMs; intermediateColors=$_.intermediateColors; error=$_.error }
-    })
-}
+    candidateSha256=$ExpectedSha256; error=$report.error; trialStatus=$report.trial.status; trialError=$report.trial.error
+    qualifies=$report.trial.qualifies; diagnostic=$report.trial.diagnostic; timing=$report.trial.timing
+    maxTransitionPresentGapMs=$report.trial.maxTransitionPresentGapMs; triggerToEndpointMs=$report.trial.triggerToFirstVisibleEndpointMs}
 $summary | ConvertTo-Json -Depth 8 -Compress
-$expectedStatus = if ($RowMethodDiagnostic) { 'row-method-diagnostic-recorded' } else { 'observed-visible-system-motion' }
-if ($report.status -cne $expectedStatus) { exit 1 }
+if ($report.status -cne 'qualified-one-warmed-staging-observation') { exit 1 }

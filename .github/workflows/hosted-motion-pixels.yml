@@ -1,17 +1,18 @@
-name: Compare Windows motion frame read paths
+name: Qualify a warmed DXGI staging path on the hosted Windows console
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44862742843'
-  CANDIDATE_SOURCE: 2314ea88080a401be1acfa150d029f1a928b99aa
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_2314ea88080a401be1acfa150d029f1a928b99aa
-  CANDIDATE_ARTIFACT_ID: '14691310680'
-  CANDIDATE_SHA256: 'b95ad24619e1d00e8d100777739afd70323fb827e272b31ef549124bd0063e97'
+  CANDIDATE_RUN_ID: '44880393531'
+  CANDIDATE_SOURCE: 0ac5e79b7a3d1184e7602f241793f240b0609d44
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_0ac5e79b7a3d1184e7602f241793f240b0609d44
+  CANDIDATE_ARTIFACT_ID: '14698411078'
+  CANDIDATE_SHA256: 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24'
+  CANDIDATE_ARCHIVE_SHA256: '5ea596eb7d95de7df46bc1929c8694e56c8c5b72f7ded2915987aefa83ce152e'
 jobs:
   motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-row-method-2314ea8-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-dxgi-staging-0ac5e79-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:
@@ -66,7 +67,8 @@ jobs:
               $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
           $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
           $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
-          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID) { throw 'Incorrect Windows candidate artifact.' }
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID -or
+              $match[0].digest -cne "sha256:$env:CANDIDATE_ARCHIVE_SHA256") { throw 'Incorrect Windows candidate artifact.' }
           $target = Join-Path $env:RUNNER_TEMP 'arm-dxgi-candidate'
           gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $target
           if ($LASTEXITCODE -ne 0) { throw 'The pinned Windows artifact could not be read.' }
@@ -76,16 +78,16 @@ jobs:
               $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or
               $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
               $info.version -cne '0.3.0-dev.1') { throw 'Build information does not bind to the pinned executable.' }
-      - name: Compare mapped and staged rows on the same owned synthetic window
+      - name: Run one warmed staging qualification on the exact owned synthetic window
         timeout-minutes: 5
         run: |
           $candidate = Join-Path $env:RUNNER_TEMP 'arm-dxgi-candidate/agent-resource-manager.exe'
-          ./scripts/verify-hosted-motion-pixels.ps1 -Candidate $candidate -ExpectedSha256 $env:CANDIDATE_SHA256 -RowMethodDiagnostic
+          ./scripts/verify-hosted-motion-pixels.ps1 -Candidate $candidate -ExpectedSha256 $env:CANDIDATE_SHA256 -GpuQualification
       - name: Preserve only the native motion report
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_dxgi_motion_row_methods_${{ github.run_id }}_${{ github.run_attempt }}
+          name: Agent_Resource_Manager_dxgi_staging_qualification_${{ github.run_id }}_${{ github.run_attempt }}
           path: ${{ runner.temp }}/arm-motion-pixels-evidence/motion-pixels.json
           if-no-files-found: warn
           retention-days: 14
