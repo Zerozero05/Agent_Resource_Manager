@@ -16,6 +16,7 @@ $policy = [ordered]@{ trials=3; neutralSettleMs=250; beforeMs=95; afterMs=430; m
     minimumEndpointSamples=4; minimumRgbDistance=12; minimumIntermediateColors=2 }
 $report = [ordered]@{ candidateSha256=$ExpectedSha256; syntheticOnly=$true; status='incomplete'; phase='preflight'
     policy=$policy; arms=@(); attemptedSystemChange=$false; systemRestored=$false; closedNormally=$false
+    previousRun=[ordered]@{id='44854495440'; status='inconclusive'; reason='A two-update DXGI batch interrupted the first positive control under that run''s policy.'}
     capture='One DXGI duplication over each trial. No-update and pointer-only polls retain the last timestamped desktop row.'
     runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion
     scope='Native foreground hover pixels on one inactive sidebar control. No DOM or CSS readback and no display-DPI or whole-app animation claim.' }
@@ -24,7 +25,6 @@ Write-Report
 
 $session = $null
 $original = $null
-$pairedEndpoints = [ordered]@{ neutral=$null; hover=$null }
 try {
     $base = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
     if (-not (Test-Path -LiteralPath 'D:\' -PathType Container) -or (Test-Path -LiteralPath $base) -or
@@ -183,8 +183,8 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
             }
             $lastEnd = [long]$sample.end
             if ($sample.kind -ceq 'desktop') {
-                if ($sample.accumulated -ne 1 -or $sample.present -le $lastPresent -or $sample.present -gt $sample.end) {
-                    throw 'Desktop updates were lost, combined, or recorded out of order.'
+                if ($sample.accumulated -lt 1 -or $sample.present -le $lastPresent -or $sample.present -gt $sample.end) {
+                    throw 'The desktop update metadata is invalid or out of order.'
                 }
                 $lastPresent = [long]$sample.present
                 $first = [uint32]$sample.first
@@ -198,6 +198,7 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
                 EndMs = ($sample.end - $trigger) * 1000.0 / $frequency
                 PresentQpc = $lastPresent
                 Kind = $sample.kind
+                Accumulated = [int]$sample.accumulated
                 First = $first
                 Second = $second
             }
@@ -207,14 +208,103 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
             throw 'The trace did not cover the end of the observation window.'
         }
     }
+
+    function Score-DxgiTrial($trial, $points, [bool]$expectTransition) {
+        $raw = $trial.rawDxgi
+        $trace = @(Read-DxgiTrace $raw $points)
+        $trial.trace = $trace
+        $early = @($trace | Where-Object { $_.EndMs -le -3 })
+        $late = @($trace | Where-Object { $_.BeginMs -ge 290 })
+        if ($early.Count -lt $policy.minimumEndpointSamples -or $late.Count -lt $policy.minimumEndpointSamples) {
+            throw 'The capture clock did not cover both hover endpoints.'
+        }
+        $baseColor = [uint32]$early[0].First
+        $hoverColor = [uint32]$late[-1].First
+        $badReads = @($trace | Where-Object { $_.First -ne $_.Second -or ($_.EndMs - $_.BeginMs) -gt $policy.maxCaptureMs })
+        $badTimeline = @($trace | Where-Object {
+            $_.First -ne $baseColor -and ($_.BeginMs -lt 0 -or $_.PresentQpc -lt $raw.triggerBeginQpc)
+        })
+
+        $sampleGapMs = 0.0
+        for ($i=1; $i -lt $trace.Count; $i++) {
+            $sampleGapMs = [Math]::Max($sampleGapMs, $trace[$i].BeginMs - $trace[$i-1].EndMs)
+        }
+        $postTriggerFrames = @($trace | Where-Object {
+            $_.Kind -ceq 'desktop' -and $_.BeginMs -ge 0 -and $_.PresentQpc -ge $raw.triggerBeginQpc
+        })
+        $batches = @($trace | Where-Object { $_.Accumulated -gt 1 })
+        $batchesAfterTrigger = @($batches | Where-Object { $_.PresentQpc -ge $raw.triggerBeginQpc })
+        $mid = @($postTriggerFrames | Where-Object {
+            (Distance-Rgb $_.First $baseColor) -gt 1 -and (Distance-Rgb $_.First $hoverColor) -gt 1
+        })
+        $midColors = @($mid | ForEach-Object { $_.First } | Sort-Object -Unique)
+        $firstHover = $postTriggerFrames | Where-Object { $_.First -eq $hoverColor } | Select-Object -First 1
+        $backToNeutral = @($trace | Where-Object { $_.BeginMs -gt $firstHover.EndMs -and $_.First -eq $baseColor })
+        $unexpectedColors = @($mid | Where-Object { -not (Test-RgbPath $_.First $baseColor $hoverColor) })
+        $presentGapMs = 0.0
+        if ($mid.Count -gt 0 -and $firstHover) {
+            $moving = @($postTriggerFrames | Where-Object {
+                $_.PresentQpc -ge $mid[0].PresentQpc -and $_.PresentQpc -le $firstHover.PresentQpc
+            })
+            for ($i=1; $i -lt $moving.Count; $i++) {
+                $elapsed = ($moving[$i].PresentQpc - $moving[$i-1].PresentQpc) * 1000.0 / $raw.qpcFrequency
+                $presentGapMs = [Math]::Max($presentGapMs, $elapsed)
+            }
+        }
+
+        $trial.maxGapMs = $sampleGapMs
+        $trial.maxTransitionPresentGapMs = $presentGapMs
+        $trial.neutralColor = $baseColor
+        $trial.hoverColor = $hoverColor
+        $trial.intermediateColors = $midColors.Count
+        $trial.firstHoverSampleMs = $firstHover.EndMs
+        $trial.unexpectedColors = $unexpectedColors.Count
+        $trial.unexpectedTimelineSamples = $badTimeline.Count
+        $trial.coalescedSamples = $batches.Count
+        $trial.postTriggerCoalescedSamples = $batchesAfterTrigger.Count
+        $trial.additionalCoalescedUpdates = [int](($batches | ForEach-Object { $_.Accumulated - 1 } | Measure-Object -Sum).Sum)
+
+        $valid = $null -ne $firstHover -and $badReads.Count -eq 0 -and $badTimeline.Count -eq 0 -and
+            $sampleGapMs -le $policy.maxGapMs -and $presentGapMs -le $policy.maxGapMs -and
+            $baseColor -eq 1775639 -and $hoverColor -eq 3879984 -and
+            $backToNeutral.Count -eq 0 -and $unexpectedColors.Count -eq 0 -and
+            @(($early.First | Where-Object { $_ -ne $baseColor })).Count -eq 0 -and
+            @(($late.First | Where-Object { $_ -ne $hoverColor })).Count -eq 0 -and
+            (Distance-Rgb $baseColor $hoverColor) -ge $policy.minimumRgbDistance
+        $trial.valid = $valid
+        if (-not $valid) { throw 'Visible pixels were noisy, discontinuous, occluded or missing an endpoint.' }
+
+        if ($expectTransition) {
+            # Only actual post-trigger presents can establish visible positive motion.
+            $intermediateBeforeEndpoint = @($mid | Where-Object { $_.PresentQpc -lt $firstHover.PresentQpc } |
+                ForEach-Object { $_.First } | Sort-Object -Unique)
+            $trial.intermediateColorsBeforeEndpoint = $intermediateBeforeEndpoint.Count
+            if ($intermediateBeforeEndpoint.Count -lt $policy.minimumIntermediateColors) {
+                throw 'Positive hover control did not show two measurable intermediate colors before the endpoint.'
+            }
+        } else {
+            # The newest timestamp cannot establish where each constituent frame occurred.
+            if ($batchesAfterTrigger.Count) { throw 'Coalesced updates during the post-trigger window make absent motion inconclusive.' }
+            if ($firstHover.EndMs -gt $policy.latestReducedEndpointMs) {
+                throw 'The endpoint arrived too late to distinguish absent motion from a delayed visual read.'
+            }
+            if ($midColors.Count -ne 0) {
+                $trial.status = 'unexpected-visible-motion'
+                throw 'Intermediate visible pixels remained in the reduced-motion observation.'
+            }
+        }
+    }
+
     function Run-Arm([string]$name,[bool]$expectedEnabled,[bool]$expectTransition) {
         $report.phase = $name
         $arm = [ordered]@{ name=$name; osAnimationsEnabled=$expectedEnabled; expectTransition=$expectTransition; trials=@() }
         $report.arms += $arm
         if ([HostedMotionState]::AnimationsEnabled() -ne $expectedEnabled) { throw 'Unexpected OS setting before this arm.' }
-        if ($button.Current.IsOffscreen -or $button.Current.BoundingRectangle -ne $geometry) { throw 'The original navigation target moved or became unavailable.' }
         $points = $report.points
         for ($attempt=1; $attempt -le $policy.trials; $attempt++) {
+            if ($button.Current.IsOffscreen -or $button.Current.BoundingRectangle -ne $geometry) {
+                throw 'The original navigation target moved or became unavailable.'
+            }
             $trial = [ordered]@{ attempt=$attempt; status='started' }
             $arm.trials += $trial
             $probeArguments = @($session.Pid, $session.CreationFileTime, $session.Handle,
@@ -227,58 +317,20 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
                 throw 'The native DXGI hover probe stopped before it could provide a valid trace.'
             }
             $trial.rawDxgi = $raw[0] | ConvertFrom-Json
-            $trace = @(Read-DxgiTrace $trial.rawDxgi $points)
-            $trial.trace = $trace
-            $early = @($trace | Where-Object { $_.EndMs -le -3 })
-            $late = @($trace | Where-Object { $_.BeginMs -ge 290 })
-            if ($early.Count -lt $policy.minimumEndpointSamples -or $late.Count -lt $policy.minimumEndpointSamples) {
-                $trial.status = 'insufficient-timing'
-                throw 'The capture clock did not cover both hover endpoints.'
+            try {
+                Score-DxgiTrial $trial $points $expectTransition
+                $trial.status = 'observed'
+            } catch {
+                if ($trial.status -ceq 'started') { $trial.status = 'inconclusive' }
+                $trial.error = $_.Exception.GetBaseException().Message
             }
-            $baseColor=[uint32]$early[0].First
-            $hoverColor=[uint32]$late[-1].First
-            $badReads=@($trace | Where-Object { $_.First -ne $_.Second -or ($_.EndMs - $_.BeginMs) -gt $policy.maxCaptureMs })
-            $badTimeline = @($trace | Where-Object {
-                $_.First -ne $baseColor -and ($_.BeginMs -lt 0 -or $_.PresentQpc -lt $trial.rawDxgi.triggerBeginQpc)
-            })
-            $maxGap=0.0
-            for ($i=1; $i -lt $trace.Count; $i++) { $maxGap=[Math]::Max($maxGap,$trace[$i].BeginMs-$trace[$i-1].EndMs) }
-            $mid = @($trace | Where-Object { $_.Kind -ceq 'desktop' -and $_.PresentQpc -ge $trial.rawDxgi.triggerBeginQpc -and $_.BeginMs -ge 0 -and (Distance-Rgb $_.First $baseColor) -gt 1 -and (Distance-Rgb $_.First $hoverColor) -gt 1 })
-            $midColors = @($mid | ForEach-Object { $_.First } | Sort-Object -Unique)
-            $firstHover = $trace | Where-Object { $_.BeginMs -ge 0 -and $_.PresentQpc -ge $trial.rawDxgi.triggerBeginQpc -and $_.First -eq $hoverColor } | Select-Object -First 1
-            $backToNeutral = @($trace | Where-Object { $_.BeginMs -gt $firstHover.EndMs -and $_.First -eq $baseColor })
-            $unexpectedColors = @($mid | Where-Object { -not (Test-RgbPath $_.First $baseColor $hoverColor) })
-            if ($null -eq $pairedEndpoints.neutral) {
-                $pairedEndpoints.neutral = $baseColor
-                $pairedEndpoints.hover = $hoverColor
-            }
-            $valid = $null -ne $firstHover -and $badReads.Count -eq 0 -and $badTimeline.Count -eq 0 -and $maxGap -le $policy.maxGapMs -and
-                $baseColor -eq 1775639 -and $hoverColor -eq 3879984 -and
-                $backToNeutral.Count -eq 0 -and $unexpectedColors.Count -eq 0 -and
-                $baseColor -eq $pairedEndpoints.neutral -and $hoverColor -eq $pairedEndpoints.hover -and
-                @(($early.First | Where-Object { $_ -ne $baseColor })).Count -eq 0 -and
-                @(($late.First | Where-Object { $_ -ne $hoverColor })).Count -eq 0 -and
-                (Distance-Rgb $baseColor $hoverColor) -ge $policy.minimumRgbDistance
-            $trial.valid = $valid
-            $trial.maxGapMs = $maxGap
-            $trial.neutralColor = $baseColor
-            $trial.hoverColor = $hoverColor
-            $trial.intermediateColors = $midColors.Count
-            $trial.firstHoverSampleMs = $firstHover.EndMs
-            $trial.unexpectedColors = $unexpectedColors.Count
-            $trial.unexpectedTimelineSamples = $badTimeline.Count
-            $trial.status = 'scored'
             Write-Report
-            if (-not $valid) { throw 'Visible pixels were noisy, discontinuous, occluded or missing an endpoint. This arm is inconclusive.' }
-            if ($expectTransition -and $midColors.Count -lt $policy.minimumIntermediateColors) { throw 'Positive hover control did not show two measurable intermediate colors.' }
-            if (-not $expectTransition) {
-                if ($firstHover.EndMs -gt $policy.latestReducedEndpointMs) { throw 'The endpoint arrived too late to distinguish absent motion from a delayed visual read.' }
-                if ($midColors.Count -ne 0) { throw 'Intermediate visible pixels remained in the reduced-motion observation.' }
-            }
         }
 
         if ([HostedMotionState]::AnimationsEnabled() -ne $expectedEnabled) { throw 'OS setting changed during this arm.' }
-        $arm.pairedObservationPassed = $true
+        $arm.pairedObservationPassed = ($arm.trials.Count -eq $policy.trials -and
+            @($arm.trials | Where-Object { $_.status -cne 'observed' }).Count -eq 0)
+        Write-Report
     }
 
     $original = [HostedMotionState]::AnimationsEnabled()
@@ -296,7 +348,11 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
     Run-Arm 'system-animations-disabled' $false $false
     Select-Motion '轻动效'
     Run-Arm 'explicit-light-with-os-disabled' $false $true
-    $report.status = 'observed-visible-system-motion'
+    if ($report.arms.Count -eq 4 -and @($report.arms | Where-Object { -not $_.pairedObservationPassed }).Count -eq 0) {
+        $report.status = 'observed-visible-system-motion'
+    } else {
+        $report.error = 'At least one of the four conditions lacked three qualifying trials.'
+    }
 } catch {
     $report.error = $_.Exception.GetBaseException().Message
 } finally {
@@ -319,6 +375,10 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
     $report.finishedAt = [DateTime]::UtcNow.ToString('o')
     Write-Report
 }
-[ordered]@{status=$report.status; phase=$report.phase; systemRestored=$report.systemRestored; closedNormally=$report.closedNormally;
+$outcomes = @($report.arms | ForEach-Object {
+    [ordered]@{ name=$_.name; passed=$_.pairedObservationPassed
+        trials=@($_.trials | ForEach-Object { [ordered]@{status=$_.status; error=$_.error; batches=$_.postTriggerCoalescedSamples} }) }
+})
+[ordered]@{status=$report.status; phase=$report.phase; systemRestored=$report.systemRestored; closedNormally=$report.closedNormally; arms=$outcomes;
     candidateSha256=$ExpectedSha256; motionControlBeforeSelection=$report.motionControlBeforeSelection; error=$report.error} | ConvertTo-Json -Compress
 if ($report.status -cne 'observed-visible-system-motion') { exit 1 }

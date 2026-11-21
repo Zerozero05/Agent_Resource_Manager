@@ -11,7 +11,7 @@ env:
   CANDIDATE_SHA256: '090dc7a9e4298b0153baee53c2f2f8329a2dc1a95708b4a9cfbf840e2d46ab91'
 jobs:
   motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-dxgi-motion-65b14b9' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-dxgi-motion-r2-65b14b9' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:
