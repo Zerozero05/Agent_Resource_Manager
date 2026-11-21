@@ -3,6 +3,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <d3d11.h>
+#include <dwmapi.h>
 #include <roapi.h>
 #include <windows.foundation.h>
 #include <windows.graphics.capture.h>
@@ -18,6 +19,7 @@
 #include <memory>
 
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "runtimeobject.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -34,7 +36,7 @@ using Microsoft::WRL::ComPtr;
 using Microsoft::WRL::Wrappers::HStringReference;
 
 constexpr wchar_t windowClass[] = L"ArmWgcSingleOwnedFixture";
-constexpr wchar_t branch[] = L"codex/hosted-wgc-capability-20261121";
+constexpr wchar_t branch[] = L"codex/hosted-wgc-style-ab-20261121";
 constexpr int width = 320;
 constexpr int height = 180;
 constexpr UINT row = 90;
@@ -42,11 +44,13 @@ constexpr UINT leftX = 80;
 constexpr UINT rightX = 240;
 constexpr double readBudgetMs = 15.0;
 constexpr double frameBudgetMs = 32.0;
+constexpr int frameBuffers = 4;
 using Rgb = std::array<std::uint8_t, 3>;
 using Colors = std::array<Rgb, 2>;
 constexpr Colors initial{{Rgb{218, 43, 95}, Rgb{38, 161, 71}}};
 constexpr Colors changed{{Rgb{25, 106, 224}, Rgb{238, 166, 29}}};
 Colors paintColors{};
+unsigned painted{};
 
 struct Failure { const char* stage; HRESULT hr; };
 void require(bool test, const char* stage) {
@@ -122,16 +126,18 @@ LRESULT CALLBACK paintWindow(HWND hwnd, UINT message, WPARAM first, LPARAM secon
     if (message != WM_PAINT) return DefWindowProcW(hwnd, message, first, second);
     PAINTSTRUCT paint{};
     const HDC device = BeginPaint(hwnd, &paint);
+    bool drewBoth = device != nullptr;
     for (LONG index = 0; index < 2; ++index) {
         const RECT half{index * width / 2, 0, (index + 1) * width / 2, height};
         const auto color = paintColors[static_cast<std::size_t>(index)];
         const HBRUSH brush = CreateSolidBrush(RGB(color[0], color[1], color[2]));
         if (brush) {
-            FillRect(device, &half, brush);
+            if (!FillRect(device, &half, brush)) drewBoth = false;
             DeleteObject(brush);
-        }
+        } else drewBoth = false;
     }
     EndPaint(hwnd, &paint);
+    if (drewBoth) ++painted;
     return 0;
 }
 
@@ -223,6 +229,141 @@ void printSample(const Sample& sample) {
         static_cast<unsigned>(sample.pixels[1][1]), static_cast<unsigned>(sample.pixels[1][2]),
         static_cast<long long>(sample.compositor100ns), sample.readMs, sample.frameToCpuMs);
 }
+
+struct Case {
+    const char* name;
+    DWORD requestedExStyle;
+    HWND hwnd{}, root{}, owner{};
+    DWORD ownerPid{}, style{}, exStyle{}, cloak{}, affinity{};
+    BOOL visible{}, minimized{}, affinityRead{};
+    RECT client{}, extendedFrame{};
+    bool createAttempted{}, compositionReady{}, capturePassed{};
+    unsigned paintCount{};
+    HRESULT cloakHr{E_PENDING}, frameHr{E_PENDING}, flushHr{E_PENDING}, beforeTimingHr{E_PENDING}, afterTimingHr{E_PENDING}, createHr{E_PENDING};
+    DWM_TIMING_INFO beforeTiming{}, afterTiming{};
+    Sample first{}, second{}, last{};
+    Failure failure{};
+};
+
+void inspectOwnedWindow(Case& result) {
+    result.root = GetAncestor(result.hwnd, GA_ROOT);
+    result.owner = GetWindow(result.hwnd, GW_OWNER);
+    result.style = static_cast<DWORD>(GetWindowLongPtrW(result.hwnd, GWL_STYLE));
+    result.exStyle = static_cast<DWORD>(GetWindowLongPtrW(result.hwnd, GWL_EXSTYLE));
+    result.visible = IsWindowVisible(result.hwnd);
+    result.minimized = IsIconic(result.hwnd);
+    result.cloakHr = DwmGetWindowAttribute(result.hwnd, DWMWA_CLOAKED, &result.cloak, sizeof(result.cloak));
+    result.frameHr = DwmGetWindowAttribute(result.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &result.extendedFrame, sizeof(result.extendedFrame));
+    result.affinityRead = GetWindowDisplayAffinity(result.hwnd, &result.affinity);
+    require(GetWindowThreadProcessId(result.hwnd, &result.ownerPid) != 0 && result.ownerPid == GetCurrentProcessId() &&
+        result.root == result.hwnd && !result.owner, "exact-unowned-root-window");
+    require(result.visible && !result.minimized && result.exStyle == result.requestedExStyle, "expected-visible-window-style");
+    require(GetClientRect(result.hwnd, &result.client) && result.client.right == width &&
+        result.client.bottom == height, "exact-fixture-client");
+}
+
+void waitForOwnComposition(Case& result) {
+    result.beforeTiming.cbSize = sizeof(result.beforeTiming);
+    result.afterTiming.cbSize = sizeof(result.afterTiming);
+    result.beforeTimingHr = DwmGetCompositionTimingInfo(nullptr, &result.beforeTiming);
+    check(result.beforeTimingHr, "dwm-timing-before-show");
+    ShowWindow(result.hwnd, SW_SHOWNOACTIVATE);
+    UpdateWindow(result.hwnd);
+    const auto deadline = GetTickCount64() + 600;
+    do {
+        pump();
+        result.flushHr = DwmFlush();
+        check(result.flushHr, "dwm-flush-after-own-paint");
+        result.afterTimingHr = DwmGetCompositionTimingInfo(nullptr, &result.afterTiming);
+        check(result.afterTimingHr, "dwm-timing-after-show");
+        result.paintCount = painted;
+        if (painted > 0 && result.afterTiming.cFrame > result.beforeTiming.cFrame) break;
+        if (GetTickCount64() < deadline) Sleep(5);
+    } while (GetTickCount64() < deadline);
+    inspectOwnedWindow(result);
+    result.compositionReady = result.paintCount > 0 && result.afterTiming.cFrame > result.beforeTiming.cFrame &&
+        SUCCEEDED(result.cloakHr) && result.cloak == 0 && SUCCEEDED(result.frameHr) &&
+        result.extendedFrame.right > result.extendedFrame.left && result.extendedFrame.bottom > result.extendedFrame.top &&
+        (!result.affinityRead || result.affinity == WDA_NONE);
+    require(result.compositionReady, "own-paint-and-live-dwm-cycle");
+}
+
+Case runCase(const char* name, DWORD exStyle, HINSTANCE instance, IGraphicsCaptureItemInterop* itemFactory,
+    IDirect3D11CaptureFramePoolStatics2* poolFactory, IDirect3DDevice* winrtDevice,
+    ID3D11DeviceContext* context, ID3D11Texture2D* staging, std::int64_t frequency) {
+    Case result{name, exStyle};
+    paintColors = Colors{};
+    painted = 0;
+    lastSample = Sample{};
+    try {
+        const Window window{CreateWindowExW(exStyle, windowClass, L"ARM WGC synthetic colors",
+            WS_POPUP, 50, 50, width, height, nullptr, nullptr, instance, nullptr)};
+        require(window.hwnd != nullptr, "create-synthetic-window");
+        result.hwnd = window.hwnd;
+        waitForOwnComposition(result);
+        ComPtr<IGraphicsCaptureItem> item;
+        result.createAttempted = true;
+        result.createHr = itemFactory->CreateForWindow(window.hwnd, IID_PPV_ARGS(&item));
+        check(result.createHr, "capture-own-window");
+        require(item != nullptr, "non-null-capture-item");
+        SizeInt32 size{};
+        check(item->get_Size(&size), "item-size");
+        require(size.Width == width && size.Height == height, "exact-fixture-item-size");
+        ComPtr<IDirect3D11CaptureFramePool> pool;
+        check(poolFactory->CreateFreeThreaded(winrtDevice, DirectXPixelFormat_B8G8R8A8UIntNormalized, frameBuffers, size, &pool), "create-frame-pool");
+        CloseWinRt closePool(pool);
+        ComPtr<IGraphicsCaptureSession> capture;
+        check(pool->CreateCaptureSession(item.Get(), &capture), "create-capture-session");
+        CloseWinRt closeCapture(capture);
+        FrameNotification frameNotification(pool.Get());
+        ComPtr<IGraphicsCaptureSession2> cursor;
+        if (SUCCEEDED(capture.As(&cursor))) check(cursor->put_IsCursorCaptureEnabled(false), "exclude-cursor-from-capture");
+        check(capture->StartCapture(), "start-owned-window-capture");
+        paintColors = initial;
+        RedrawWindow(window.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        result.first = expectFrame(pool.Get(), frameNotification.signal->handle, context, staging, frequency, initial, 0);
+        paintColors = changed;
+        RedrawWindow(window.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        result.second = expectFrame(pool.Get(), frameNotification.signal->handle, context, staging, frequency, changed, result.first.compositor100ns);
+        frameNotification.detach();
+        closeCapture.close();
+        closePool.close();
+        result.capturePassed = true;
+    } catch (const Failure& failure) {
+        result.failure = failure;
+    }
+    result.last = lastSample;
+    return result;
+}
+
+void printCase(const Case& result) {
+    std::printf("{\"name\":\"%s\",\"requestedExStyle\":%lu,\"actualExStyle\":%lu,\"style\":%lu,"
+        "\"hwnd\":%llu,\"root\":%llu,\"owner\":%llu,\"ownerPid\":%lu,\"visible\":%s,\"minimized\":%s,"
+        "\"client\":[%ld,%ld],\"extendedFrame\":[%ld,%ld,%ld,%ld],\"cloak\":%lu,\"cloakHr\":\"0x%08lx\","
+        "\"frameHr\":\"0x%08lx\",\"affinityRead\":%s,\"affinity\":%lu,\"paintCount\":%u,"
+        "\"dwmFrameBefore\":%llu,\"dwmFrameAfter\":%llu,\"dwmFlushHr\":\"0x%08lx\","
+        "\"dwmBeforeHr\":\"0x%08lx\",\"dwmAfterHr\":\"0x%08lx\",\"compositionReady\":%s,"
+        "\"createAttempted\":%s,\"createForWindowHr\":\"0x%08lx\",\"capturePassed\":%s",
+        result.name, result.requestedExStyle, result.exStyle, result.style,
+        reinterpret_cast<unsigned long long>(result.hwnd), reinterpret_cast<unsigned long long>(result.root),
+        reinterpret_cast<unsigned long long>(result.owner), result.ownerPid,
+        result.visible ? "true" : "false", result.minimized ? "true" : "false",
+        result.client.right, result.client.bottom, result.extendedFrame.left, result.extendedFrame.top,
+        result.extendedFrame.right, result.extendedFrame.bottom, result.cloak, static_cast<unsigned long>(result.cloakHr),
+        static_cast<unsigned long>(result.frameHr), result.affinityRead ? "true" : "false", result.affinity, result.paintCount,
+        result.beforeTiming.cFrame, result.afterTiming.cFrame, static_cast<unsigned long>(result.flushHr),
+        static_cast<unsigned long>(result.beforeTimingHr), static_cast<unsigned long>(result.afterTimingHr),
+        result.compositionReady ? "true" : "false", result.createAttempted ? "true" : "false",
+        static_cast<unsigned long>(result.createHr), result.capturePassed ? "true" : "false");
+    std::printf(",\"samples\":[");
+    if (result.first.compositor100ns > 0) printSample(result.first);
+    if (result.second.compositor100ns > 0) { std::printf(","); printSample(result.second); }
+    std::printf("]");
+    if (result.failure.stage) std::printf(",\"failedStage\":\"%s\",\"failureHr\":\"0x%08lx\"",
+        result.failure.stage, static_cast<unsigned long>(result.failure.hr));
+    if (!result.capturePassed && result.last.compositor100ns > 0) { std::printf(",\"lastSample\":"); printSample(result.last); }
+    std::printf("}");
+}
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -258,30 +399,8 @@ int wmain(int argc, wchar_t** argv) {
         klass.lpfnWndProc = paintWindow;
         klass.lpszClassName = windowClass;
         require(RegisterClassW(&klass) != 0, "register-synthetic-window-class");
-        const Window window{CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, windowClass, L"ARM WGC synthetic colors",
-            WS_POPUP, 50, 50, width, height, nullptr, nullptr, instance, nullptr)};
-        require(window.hwnd != nullptr, "create-synthetic-window");
-        DWORD owner{};
-        require(GetWindowThreadProcessId(window.hwnd, &owner) != 0 && owner == GetCurrentProcessId(), "exact-window-owner");
-        ShowWindow(window.hwnd, SW_SHOWNOACTIVATE);
-        UpdateWindow(window.hwnd);
-        require(IsWindowVisible(window.hwnd) != FALSE, "synthetic-window-visibility");
         const auto itemFactory = factory<IGraphicsCaptureItemInterop>(RuntimeClass_Windows_Graphics_Capture_GraphicsCaptureItem);
-        ComPtr<IGraphicsCaptureItem> item;
-        check(itemFactory->CreateForWindow(window.hwnd, IID_PPV_ARGS(&item)), "capture-own-window");
-        SizeInt32 size{};
-        check(item->get_Size(&size), "item-size");
-        require(size.Width == width && size.Height == height, "exact-fixture-item-size");
         const auto poolFactory = factory<IDirect3D11CaptureFramePoolStatics2>(RuntimeClass_Windows_Graphics_Capture_Direct3D11CaptureFramePool);
-        ComPtr<IDirect3D11CaptureFramePool> pool;
-        check(poolFactory->CreateFreeThreaded(winrtDevice.Get(), DirectXPixelFormat_B8G8R8A8UIntNormalized, 2, size, &pool), "create-frame-pool");
-        CloseWinRt closePool(pool);
-        ComPtr<IGraphicsCaptureSession> capture;
-        check(pool->CreateCaptureSession(item.Get(), &capture), "create-capture-session");
-        CloseWinRt closeCapture(capture);
-        FrameNotification frameNotification(pool.Get());
-        ComPtr<IGraphicsCaptureSession2> cursor;
-        if (SUCCEEDED(capture.As(&cursor))) check(cursor->put_IsCursorCaptureEnabled(false), "exclude-cursor-from-capture");
         D3D11_TEXTURE2D_DESC buffer{};
         buffer.Width = rightX - leftX + 1;
         buffer.Height = 1;
@@ -291,24 +410,22 @@ int wmain(int argc, wchar_t** argv) {
         buffer.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         ComPtr<ID3D11Texture2D> staging;
         check(device->CreateTexture2D(&buffer, nullptr, &staging), "one-row-readback-allocation");
-        check(capture->StartCapture(), "start-owned-window-capture");
-        paintColors = initial;
-        RedrawWindow(window.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
-        const auto first = expectFrame(pool.Get(), frameNotification.signal->handle, context.Get(), staging.Get(), frequency.QuadPart, initial, 0);
-        paintColors = changed;
-        RedrawWindow(window.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
-        const auto second = expectFrame(pool.Get(), frameNotification.signal->handle, context.Get(), staging.Get(), frequency.QuadPart, changed, first.compositor100ns);
-        frameNotification.detach();
-        closeCapture.close();
-        closePool.close();
-        std::printf("{\"status\":\"wgc-owned-window-capability\",\"syntheticOnly\":true,"
-            "\"windowOwnerPid\":%lu,\"defaultCaptureBorder\":true,\"row\":90,\"columns\":[80,240],"
-            "\"readBudgetMs\":15,\"frameToCpuBudgetMs\":32,\"samples\":[", static_cast<unsigned long>(owner));
-        printSample(first);
+        const auto tool = runCase("tool-noactivate", WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, instance,
+            itemFactory.Get(), poolFactory.Get(), winrtDevice.Get(), context.Get(), staging.Get(), frequency.QuadPart);
+        const auto plain = runCase("plain", 0, instance, itemFactory.Get(), poolFactory.Get(), winrtDevice.Get(),
+            context.Get(), staging.Get(), frequency.QuadPart);
+        const bool comparable = tool.createAttempted && plain.createAttempted;
+        const bool capability = comparable && (tool.capturePassed || plain.capturePassed);
+        std::printf("{\"status\":\"%s\",\"syntheticOnly\":true,\"windowClass\":\"ArmWgcSingleOwnedFixture\","
+            "\"currentPid\":%lu,\"defaultCaptureBorder\":true,\"frameBuffersPerCase\":%d,\"row\":90,\"columns\":[80,240],"
+            "\"readBudgetMs\":15,\"frameToCpuBudgetMs\":32,\"comparable\":%s,\"cases\":[",
+            capability ? "wgc-style-ab-qualified" : "wgc-style-ab-no-qualified-capture", GetCurrentProcessId(),
+            frameBuffers, comparable ? "true" : "false");
+        printCase(tool);
         std::printf(",");
-        printSample(second);
+        printCase(plain);
         std::printf("]}\n");
-        return 0;
+        return capability ? 0 : 1;
     } catch (const Failure& failure) {
         std::printf("{\"status\":\"wgc-unavailable-or-failed\",\"stage\":\"%s\",\"hresult\":\"0x%08lx\"",
             failure.stage, static_cast<unsigned long>(failure.hr));

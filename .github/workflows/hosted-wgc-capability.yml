@@ -1,22 +1,22 @@
-name: Probe Windows Graphics Capture on one owned synthetic window
+name: Compare extended styles on two owned synthetic WGC windows
 on: create
 permissions:
   contents: read
 jobs:
   capability:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-wgc-capability-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-wgc-style-ab-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build with the existing SDK and capture two compositor frames of the owned window
+      - name: Compare the two owned windows with the existing SDK
         shell: pwsh
         timeout-minutes: 2
         run: |
           $ErrorActionPreference = 'Stop'
-          $report = Join-Path $env:RUNNER_TEMP 'wgc-window-capability.json'
+          $report = Join-Path $env:RUNNER_TEMP 'wgc-window-style-ab.json'
           $stage = 'verify-hosted-session'
           try {
             if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
@@ -50,21 +50,44 @@ jobs:
             $result | Add-Member sdkVersion $env:WindowsSDKVersion
             $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $report -Encoding utf8NoBOM
             $stage = 'verify-receipt'
-            if ($nativeExit -ne 0 -or $result.status -cne 'wgc-owned-window-capability' -or $result.syntheticOnly -ne $true -or
-                $result.defaultCaptureBorder -ne $true -or $result.samples.Count -ne 2 -or
-                $result.readBudgetMs -ne 15 -or $result.frameToCpuBudgetMs -ne 32 -or
-                $result.samples[0].systemRelativeTime100ns -le 0 -or
-                $result.samples[1].systemRelativeTime100ns -le $result.samples[0].systemRelativeTime100ns) {
-              throw 'Capture receipt did not establish two ordered compositor frames and normal exit.'
+            if ($result.syntheticOnly -ne $true -or $result.defaultCaptureBorder -ne $true -or $result.cases.Count -ne 2 -or
+                $result.frameBuffersPerCase -ne 4 -or $result.readBudgetMs -ne 15 -or $result.frameToCpuBudgetMs -ne 32 -or
+                $result.comparable -ne $true) {
+              throw 'The two owned HWNDs were not compared under common composition and timing prerequisites.'
             }
-            $expected = @('218,43,95,38,161,71', '25,106,224,238,166,29')
-            for ($i = 0; $i -lt 2; $i++) {
-              $sample = $result.samples[$i]
-              $rgb = @($sample.pixels | ForEach-Object { $_ -join ',' }) -join ','
-              if ($rgb -cne $expected[$i] -or $sample.readMs -lt 0 -or $sample.readMs -gt 15 -or
-                  $sample.frameToCpuMs -lt 0 -or $sample.frameToCpuMs -gt 32) {
-                throw 'One of the two expected pairs or timing budgets failed.'
+            $expectedNames = @('tool-noactivate', 'plain')
+            $expectedStyles = @(0x08000080, 0)
+            $expectedColors = @('218,43,95,38,161,71', '25,106,224,238,166,29')
+            $passed = 0
+            for ($variant = 0; $variant -lt 2; $variant++) {
+              $case = $result.cases[$variant]
+              if ($case.name -cne $expectedNames[$variant] -or $case.requestedExStyle -ne $expectedStyles[$variant] -or
+                  $case.actualExStyle -ne $expectedStyles[$variant] -or $case.style -ne $result.cases[0].style -or
+                  !$case.hwnd -or $case.root -ne $case.hwnd -or $case.owner -ne 0 -or $case.ownerPid -ne $result.currentPid -or
+                  $case.visible -ne $true -or $case.minimized -ne $false -or
+                  $case.compositionReady -ne $true -or $case.paintCount -lt 1 -or $case.cloak -ne 0 -or
+                  $case.dwmFrameAfter -le $case.dwmFrameBefore -or $case.createAttempted -ne $true -or
+                  $case.createForWindowHr -cnotmatch '^0x[0-9a-f]{8}$') {
+                throw "Window or DWM prerequisites are invalid for $($case.name)."
               }
+              if (!$case.capturePassed) { continue }
+              $passed++
+              if ($case.createForWindowHr -cne '0x00000000' -or $case.samples.Count -ne 2 -or
+                  $case.samples[0].systemRelativeTime100ns -le 0 -or
+                  $case.samples[1].systemRelativeTime100ns -le $case.samples[0].systemRelativeTime100ns) {
+                throw "Qualified capture for $($case.name) is missing two ordered compositor timestamps."
+              }
+              for ($i = 0; $i -lt 2; $i++) {
+                $sample = $case.samples[$i]
+                $rgb = @($sample.pixels | ForEach-Object { $_ -join ',' }) -join ','
+                if ($rgb -cne $expectedColors[$i] -or $sample.readMs -lt 0 -or $sample.readMs -gt 15 -or
+                    $sample.frameToCpuMs -lt 0 -or $sample.frameToCpuMs -gt 32) {
+                  throw "Pixel or timing budget failed for $($case.name)."
+                }
+              }
+            }
+            if ($nativeExit -ne 0 -or $result.status -cne 'wgc-style-ab-qualified' -or $passed -lt 1) {
+              throw 'The A/B HRESULTs were recorded, but neither window delivered qualified pixels within both timing budgets.'
             }
           } catch {
             if (!(Test-Path -LiteralPath $report -PathType Leaf)) {
@@ -77,7 +100,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Agent_Resource_Manager_wgc_window_capability_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/wgc-window-capability.json
+          name: Agent_Resource_Manager_wgc_window_style_ab_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/wgc-window-style-ab.json
           if-no-files-found: error
           retention-days: 14
