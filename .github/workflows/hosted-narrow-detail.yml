@@ -13,7 +13,7 @@ env:
   CANDIDATE_BUILD_INFO_SHA256: '9d3f26aca7d0aa4ba30c83147838acfa4b86cbb596886ec33e30b3c157756abe'
 jobs:
   compact:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-narrow-detail-2d19488-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-narrow-detail-2d19488-v2-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 12
     defaults:
