@@ -127,6 +127,10 @@ function matchesLibrary(options: LibraryQuery) {
     return terms.every(term => searchable.includes(term));
   };
 }
+export function filterLibraryDomain<T extends LibraryItem>(items: readonly T[], { query, sourceFilter, categoryFilter }: Pick<LibraryQuery, 'query' | 'sourceFilter' | 'categoryFilter'>): readonly T[] {
+  if (!query?.trim() && (!sourceFilter || sourceFilter === 'all') && (!categoryFilter || categoryFilter === 'all')) return items;
+  return items.filter(matchesLibrary({ query, sourceFilter, categoryFilter }));
+}
 export function queryLibrary<T extends LibraryItem>(items: readonly T[], options: LibraryQuery = {}): T[] {
   return items.filter(matchesLibrary(options)).sort((a, b) => {
     if (options.sort === 'status') {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { queryLibrary, paginateLibrary, needsAttention, libraryCounts, githubFolderUrl, displayStatus, statusExplanation, comparisonScope, selectionForDrag, rangeSelection, libraryStatusOptions, statusFilterLabel, LIBRARY_STATUS_GROUPS, type LibraryItem } from '../src/library.ts';
+import { filterLibraryDomain, queryLibrary, paginateLibrary, needsAttention, libraryCounts, githubFolderUrl, displayStatus, statusExplanation, comparisonScope, selectionForDrag, rangeSelection, libraryStatusOptions, statusFilterLabel, LIBRARY_STATUS_GROUPS, type LibraryItem } from '../src/library.ts';
 import { libraryMode, cardNavigationIndex } from '../src/library.ts';
 
 test('cards preference reads are compatible and actual grid columns govern keyboard navigation', () => {
@@ -231,6 +231,29 @@ test('dynamic status counts use category, source and search before the selected 
   assert.deepEqual(options.map(option => [option.value,option.count]),[['all',2],['attention',1],['synced',1],['changed',1],['review',0]]);
   assert.equal(queryLibrary(items,{categoryFilter:'research',sourceFilter:'linked',query:'paper',statusFilter:'review'}).length,0);
   assert.deepEqual(items,before);
+});
+
+test('library rows and facets share one search pass and pick up edited notes', () => {
+  let reads = 0;
+  const items = [
+    { id: 'changed', name: 'Paper 2', status: 'local_modified', categoryId: 'research', sourceId: 'repo', localPath: 'D:/two',
+      get notes() { reads++; return 'PDF 中文'; } },
+    { id: 'same', name: 'Paper 10', status: 'synced', categoryId: 'research', sourceId: 'repo', localPath: 'D:/ten',
+      get notes() { reads++; return 'PDF 中文'; } },
+    { id: 'other', name: 'Paper 1', status: 'synced', categoryId: 'tools', localPath: 'D:/one',
+      get notes() { reads++; return 'PDF 中文'; } },
+  ];
+  const filters = { categoryFilter: 'research', sourceFilter: 'linked', query: 'ＰＤＦ 中文' } as const;
+  const domain = filterLibraryDomain(items, filters);
+  assert.deepEqual(queryLibrary(domain, { sort: 'name' }).map(item => item.id), ['changed', 'same']);
+  assert.deepEqual(queryLibrary(domain, { statusFilter: 'review' }), []);
+  assert.deepEqual(libraryStatusOptions(domain, { statusFilter: 'review' }).map(option => [option.value, option.count]),
+    [['all', 2], ['attention', 1], ['synced', 1], ['changed', 1], ['review', 0]]);
+  assert.equal(filterLibraryDomain(items, { query: '　 ' }), items);
+  assert.equal(reads, 2);
+  const revisedItems = [{ ...items[0], notes: 'TeX 新内容' }, items[1], items[2]];
+  assert.deepEqual(filterLibraryDomain(revisedItems, filters).map(item => item.id), ['same']);
+  assert.deepEqual(filterLibraryDomain(revisedItems, { ...filters, query: 'ＴＥＸ 新内容' }).map(item => item.id), ['changed']);
 });
 
 test('zero-result selections remain visible without permanently offering unavailable statuses', () => {

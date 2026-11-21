@@ -6,7 +6,7 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import type { Components } from 'react-markdown';
 import packageInfo from '../package.json';
-import { comparisonScope, displayStatus, githubFolderUrl, libraryCounts, libraryStatusOptions, statusFilterLabel, needsAttention, paginateLibrary, queryLibrary, rangeSelection, selectionForDrag, statusExplanation, type LibraryStatusFilter } from './library';
+import { comparisonScope, displayStatus, filterLibraryDomain, githubFolderUrl, libraryCounts, libraryStatusOptions, statusFilterLabel, needsAttention, paginateLibrary, queryLibrary, rangeSelection, selectionForDrag, statusExplanation, type LibraryStatusFilter } from './library';
 import { usePreferenceQueue, type LayoutPreferences } from './usePreferenceQueue';
 import { libraryMode as normalizeLibraryMode, type LibraryMode } from './library';
 import { LibraryCards } from './LibraryCards';
@@ -841,10 +841,11 @@ export default function SessionApp() {
   const librarySkills = isHome ? displaySkills : EMPTY.skills;
   const categoryTotal = categoryFilter === 'all' ? librarySkills.length : librarySkills.filter(skill => categoryFilter === 'favorites' ? skill.favorite : categoryFilter === 'uncategorized' ? !skill.categoryId : skill.categoryId === categoryFilter).length;
   const libraryQueryKey = JSON.stringify([query, filter, statusFilter, librarySort, libraryPageSize, categoryFilter, readingRefresh]);
-  const candidates = useMemo(() => queryLibrary(librarySkills, { query, sourceFilter: filter, statusFilter, sort: librarySort, categoryFilter }), [librarySkills, query, filter, statusFilter, librarySort, categoryFilter]);
+  const matchingDomain = useMemo(() => filterLibraryDomain(librarySkills, { query, sourceFilter: filter, categoryFilter }), [librarySkills, query, filter, categoryFilter]);
+  const candidates = useMemo(() => queryLibrary(matchingDomain, { statusFilter, sort: librarySort }), [matchingDomain, statusFilter, librarySort]);
   const statusOptions = useMemo(() => isHome && view === 'skills'
-    ? libraryStatusOptions(librarySkills, { categoryFilter, sourceFilter: filter, query, statusFilter }) : [],
-  [isHome, view, librarySkills, categoryFilter, filter, query, statusFilter]);
+    ? libraryStatusOptions(matchingDomain, { statusFilter }) : [],
+  [isHome, view, matchingDomain, statusFilter]);
   const reading = useMemo(() => reconcileLibraryReading(readingRef.current, librarySkills.map(skill => skill.id), candidates.map(skill => skill.id), libraryQueryKey), [librarySkills, candidates, libraryQueryKey]);
   useLayoutEffect(() => { if (isHome && ready) readingRef.current = reading; }, [isHome, ready, reading]);
   const matching = useMemo(() => {
