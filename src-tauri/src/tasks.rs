@@ -7526,26 +7526,39 @@ mod tests {
     #[test]
     fn task_lists_and_events_do_not_repeat_large_scheduling_keys() {
         let (_dir, service) = fixture();
-        let keys: Vec<_> = (0..2002)
-            .map(|index| format!("directory:D:/generated-native-retention/resources/skills/long-resource-name-{index:04}"))
-            .collect();
+        let request = json!({"action":"check_now"});
+        let keys = {
+            let mut manager = service.manager.lock().unwrap();
+            manager.state.skills = (0..1000)
+                .map(|index| {
+                    json!({
+                        "id": format!("skill-{index:04}"),
+                        "localPath": format!("D:/generated-native-retention/resources/skills/long-resource-name-{index:04}")
+                    })
+                })
+                .collect();
+            manager.save().unwrap();
+            let keys: Vec<_> = resources_for(&manager, &request)
+                .unwrap()
+                .into_iter()
+                .map(|resource| resource.key)
+                .collect();
+            assert_eq!(keys.len(), 2002);
+            json!(keys)
+        };
         let captured = Arc::new(Mutex::new(Vec::new()));
         let listener = captured.clone();
         service.set_events(Arc::new(move |event| listener.lock().unwrap().push(event)));
         let mut ids = Vec::new();
         for _ in 0..100 {
-            let id = start(&service, json!({"action":"read_file","skillId":"one"}));
-            service.wait(&id).unwrap();
-            service
-                .jobs
-                .lock()
-                .unwrap()
-                .get_mut(&id)
-                .unwrap()
-                .task
-                .resources = keys.clone().into();
-            service.emit(&id);
-            ids.push(id);
+            let task = service
+                .start(request.clone(), None, None, true, true, |_, _| {
+                    Ok(Value::Null)
+                })
+                .unwrap();
+            let id = task["id"].as_str().unwrap();
+            service.wait(id).unwrap();
+            ids.push(id.to_owned());
         }
         service.persist_history().unwrap();
         let listed = service.list().unwrap();
@@ -7558,12 +7571,12 @@ mod tests {
             .iter()
             .all(|event| event["task"].get("resources").is_none()));
         for id in ids {
-            assert_eq!(service.get(&id, true).unwrap()["resources"], json!(keys));
+            assert_eq!(service.get(&id, true).unwrap()["resources"], keys);
         }
         let stored = service.manager.lock().unwrap().task_history().unwrap();
         assert_eq!(stored.len(), 100);
         assert!(serde_json::to_vec(&stored).unwrap().len() > 8 * 1024 * 1024);
-        assert!(stored.iter().all(|task| task["resources"] == json!(keys)));
+        assert!(stored.iter().all(|task| task["resources"] == keys));
     }
 
     #[test]
