@@ -1,0 +1,160 @@
+name: Diagnose hosted physical workspace navigation memory
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  CANDIDATE_RUN_ID: '44862742843'
+  CANDIDATE_SOURCE: 2314ea88080a401be1acfa150d029f1a928b99aa
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_2314ea88080a401be1acfa150d029f1a928b99aa
+  CANDIDATE_ARTIFACT_ID: '14691310680'
+  CANDIDATE_SHA256: 'b95ad24619e1d00e8d100777739afd70323fb827e272b31ef549124bd0063e97'
+  FIRST_SEARCH_RUN_ID: '44864093902'
+  FIRST_SEARCH_HEAD: 7afeb8841d90ba055577fbb3590b094835707a1f
+  FIRST_SEARCH_ARTIFACT_ID: '14690948651'
+  FIRST_SEARCH_ARCHIVE_SHA256: 6b7eb5545e51813d7569b7b99f51bbf5ca6491adc887f5b6c06b08f4258d1ce4
+  FIRST_SEARCH_REPORT_SHA256: d461a7ce3a1bcb3ed38c4846e99fda4831a2599104712a3c3f77e9ac9bc45ccf
+jobs:
+  paired:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-physical-memory-2314ea8-20261121' }}
+    runs-on: windows-latest
+    timeout-minutes: 16
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify hosted runner and exact candidate provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:FIRST_SEARCH_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or
+              $env:FIRST_SEARCH_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:FIRST_SEARCH_REPORT_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Pin the independently reviewed positive first-search archive and raw receipt before measuring.'
+          }
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no existing manager in the isolated runner.' }
+          $searchRun = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:FIRST_SEARCH_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $searchRun.head_sha -cne $env:FIRST_SEARCH_HEAD -or
+              $searchRun.run_attempt -ne 1 -or $searchRun.event -cne 'create' -or
+              $searchRun.path -cne '.github/workflows/hosted-visual-references.yml' -or
+              $searchRun.status -cne 'completed' -or $searchRun.conclusion -cne 'success') {
+            throw 'The exact first-search acceptance is incomplete or failed.'
+          }
+          $searchArtifact = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:FIRST_SEARCH_ARTIFACT_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $searchArtifact.id -ne $env:FIRST_SEARCH_ARTIFACT_ID -or
+              $searchArtifact.name -cne "Agent_Resource_Manager_first_search_$($env:FIRST_SEARCH_RUN_ID)_1" -or $searchArtifact.expired -or
+              $searchArtifact.workflow_run.id -ne $env:FIRST_SEARCH_RUN_ID -or $searchArtifact.workflow_run.head_sha -cne $env:FIRST_SEARCH_HEAD -or
+              $searchArtifact.digest -cne "sha256:$env:FIRST_SEARCH_ARCHIVE_SHA256") {
+            throw 'The independently checked first-search archive does not match the pinned completed run.'
+          }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
+              $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push' -or
+              $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+          $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID -or
+              $match[0].digest -cne 'sha256:29a2e45b2298726702b3e6048093adcdda3591d8130cad868fe81c6beb906ba7') { throw 'The exact Windows candidate artifact is missing.' }
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+          & pwsh.exe -NoProfile -NonInteractive -File './scripts/native-visual-input.ps1' -CompileOnly
+          if ($LASTEXITCODE -ne 0) { throw 'Visual helper did not pass its compile-only checks.' }
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }
+          $exe = Join-Path $candidate 'agent-resource-manager.exe'
+          $source = Join-Path $candidate 'BUILD_INFO.json'
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:CANDIDATE_SHA256 -or $info.executableSha256 -cne $digest -or
+              $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or
+              $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
+              $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the pinned executable.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+          Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
+      - name: Measure the same physical document actions with and without separate UIA observation
+        timeout-minutes: 14
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          $exe = Join-Path $candidate 'agent-resource-manager.exe'
+          $build = Join-Path $candidate 'BUILD_INFO.native-validation.json'
+          $report = Join-Path $env:RUNNER_TEMP 'arm-physical-memory.json'
+          $approved = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          if (Test-Path -LiteralPath $approved) { throw 'Expected a fresh synthetic diagnostic root.' }
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class HostedReferenceDesktop {
+              [StructLayout(LayoutKind.Sequential)]
+              struct Rect { public int left, top, right, bottom; }
+              [DllImport("user32.dll")]
+              static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
+              [DllImport("user32.dll")]
+              static extern int GetSystemMetrics(int value);
+              [DllImport("user32.dll")]
+              static extern uint GetDpiForSystem();
+              [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", ExactSpelling = true)]
+              static extern bool SystemParametersInfo(uint action, uint parameter, out Rect area, uint update);
+              public static object Read() {
+                  IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+                  if (previous == IntPtr.Zero) throw new InvalidOperationException("Desktop DPI context is unavailable.");
+                  try {
+                      Rect area;
+                      // SPI_GETWORKAREA reads the usable desktop without changing display settings.
+                      if (!SystemParametersInfo(0x30, 0, out area, 0)) throw new InvalidOperationException("Desktop work area is unavailable.");
+                      return new {
+                          monitors=GetSystemMetrics(80), left=GetSystemMetrics(76), top=GetSystemMetrics(77),
+                          width=GetSystemMetrics(78), height=GetSystemMetrics(79), dpi=GetDpiForSystem(),
+                          workArea=new { left=area.left, top=area.top, right=area.right, bottom=area.bottom }
+                      };
+                  } finally {
+                      if (SetThreadDpiAwarenessContext(previous) == IntPtr.Zero) throw new InvalidOperationException("Desktop DPI context could not be restored.");
+                  }
+              }
+          }
+          '@
+          $desktop = [HostedReferenceDesktop]::Read()
+          $desktop | ConvertTo-Json -Depth 3 -Compress
+          if ($desktop.monitors -ne 1 -or $desktop.dpi -ne 96) {
+            throw 'The verified single-monitor 96 DPI hosted desktop is required. No manager was launched.'
+          }
+          $left = [Math]::Max($desktop.left, $desktop.workArea.left)
+          $top = [Math]::Max($desktop.top, $desktop.workArea.top)
+          $right = [Math]::Min(($desktop.left + $desktop.width), $desktop.workArea.right)
+          $bottom = [Math]::Min(($desktop.top + $desktop.height), $desktop.workArea.bottom)
+          $referenceFrame = [ordered]@{left=60; top=60; width=960; height=650; dpi=96}
+          if ($referenceFrame.left -lt $left -or $referenceFrame.top -lt $top -or
+              ($referenceFrame.left + $referenceFrame.width) -gt $right -or
+              ($referenceFrame.top + $referenceFrame.height) -gt $bottom) {
+            throw 'The exact frame from first-search acceptance does not fit this hosted desktop. No manager was launched.'
+          }
+          $frame = $referenceFrame | ConvertTo-Json -Compress
+          & node './scripts/verify-hosted-physical-memory.mjs' $exe $build $env:CANDIDATE_SHA256 $env:CANDIDATE_ARTIFACT_ID $frame $report
+          if ($LASTEXITCODE -ne 0) { throw 'The matched physical diagnostic failed. Inspect the partial receipt.' }
+      - name: Preserve a diagnostic preflight receipt if measuring never started
+        if: ${{ failure() }}
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'arm-physical-memory.json'
+          if (-not (Test-Path -LiteralPath $report -PathType Leaf)) {
+            @{status='failed-or-blocked'; stage='before-receipt'; candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$env:CANDIDATE_SHA256} |
+              ConvertTo-Json -Compress | Set-Content -LiteralPath $report -Encoding utf8NoBOM
+          }
+      - name: Upload the synthetic numeric diagnostic receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Agent_Resource_Manager_physical_memory_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-physical-memory.json
+          if-no-files-found: error
+          retention-days: 14

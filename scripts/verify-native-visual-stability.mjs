@@ -208,8 +208,8 @@ export class VisualSession {
         child.stderr.on('data', chunk => { this.error = (this.error + chunk).slice(-2000); });
         child.once('error', error => this.readyReject(error));
     }
-    static async attach(identity, descriptor, environment, frame) {
-        const spec = Buffer.from(JSON.stringify({ pid: identity.pid, creationFileTime: identity.creationFileTime, executable, root: descriptor.root,
+    static async attach(identity, descriptor, environment, frame, applicationPath = executable) {
+        const spec = Buffer.from(JSON.stringify({ pid: identity.pid, creationFileTime: identity.creationFileTime, executable: applicationPath, root: descriptor.root,
             ...(frame ? { frame: [frame.left, frame.top, frame.width, frame.height] } : {}) })).toString('base64');
         const child = spawn('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', helper, '-Spec', spec], { env: environment, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
         const session = new VisualSession(child), deadline = setTimeout(() => { session.readyReject(new Error('Visual driver readiness exceeded thirty seconds.')); child.stdin.end(); }, 30000);
