@@ -1,0 +1,110 @@
+name: Verify current Windows themes and compact layout
+on: create
+permissions:
+  contents: read
+  actions: read
+jobs:
+  frame:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-native-frame-3536ca0-20261121' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CANDIDATE_RUN_ID: '44866595695'
+      CANDIDATE_SOURCE: 3536ca0e5cf7c897b860b5ce32d8b415904b9e45
+      CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_3536ca0e5cf7c897b860b5ce32d8b415904b9e45
+      EXPECTED_EXECUTABLE_SHA256: aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify runner and exact production candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'The isolated runner already has a manager process.' }
+          Add-Type -AssemblyName System.Windows.Forms
+          $screen = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+          [pscustomobject]@{ phase='native-frame-environment'; width=$screen.Width; height=$screen.Height
+            sessionId=[Diagnostics.Process]::GetCurrentProcess().SessionId; pwsh=$PSVersionTable.PSVersion.ToString()
+            node=(& node --version); operatingSystem=[Environment]::OSVersion.VersionString } | ConvertTo-Json -Compress
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+          $run = & gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.conclusion -cne 'success' -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1) { throw 'The exact candidate run was not the expected successful attempt.' }
+          $index = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/14692802883" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $index.name -cne $env:CANDIDATE_ARTIFACT -or $index.workflow_run.id -ne 44866595695 -or
+              $index.expired -or $index.digest -cne 'sha256:6b8afaf8ca811c866b1ecb46ae778bf1fc1c8c715e176b32101d5a3f0f2ab2a6') {
+            throw 'The input artifact must be the independently verified exact candidate.'
+          }
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-frame-candidate'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'The pinned candidate archive could not be retrieved.' }
+          $exe = Join-Path $candidate 'agent-resource-manager.exe'
+          $source = Join-Path $candidate 'BUILD_INFO.json'
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:EXPECTED_EXECUTABLE_SHA256 -or
+              $info.executableSha256 -cne $env:EXPECTED_EXECUTABLE_SHA256 -or $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or
+              $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or $info.workflowRunAttempt -ne 1 -or
+              $info.repository -cne $env:GITHUB_REPOSITORY -or $info.version -cne '0.3.0-dev.1') { throw 'Candidate metadata did not bind to the verified executable.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+      - name: Exercise native window layout and preserve evidence
+        run: |
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-frame-candidate'
+          $prepared = & node scripts/verify-native-frame.mjs --phase prepare --densities comfortable,compact
+          if ($LASTEXITCODE -ne 0) { throw 'Isolated frame data preparation failed.' }
+          $descriptor = ($prepared | ConvertFrom-Json).fixture
+          $fixtureRoot = Split-Path -Parent $descriptor
+          $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-native-frame-evidence')
+          $exit = 1
+          try {
+            & node scripts/verify-native-frame.mjs --phase run --fixture $descriptor --candidate (Join-Path $candidate 'agent-resource-manager.exe') --candidate-build-info (Join-Path $candidate 'BUILD_INFO.native-validation.json') --accessibility-input
+            $exit = $LASTEXITCODE
+          } finally {
+            foreach ($file in @('frame-result.json','frame-events.jsonl')) {
+              $source = Join-Path $fixtureRoot $file
+              if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $evidence.FullName }
+            }
+            $result = Join-Path $evidence.FullName 'frame-result.json'
+            if (Test-Path -LiteralPath $result -PathType Leaf) {
+              $report = Get-Content -LiteralPath $result -Raw | ConvertFrom-Json
+              $images = 0
+              foreach ($case in $report.cases) {
+                $dir = Join-Path $fixtureRoot $case.name
+                $driver = Join-Path $dir 'native-driver.json'
+                if (Test-Path -LiteralPath $driver -PathType Leaf) {
+                  Copy-Item -LiteralPath $driver -Destination (Join-Path $evidence.FullName "$($case.name)-native-driver.json")
+                }
+                foreach ($capture in $case.screenshots) {
+                  if ((Get-FileHash -LiteralPath $capture.path -Algorithm SHA256).Hash -ine $capture.sha256) { throw 'An owned-window capture differs from its recorded digest.' }
+                  $images++
+                  if ((Split-Path -Leaf $capture.path) -in @('wide.png','narrow-flyout.png','appearance-rows.png','unified-bottom.png')) {
+                    Copy-Item -LiteralPath $capture.path -Destination (Join-Path $evidence.FullName "$($case.name)-$(Split-Path -Leaf $capture.path)")
+                  }
+                }
+              }
+              [pscustomobject]@{ phase='native-frame-outcome'; status=$report.status; exe=$report.candidate.sha256
+                cases=@($report.cases | ForEach-Object { @{ name=$_.name; theme=$_.configuredTheme; density=$_.density; zoom=$_.configuredZoom
+                  cycles=$_.cycles.Count; screenshots=$_.screenshots.Count; normalExit=$_.closedNormally; preferences=$_.displayPreferencesRetained } })
+                captureHashesVerified=$images; error=$report.error; reportSha256=(Get-FileHash -LiteralPath $result -Algorithm SHA256).Hash.ToLowerInvariant() } | ConvertTo-Json -Depth 8 -Compress
+              if ($exit -eq 0 -and ($report.status -cne 'passed-synthetic-native-frame' -or $report.cases.Count -ne 8 -or $images -ne 88)) { throw 'A successful report did not contain the complete frame matrix.' }
+            } elseif ($exit -eq 0) { throw 'The frame run did not produce a report.' }
+          }
+          if ($exit -ne 0) { exit $exit }
+      - name: Upload native interface evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Agent_Resource_Manager_native_frame_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-native-frame-evidence/
+          if-no-files-found: warn
+          retention-days: 14
