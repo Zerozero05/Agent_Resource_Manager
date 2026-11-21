@@ -9,8 +9,9 @@ body{min-width:0}
 .session-document{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0;overflow:hidden}
 .session-document .skill-detail{display:block;min-height:0;max-height:none;overflow:visible;border:0;border-radius:0;background:transparent}
 .session-document .detail-content{overflow:visible;max-height:none;padding:16px 0 0;min-height:0}
-.session-document .detail-header{padding:0 0 14px}
+.session-document .detail-header{padding:14px 0 0}
 .session-document .detail-tabs{position:sticky;top:-18px;z-index:2;background:var(--surface);border-bottom:1px solid var(--line)}
+.session-document .detail-management:not([hidden]){margin-bottom:16px}
 .session-document .workspace-pane-toolbar>strong{font-size:.875rem;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0}
 .session-document .workspace-pane-toolbar>.button{white-space:nowrap;padding:4px 8px;font-size:.8125rem}
 .workflow-page{min-width:0;max-width:1280px;margin:0 auto;display:flex;flex-direction:column;gap:18px}

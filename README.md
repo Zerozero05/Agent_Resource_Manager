@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| Skill 详情首屏导航（开发中） | 2026-11-21 | 1、说明、文件和来源页签置顶，别名、依赖和空间明细集中到“来源与连接”。[详情](CHANGELOG.md#skill-detail-first-screen-20261121) |
 | 说明目录的动效设置（开发中） | 2026-11-21 | 1、说明目录的定位高亮遵循全局动效选择。[详情](CHANGELOG.md#outline-highlight-motion-20261121) |
 | 小窗口搜索结果可见性（开发候选） | 2026-11-21 | 1、直接输入搜索词时让视口下方的首条结果进入视野，并保留输入焦点。[详情](CHANGELOG.md#reveal-skill-search-result-20261121) |
 | 技能库状态与任务结果（开发候选） | 2026-11-21 | 1、减少状态下拉框的重复排序和计数。[详情](CHANGELOG.md#library-status-and-task-results-20261121)<br>2、普通任务直接使用最新库状态字段，省去重复复制。[详情](CHANGELOG.md#library-status-and-task-results-20261121) |
