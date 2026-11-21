@@ -79,4 +79,3 @@
 @media(max-width:1000px){.workspace-tab{min-width:92px;max-width:210px}.workspace-tab-select{max-width:180px}}
 @container workspace-pane (max-width:600px){.workspace-pane-scroll{padding:14px 14px 24px}.workspace-pane-header{padding:7px 10px;gap:12px}.workspace-pane-toolbar{gap:10px}.pane-outline-toggle{gap:3px;padding-left:6px;padding-right:6px}.pane-outline-list{padding-left:5px;padding-right:5px}.pane-outline-list button{padding-top:7px;padding-bottom:7px}}
 @container workspace-pane (max-width:400px){.workspace-pane-toolbar{grid-template-columns:minmax(0,1fr)}.workspace-pane-toolbar>.button{grid-row:2;justify-self:start;padding-left:0}.workspace-pane-header{align-items:start}.pane-outline-toggle{align-self:start}}
-@media(prefers-reduced-motion:reduce){.pane-anchor-highlight{transition:none}}
