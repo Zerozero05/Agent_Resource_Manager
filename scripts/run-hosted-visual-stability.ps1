@@ -10,10 +10,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$candidateSource = '3536ca0e5cf7c897b860b5ce32d8b415904b9e45'
-$candidateRun = '44866595695'
-$candidateArtifact = '14692802883'
-$candidateSha256 = 'aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7'
+$candidateSource = '0ac5e79b7a3d1184e7602f241793f240b0609d44'
+$candidateRun = '44880393531'
+$candidateArtifact = '14698411078'
+$candidateSha256 = 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24'
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:GITHUB_REPOSITORY -ine 'Zerozero05/Agent_Resource_Manager' -or -not [Environment]::UserInteractive -or
     [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
