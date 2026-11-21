@@ -1,4 +1,4 @@
-name: Prepare hosted visual references for afdcc14 (r2)
+name: Prepare hosted visual references for afdcc14 (r3)
 on: create
 permissions:
   contents: read
@@ -11,7 +11,7 @@ env:
   CANDIDATE_SHA256: '2a4b27faf9b2aed958760dc30d5f4ad980b8f62a9e3be6e38d321382f8d89db3'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-afdcc14-r2-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-afdcc14-r3-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
@@ -71,15 +71,71 @@ jobs:
           $infoDigest = (Get-FileHash -LiteralPath $buildInfo -Algorithm SHA256).Hash.ToLowerInvariant()
           $approved = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
           $failure = Join-Path $env:RUNNER_TEMP 'arm-visual-reference-failure.json'
-          $stage = 'bind-verified-inputs'
+          $stage = 'validate-hosted-desktop'
+          $desktop = $null
+          $referenceFrame = $null
           $referenceError = $null
           try {
+            Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class HostedReferenceDesktop {
+              [StructLayout(LayoutKind.Sequential)]
+              struct Rect { public int left, top, right, bottom; }
+              [DllImport("user32.dll")]
+              static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
+              [DllImport("user32.dll")]
+              static extern int GetSystemMetrics(int value);
+              [DllImport("user32.dll")]
+              static extern uint GetDpiForSystem();
+              [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", ExactSpelling = true)]
+              static extern bool SystemParametersInfo(uint action, uint parameter, out Rect area, uint update);
+              public static object Read() {
+                  IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+                  if (previous == IntPtr.Zero) throw new InvalidOperationException("Desktop DPI context is unavailable.");
+                  try {
+                      Rect area;
+                      // SPI_GETWORKAREA reads the usable desktop without changing display settings.
+                      if (!SystemParametersInfo(0x30, 0, out area, 0)) throw new InvalidOperationException("Desktop work area is unavailable.");
+                      return new {
+                          monitors=GetSystemMetrics(80), left=GetSystemMetrics(76), top=GetSystemMetrics(77),
+                          width=GetSystemMetrics(78), height=GetSystemMetrics(79), dpi=GetDpiForSystem(),
+                          workArea=new { left=area.left, top=area.top, right=area.right, bottom=area.bottom }
+                      };
+                  } finally {
+                      if (SetThreadDpiAwarenessContext(previous) == IntPtr.Zero) throw new InvalidOperationException("Desktop DPI context could not be restored.");
+                  }
+              }
+          }
+          '@
+            $desktop = [HostedReferenceDesktop]::Read()
+            $desktop | ConvertTo-Json -Depth 3 -Compress
+            if ($desktop.monitors -ne 1 -or $desktop.dpi -le 0) {
+              throw 'One hosted monitor with a readable DPI is required. No manager was launched.'
+            }
+            $left = [Math]::Max($desktop.left, $desktop.workArea.left)
+            $top = [Math]::Max($desktop.top, $desktop.workArea.top)
+            $right = [Math]::Min(($desktop.left + $desktop.width), $desktop.workArea.right)
+            $bottom = [Math]::Min(($desktop.top + $desktop.height), $desktop.workArea.bottom)
+            $width = [int][Math]::Ceiling(960 * $desktop.dpi / 96)
+            $height = [int][Math]::Ceiling(650 * $desktop.dpi / 96)
+            if ($width -gt ($right - $left) -or $height -gt ($bottom - $top)) {
+              throw 'The compact reference window does not fit the hosted desktop work area. No manager was launched.'
+            }
+            $referenceFrame = [ordered]@{
+              left=[Math]::Min(($left + 60), ($right - $width))
+              top=[Math]::Min(($top + 60), ($bottom - $height))
+              width=$width
+              height=$height
+              dpi=[int]$desktop.dpi
+            }
+            $stage = 'bind-verified-inputs'
             if (Test-Path -LiteralPath $approved) { throw 'Expected a fresh synthetic visual reference root.' }
             [IO.Directory]::CreateDirectory($approved) | Out-Null
             if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:CANDIDATE_SHA256) {
               throw 'The verified executable changed before reference generation.'
             }
-            # Freeze the existing script with only its local-candidate constants rebound.
+            # Bind the verified local candidate and compact hosted geometry before preparing the fixture.
             $module = (Resolve-Path -LiteralPath 'scripts/verify-native-visual-stability.mjs').Path
             $entries = [ordered]@{
               executable = $exe
@@ -87,6 +143,7 @@ jobs:
               candidateSha256 = $env:CANDIDATE_SHA256
               buildInfoSha256 = $infoDigest
               transportSha256 = $env:CANDIDATE_SHA256
+              hostedReferenceFrame = $referenceFrame
             }
             $text = [IO.File]::ReadAllText($module)
             foreach ($key in $entries.Keys) {
@@ -133,6 +190,9 @@ jobs:
                 $driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or $driver.closedNormally -ne $true -or $driver.dataDirectory -ine $descriptor.dataset.dataDir) {
               throw 'The reference receipt does not bind to a completed synthetic session and graceful exit.'
             }
+            foreach ($field in $referenceFrame.Keys) {
+              if ($refs.frame.$field -ne $referenceFrame[$field]) { throw 'The captured reference frame differs from the hosted preflight.' }
+            }
             $sheets = @($refs.reviewSheets)
             $roiCount = @($refs.states.PSObject.Properties.Value | ForEach-Object { $_.rois }).Count
             if ($sheets.Count -ne 9 -or $roiCount -ne 210) { throw 'Expected exactly nine montage sheets from 210 synthetic crops.' }
@@ -159,6 +219,8 @@ jobs:
               referenceSha256 = (Get-FileHash -LiteralPath $referencePath -Algorithm SHA256).Hash.ToLowerInvariant()
               descriptorSha256 = (Get-FileHash -LiteralPath $descriptorPath -Algorithm SHA256).Hash.ToLowerInvariant()
               driverSha256 = (Get-FileHash -LiteralPath $driverPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              desktop = $desktop
+              referenceFrame = $referenceFrame
               referenceCount = 72
               roiCount = $roiCount
               sheets = $sheets.Count
@@ -166,11 +228,12 @@ jobs:
               visualReviewCompleted = $false
               pilotRun = $false
             }
-            $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'receipt.json') -Encoding utf8NoBOM
-            $receipt | ConvertTo-Json -Compress
+            $receipt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $output 'receipt.json') -Encoding utf8NoBOM
+            $receipt | ConvertTo-Json -Depth 5 -Compress
           } catch {
             [ordered]@{status='reference-preflight-failed'; stage=$stage; candidateSource=$env:CANDIDATE_SOURCE;
-              candidateSha256=$env:CANDIDATE_SHA256; message=$_.Exception.Message; referenceError=$referenceError} |
+              candidateSha256=$env:CANDIDATE_SHA256; message=$_.Exception.Message; referenceError=$referenceError;
+              desktop=$desktop; referenceFrame=$referenceFrame} |
               ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $failure -Encoding utf8NoBOM
             throw
           }
