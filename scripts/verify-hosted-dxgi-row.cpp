@@ -8,6 +8,21 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 
+#ifdef ARM_WGC_MOTION
+#include <dwmapi.h>
+#include <roapi.h>
+#include <windows.foundation.h>
+#include <windows.graphics.capture.h>
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
+#include <wrl/implements.h>
+#include <wrl/wrappers/corewrappers.h>
+#include <atomic>
+#include <memory>
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "runtimeobject.lib")
+#endif
+
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -28,9 +43,9 @@ using Microsoft::WRL::ComPtr;
 namespace {
 constexpr double CaptureLimitMs = 15.0;
 
-struct Error { const char* operation; HRESULT result; };
+struct CaptureError { const char* operation; HRESULT result; };
 void Check(HRESULT result, const char* operation) {
-    if (FAILED(result)) throw Error{operation, result};
+    if (FAILED(result)) throw CaptureError{operation, result};
 }
 int64_t Counter() {
     LARGE_INTEGER value{};
@@ -48,7 +63,7 @@ double DeltaMs(int64_t start, int64_t end, int64_t frequency) {
 }
 
 bool EnvEquals(const wchar_t* name, const wchar_t* expected) {
-    wchar_t value[64]{};
+    wchar_t value[128]{};
     const auto read = GetEnvironmentVariableW(name, value, static_cast<DWORD>(std::size(value)));
     return read > 0 && read < std::size(value) && std::wcscmp(value, expected) == 0;
 }
@@ -151,6 +166,7 @@ struct OwnedWindow {
     }
 };
 
+#ifndef ARM_WGC_MOTION
 struct Output {
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<IDXGIOutput1> output;
@@ -182,12 +198,16 @@ Output FindOutput(HMONITOR monitor) {
     throw std::runtime_error("no attached DXGI output contains both exact points");
 }
 
+#endif
+
 struct Device {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
-    explicit Device(IDXGIAdapter1* adapter) {
-        Check(D3D11CreateDevice(adapter, adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_WARP,
-              nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context),
+    explicit Device(IDXGIAdapter1* adapter, bool hardware = false) {
+        const auto driver = adapter ? D3D_DRIVER_TYPE_UNKNOWN :
+            (hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP);
+        Check(D3D11CreateDevice(adapter, driver, nullptr, hardware ? D3D11_CREATE_DEVICE_BGRA_SUPPORT : 0,
+              nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context),
               "D3D11CreateDevice");
     }
 };
@@ -250,6 +270,7 @@ int RunSynthetic() {
     return 0;
 }
 
+#ifndef ARM_WGC_MOTION
 struct Frame {
     IDXGIOutputDuplication* duplication;
     ~Frame() { if (duplication) duplication->ReleaseFrame(); }
@@ -259,6 +280,7 @@ struct Frame {
         Check(open->ReleaseFrame(), "ReleaseFrame");
     }
 };
+#endif
 
 class IdleFrameWait {
     HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
@@ -282,7 +304,11 @@ public:
 
 enum class SampleKind { Desktop, Unchanged, PointerOnly };
 const char* Name(SampleKind kind) {
+#ifdef ARM_WGC_MOTION
+    if (kind == SampleKind::Desktop) return "window";
+#else
     if (kind == SampleKind::Desktop) return "desktop";
+#endif
     return kind == SampleKind::Unchanged ? "no-update" : "pointer-only";
 }
 
@@ -290,10 +316,15 @@ struct Sample {
     SampleKind kind{};
     int64_t begin{}, end{}, present{};
     int64_t acquireReturned{}, rowRead{}, released{};
+#ifdef ARM_WGC_MOTION
+    int64_t compositor100ns{};
+#else
     UINT accumulated{};
+#endif
     Pixels pixels{};
 };
 
+#ifndef ARM_WGC_MOTION
 Output FindOwnedOutput(const OwnedWindow& target) {
     target.Verify();
     const auto monitor = MonitorFromPoint(target.first, MONITOR_DEFAULTTONULL);
@@ -304,6 +335,7 @@ Output FindOwnedOutput(const OwnedWindow& target) {
         throw std::runtime_error("test points are outside the DXGI output bounds");
     return output;
 }
+#endif
 
 UINT RowWidth(const OwnedWindow& target) {
     const auto width = static_cast<int64_t>(target.second.x) - target.first.x + 1;
@@ -311,6 +343,9 @@ UINT RowWidth(const OwnedWindow& target) {
     return static_cast<UINT>(width);
 }
 
+#ifdef ARM_WGC_MOTION
+#include "HostedWgcCapture.hpp"
+#else
 class Capture {
     OwnedWindow& target;
     Output output;
@@ -437,6 +472,7 @@ int RunHosted(OwnedWindow& target) {
         unchanged, pointerOnly);
     return 2;
 }
+#endif
 
 int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
     target.Verify();
@@ -479,20 +515,36 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
         if (sample.kind == SampleKind::Unchanged) idleWait.Wait();
     }
     const auto observationEnd = Counter();
+#ifdef ARM_WGC_MOTION
+    const auto counts = capture.Finish();
+#endif
     target.MovePointer(neutral);
 
     std::printf("{\"qpcFrequency\":%lld,\"neutralArrivedQpc\":%lld,\"baselineStartedQpc\":%lld,"
-                "\"triggerBeginQpc\":%lld,\"triggerEndQpc\":%lld,\"observationEndQpc\":%lld,"
-                "\"rowWidth\":%u,\"systemMemory\":%s,\"baseline\":",
-        capture.frequency, neutralArrived, baselineStarted, triggerBegin, triggerEnd, observationEnd,
+                "\"triggerBeginQpc\":%lld,\"triggerEndQpc\":%lld,\"observationEndQpc\":%lld,",
+        capture.frequency, neutralArrived, baselineStarted, triggerBegin, triggerEnd, observationEnd);
+#ifdef ARM_WGC_MOTION
+    const auto& bounds = capture.Bounds();
+    std::printf("\"method\":\"WGC.CreateForWindow\",\"defaultCaptureBorder\":true,"
+                "\"captureBounds\":[%ld,%ld,%ld,%ld],\"frameBuffers\":%d,\"framesOffered\":%u,"
+                "\"framesRead\":%u,\"rowWidth\":%u,\"baseline\":",
+        bounds.left, bounds.top, bounds.right, bounds.bottom, Wgc::FrameBuffers,
+        counts.offered, counts.read, capture.width);
+#else
+    std::printf("\"rowWidth\":%u,\"systemMemory\":%s,\"baseline\":",
         capture.width, capture.systemMemory() ? "true" : "false");
+#endif
     const auto printSample = [](const Sample& value) {
         std::printf("{\"kind\":\"%s\",\"begin\":%lld,\"end\":%lld,\"present\":%lld,"
-                    "\"acquireReturned\":%lld,\"rowRead\":%lld,\"released\":%lld,"
-                    "\"accumulated\":%u,\"first\":%lu,\"second\":%lu}",
+                    "\"acquireReturned\":%lld,\"rowRead\":%lld,\"released\":%lld,",
             Name(value.kind), value.begin, value.end, value.present,
-            value.acquireReturned, value.rowRead, value.released, value.accumulated,
-            value.pixels.first, value.pixels.second);
+            value.acquireReturned, value.rowRead, value.released);
+#ifdef ARM_WGC_MOTION
+        std::printf("\"compositor100ns\":%lld,", value.compositor100ns);
+#else
+        std::printf("\"accumulated\":%u,", value.accumulated);
+#endif
+        std::printf("\"first\":%lu,\"second\":%lu}", value.pixels.first, value.pixels.second);
     };
     printSample(anchor);
     std::printf(",\"samples\":[");
@@ -508,9 +560,16 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
 int wmain(int argc, wchar_t** argv) {
     try {
         if (argc == 2 && std::wcscmp(argv[1], L"--synthetic") == 0) return RunSynthetic();
-        const bool row = argc == 8 && std::wcscmp(argv[1], L"--hosted") == 0;
         const bool hover = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover") == 0;
-        if ((!row && !hover) ||
+#ifdef ARM_WGC_MOTION
+        const bool allowed = hover && EnvEquals(L"GITHUB_REF_NAME", L"codex/hosted-wgc-motion-3536ca0-20261121") &&
+            EnvEquals(L"GITHUB_REPOSITORY", L"Zerozero05/Agent_Resource_Manager") &&
+            EnvEquals(L"ImageOS", L"win25-vs2026") && EnvEquals(L"ImageVersion", L"20261116.315.1");
+#else
+        const bool row = argc == 8 && std::wcscmp(argv[1], L"--hosted") == 0;
+        const bool allowed = row || hover;
+#endif
+        if (!allowed ||
             !EnvEquals(L"GITHUB_ACTIONS", L"true") || !EnvEquals(L"RUNNER_ENVIRONMENT", L"github-hosted") ||
             !EnvEquals(L"RUNNER_OS", L"Windows")) {
             throw std::runtime_error("desktop access is limited to the exact foreground synthetic GitHub-hosted window");
@@ -524,10 +583,12 @@ int wmain(int argc, wchar_t** argv) {
         const auto y = ParseCoordinate(argv[6]);
         OwnedWindow target(reinterpret_cast<HWND>(window), static_cast<DWORD>(pid),
             ParseUnsigned(argv[3]), {ParseCoordinate(argv[5]), y}, {ParseCoordinate(argv[7]), y});
+#ifndef ARM_WGC_MOTION
         if (row) return RunHosted(target);
+#endif
         return RunHover(target, {ParseCoordinate(argv[8]), ParseCoordinate(argv[9])},
             {ParseCoordinate(argv[10]), ParseCoordinate(argv[11])});
-    } catch (const Error& error) {
+    } catch (const CaptureError& error) {
         std::fprintf(stderr, "%s failed (HRESULT 0x%08lx)\n", error.operation,
             static_cast<unsigned long>(error.result));
     } catch (const std::exception& error) { std::fprintf(stderr, "%s\n", error.what()); }

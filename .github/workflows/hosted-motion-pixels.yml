@@ -1,17 +1,18 @@
-name: Verify Windows reduced motion with continuous frame acquisition
+name: Verify Windows reduced motion on an owned window
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44862742843'
-  CANDIDATE_SOURCE: 2314ea88080a401be1acfa150d029f1a928b99aa
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_2314ea88080a401be1acfa150d029f1a928b99aa
-  CANDIDATE_ARTIFACT_ID: '14691310680'
-  CANDIDATE_SHA256: 'b95ad24619e1d00e8d100777739afd70323fb827e272b31ef549124bd0063e97'
+  CANDIDATE_RUN_ID: '44866595695'
+  CANDIDATE_SOURCE: 3536ca0e5cf7c897b860b5ce32d8b415904b9e45
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_3536ca0e5cf7c897b860b5ce32d8b415904b9e45
+  CANDIDATE_ARTIFACT_ID: '14692802883'
+  CANDIDATE_ARTIFACT_DIGEST: sha256:6b8afaf8ca811c866b1ecb46ae778bf1fc1c8c715e176b32101d5a3f0f2ab2a6
+  CANDIDATE_SHA256: 'aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7'
 jobs:
   motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-cadence-2314ea8-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-wgc-motion-3536ca0-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:
@@ -29,7 +30,7 @@ jobs:
             throw 'The capability probe requires an isolated interactive GitHub-hosted Windows VM.'
           }
           if ($env:ImageOS -cne 'win25-vs2026' -or $env:ImageVersion -cne '20261116.315.1') {
-            throw "The hosted Windows image ($env:ImageOS $env:ImageVersion) differs from the successful DXGI capability image."
+            throw "The hosted Windows image ($env:ImageOS $env:ImageVersion) differs from the successful WGC capability image."
           }
           Write-Host "Hosted Windows image: $env:ImageOS $env:ImageVersion"
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
@@ -37,10 +38,10 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $install) { throw 'The hosted x64 Visual C++ compiler is unavailable.' }
           Import-Module (Join-Path $install 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $install -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          $build = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-dxgi/bin')
-          $probe = Join-Path $build.FullName 'verify-hosted-dxgi-row.exe'
-          $object = Join-Path $build.FullName 'verify-hosted-dxgi-row.obj'
-          & cl.exe /nologo /std:c++17 /EHsc /W4 /WX "/Fo$object" "/Fe$probe" scripts/verify-hosted-dxgi-row.cpp
+          $build = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-wgc/bin')
+          $probe = Join-Path $build.FullName 'verify-hosted-wgc-motion.exe'
+          $object = Join-Path $build.FullName 'verify-hosted-wgc-motion.obj'
+          & cl.exe /nologo /std:c++17 /EHsc /W4 /WX /DARM_WGC_MOTION "/Fo$object" "/Fe$probe" scripts/verify-hosted-dxgi-row.cpp
           if ($LASTEXITCODE -ne 0) { throw 'Could not compile the one-row probe using the installed SDK.' }
           $synthetic = & $probe --synthetic
           if ($LASTEXITCODE -ne 0) { throw 'The in-memory WARP preflight failed.' }
@@ -66,8 +67,9 @@ jobs:
               $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
           $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
           $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
-          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID) { throw 'Incorrect Windows candidate artifact.' }
-          $target = Join-Path $env:RUNNER_TEMP 'arm-dxgi-candidate'
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID -or
+              $match[0].digest -cne $env:CANDIDATE_ARTIFACT_DIGEST) { throw 'Incorrect Windows candidate artifact.' }
+          $target = Join-Path $env:RUNNER_TEMP 'arm-wgc-candidate'
           gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $target
           if ($LASTEXITCODE -ne 0) { throw 'The pinned Windows artifact could not be read.' }
           $info = Get-Content -LiteralPath (Join-Path $target 'BUILD_INFO.json') -Raw | ConvertFrom-Json
@@ -79,13 +81,13 @@ jobs:
       - name: Observe the four original motion conditions on the owned synthetic window
         timeout-minutes: 5
         run: |
-          $candidate = Join-Path $env:RUNNER_TEMP 'arm-dxgi-candidate/agent-resource-manager.exe'
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-wgc-candidate/agent-resource-manager.exe'
           ./scripts/verify-hosted-motion-pixels.ps1 -Candidate $candidate -ExpectedSha256 $env:CANDIDATE_SHA256
       - name: Preserve only the native motion report
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_dxgi_motion_cadence_${{ github.run_id }}_${{ github.run_attempt }}
+          name: Agent_Resource_Manager_wgc_motion_${{ github.run_id }}_${{ github.run_attempt }}
           path: ${{ runner.temp }}/arm-motion-pixels-evidence/motion-pixels.json
           if-no-files-found: warn
           retention-days: 14

@@ -6,16 +6,21 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+    $env:GITHUB_REPOSITORY -cne 'Zerozero05/Agent_Resource_Manager' -or
+    $env:GITHUB_REF_NAME -cne 'codex/hosted-wgc-motion-3536ca0-20261121' -or
     $env:ImageOS -cne 'win25-vs2026' -or $env:ImageVersion -cne '20261116.315.1' -or
+    $env:CANDIDATE_SOURCE -cne '3536ca0e5cf7c897b860b5ce32d8b415904b9e45' -or
+    $ExpectedSha256 -cne 'aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7' -or
     -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
     throw 'This can run only in a fresh interactive GitHub-hosted Windows VM.'
 }
 
 $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-motion-pixels-evidence')
 $output = Join-Path $evidence.FullName 'motion-pixels.json'
-$policy = [ordered]@{ trials=3; neutralSettleMs=250; beforeMs=95; afterMs=430; maxCaptureMs=15; maxGapMs=32; latestReducedEndpointMs=105;
+$policy = [ordered]@{ trials=3; neutralSettleMs=250; beforeMs=95; afterMs=430; maxCaptureMs=15; maxGapMs=32;
+    maxCompositorToCpuMs=32; latestReducedEndpointMs=105;
     minimumEndpointSamples=4; minimumRgbDistance=12; minimumIntermediateColors=2 }
-$report = [ordered]@{ candidateSha256=$ExpectedSha256; syntheticOnly=$true; status='incomplete'; phase='preflight'
+$report = [ordered]@{ candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$ExpectedSha256; syntheticOnly=$true; status='incomplete'; phase='preflight'
     policy=$policy; arms=@(); attemptedSystemChange=$false; systemRestored=$false; closedNormally=$false
     previousRun=[ordered]@{id='44854495440'; status='inconclusive'; reason='A two-update DXGI batch interrupted the first positive control under that run''s policy.'}
     previousR2=[ordered]@{id='44855333628'; status='incomplete'; passedArms=2; totalArms=4}
@@ -23,7 +28,7 @@ $report = [ordered]@{ candidateSha256=$ExpectedSha256; syntheticOnly=$true; stat
     notificationProbe=[ordered]@{id='44857288176'; setterFlags=2; stateChanged=$true; matchingNotifications=0}
     setterFlags=3; motionChanges=@()
     notificationScope='A separate hidden top-level window observes real settings broadcasts in the hosted session. WebView-specific receipt is not inferred.'
-    capture='One DXGI duplication over each trial. Successful acquisitions are followed immediately by another poll; only no-update polls use a 1 ms high-resolution wait. No-update and pointer-only polls retain the last timestamped desktop row. Raw QPC timestamps identify acquisition, row read and release.'
+    capture='One Windows Graphics Capture session per trial on the exact owned root HWND, with the default capture border. No-update polls retain the last row. Raw times retain both WGC 100-ns compositor time and QPC acquisition, read and release. FrameArrived and reads must agree. WGC does not expose an independent count of frames dropped before delivery.'
     runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion
     scope='Native foreground hover pixels on one inactive sidebar control. No DOM or CSS readback and no display-DPI or whole-app animation claim.' }
 function Write-Report { $report | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $output -Encoding utf8NoBOM }
@@ -44,8 +49,9 @@ try {
         throw 'The exact candidate executable is required.'
     }
 
-    $probe = Join-Path $env:RUNNER_TEMP 'arm-dxgi/bin/verify-hosted-dxgi-row.exe'
+    $probe = Join-Path $env:RUNNER_TEMP 'arm-wgc/bin/verify-hosted-wgc-motion.exe'
     $report.probeSourceSha256 = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'verify-hosted-dxgi-row.cpp')).Hash.ToLowerInvariant()
+    $report.wgcSourceSha256 = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'HostedWgcCapture.hpp')).Hash.ToLowerInvariant()
     $report.probeExecutableSha256 = (Get-FileHash -LiteralPath $probe).Hash.ToLowerInvariant()
 
     # Compile the existing window/pipe guard and normal-quit path without launching it.
@@ -169,18 +175,36 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         return $true
     }
 
-    function Read-DxgiTrace($raw, $points) {
+    function Test-WgcFrame($sample, [long]$frequency) {
+        $projected = [Math]::Truncate([double]$sample.compositor100ns * $frequency / 10000000.0)
+        return ($sample.compositor100ns -gt 0 -and $sample.present -gt 0 -and
+            [Math]::Abs($sample.present - $projected) -le 1 -and
+            $sample.begin -le $sample.acquireReturned -and $sample.present -le $sample.acquireReturned -and
+            $sample.acquireReturned -le $sample.rowRead -and $sample.rowRead -le $sample.released -and
+            $sample.released -le $sample.end -and
+            ($sample.rowRead - $sample.present) * 1000.0 / $frequency -le $policy.maxCompositorToCpuMs)
+    }
+
+    function Read-WgcTrace($raw, $points) {
         $frequency = [long]$raw.qpcFrequency
         $trigger = [long]$raw.triggerBeginQpc
         $anchor = $raw.baseline
+        $bounds = $raw.captureBounds
+        if ($raw.method -cne 'WGC.CreateForWindow' -or $raw.defaultCaptureBorder -ne $true -or
+            $raw.frameBuffers -ne 4 -or $raw.framesOffered -lt 1 -or $raw.framesRead -ne $raw.framesOffered -or
+            $raw.framesRead -ne (1 + @($raw.samples | Where-Object kind -CEQ 'window').Count) -or
+            $bounds.Count -ne 4 -or $points.background[0] -lt $bounds[0] -or $points.background[2] -ge $bounds[2] -or
+            $points.background[1] -lt $bounds[1] -or $points.background[1] -ge $bounds[3]) {
+            throw 'The exact window capture geometry or WGC notifications and reads did not agree.'
+        }
         if ($frequency -le 0 -or $trigger -le 0 -or $raw.triggerEndQpc -lt $trigger -or
             $raw.neutralArrivedQpc -le 0 -or $anchor.begin -lt $raw.neutralArrivedQpc -or
             $raw.baselineStartedQpc -lt $anchor.end -or $raw.observationEndQpc -lt $raw.triggerEndQpc -or
             ($anchor.begin - $raw.neutralArrivedQpc) * 1000.0 / $frequency -lt $policy.neutralSettleMs -or
             ($trigger - $raw.baselineStartedQpc) * 1000.0 / $frequency -lt $policy.beforeMs -or
             ($raw.observationEndQpc - $trigger) * 1000.0 / $frequency -lt $policy.afterMs -or
-            $anchor.kind -cne 'desktop' -or $anchor.begin -le 0 -or $anchor.end -lt $anchor.begin -or
-            $anchor.present -le 0 -or $anchor.present -gt $anchor.end -or $anchor.accumulated -lt 1 -or
+            $anchor.kind -cne 'window' -or $anchor.begin -le 0 -or $anchor.end -lt $anchor.begin -or
+            -not (Test-WgcFrame $anchor $frequency) -or
             ($anchor.end - $anchor.begin) * 1000.0 / $frequency -gt $policy.maxCaptureMs -or
             $anchor.first -ne 1775639 -or $anchor.second -ne 1775639 -or
             $raw.rowWidth -ne ($points.background[2] - $points.background[0] + 1)) {
@@ -196,23 +220,22 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
                 throw 'The ordered sample timestamps exceeded the capture budget.'
             }
             $lastEnd = [long]$sample.end
-            if ($sample.kind -ceq 'desktop') {
-                if ($sample.accumulated -lt 1 -or $sample.present -le $lastPresent -or $sample.present -gt $sample.end) {
-                    throw 'The desktop update metadata is invalid or out of order.'
+            if ($sample.kind -ceq 'window') {
+                if ($sample.present -le $lastPresent -or -not (Test-WgcFrame $sample $frequency)) {
+                    throw 'The window update has invalid, late or out of order compositor evidence.'
                 }
                 $lastPresent = [long]$sample.present
                 $first = [uint32]$sample.first
                 $second = [uint32]$sample.second
-            } elseif ($sample.kind -cnotin @('pointer-only', 'no-update') -or $sample.present -ne 0 -or
-                $sample.accumulated -ne 0 -or $sample.first -ne 0 -or $sample.second -ne 0) {
-                throw 'A sample did not prove either a new desktop image or an unchanged desktop image.'
+            } elseif ($sample.kind -cne 'no-update' -or $sample.present -ne 0 -or $sample.compositor100ns -ne 0 -or
+                $sample.rowRead -ne 0 -or $sample.released -ne 0 -or $sample.first -ne 0 -or $sample.second -ne 0) {
+                throw 'A sample could not be attributed to either an acquired window image or an empty WGC poll.'
             }
             [pscustomobject]@{
                 BeginMs = ($sample.begin - $trigger) * 1000.0 / $frequency
                 EndMs = ($sample.end - $trigger) * 1000.0 / $frequency
                 PresentQpc = $lastPresent
                 Kind = $sample.kind
-                Accumulated = [int]$sample.accumulated
                 First = $first
                 Second = $second
             }
@@ -223,9 +246,9 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         }
     }
 
-    function Score-DxgiTrial($trial, $points, [bool]$expectTransition) {
-        $raw = $trial.rawDxgi
-        $trace = @(Read-DxgiTrace $raw $points)
+    function Score-WgcTrial($trial, $points, [bool]$expectTransition) {
+        $raw = $trial.rawWgc
+        $trace = @(Read-WgcTrace $raw $points)
         $trial.trace = $trace
         $early = @($trace | Where-Object { $_.EndMs -le -3 })
         $late = @($trace | Where-Object { $_.BeginMs -ge 290 })
@@ -244,10 +267,8 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
             $sampleGapMs = [Math]::Max($sampleGapMs, $trace[$i].BeginMs - $trace[$i-1].EndMs)
         }
         $postTriggerFrames = @($trace | Where-Object {
-            $_.Kind -ceq 'desktop' -and $_.BeginMs -ge 0 -and $_.PresentQpc -ge $raw.triggerBeginQpc
+            $_.Kind -ceq 'window' -and $_.BeginMs -ge 0 -and $_.PresentQpc -ge $raw.triggerBeginQpc
         })
-        $batches = @($trace | Where-Object { $_.Accumulated -gt 1 })
-        $batchesAfterTrigger = @($batches | Where-Object { $_.PresentQpc -ge $raw.triggerBeginQpc })
         $mid = @($postTriggerFrames | Where-Object {
             (Distance-Rgb $_.First $baseColor) -gt 1 -and (Distance-Rgb $_.First $hoverColor) -gt 1
         })
@@ -256,14 +277,12 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         $backToNeutral = @($trace | Where-Object { $_.BeginMs -gt $firstHover.EndMs -and $_.First -eq $baseColor })
         $unexpectedColors = @($mid | Where-Object { -not (Test-RgbPath $_.First $baseColor $hoverColor) })
         $presentGapMs = 0.0
-        if ($mid.Count -gt 0 -and $firstHover) {
-            $moving = @($postTriggerFrames | Where-Object {
-                $_.PresentQpc -ge $mid[0].PresentQpc -and $_.PresentQpc -le $firstHover.PresentQpc
-            })
-            for ($i=1; $i -lt $moving.Count; $i++) {
-                $elapsed = ($moving[$i].PresentQpc - $moving[$i-1].PresentQpc) * 1000.0 / $raw.qpcFrequency
-                $presentGapMs = [Math]::Max($presentGapMs, $elapsed)
-            }
+        $previousPresent = $raw.triggerBeginQpc
+        foreach ($frame in $postTriggerFrames) {
+            if (-not $firstHover -or $frame.PresentQpc -gt $firstHover.PresentQpc) { break }
+            $elapsed = ($frame.PresentQpc - $previousPresent) * 1000.0 / $raw.qpcFrequency
+            $presentGapMs = [Math]::Max($presentGapMs, $elapsed)
+            $previousPresent = $frame.PresentQpc
         }
 
         $trial.maxGapMs = $sampleGapMs
@@ -274,9 +293,8 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         $trial.firstHoverSampleMs = $firstHover.EndMs
         $trial.unexpectedColors = $unexpectedColors.Count
         $trial.unexpectedTimelineSamples = $badTimeline.Count
-        $trial.coalescedSamples = $batches.Count
-        $trial.postTriggerCoalescedSamples = $batchesAfterTrigger.Count
-        $trial.additionalCoalescedUpdates = [int](($batches | ForEach-Object { $_.Accumulated - 1 } | Measure-Object -Sum).Sum)
+        $trial.framesOffered = $raw.framesOffered
+        $trial.framesRead = $raw.framesRead
 
         $valid = $null -ne $firstHover -and $badReads.Count -eq 0 -and $badTimeline.Count -eq 0 -and
             $sampleGapMs -le $policy.maxGapMs -and $presentGapMs -le $policy.maxGapMs -and
@@ -297,8 +315,6 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
                 throw 'Positive hover control did not show two measurable intermediate colors before the endpoint.'
             }
         } else {
-            # The newest timestamp cannot establish where each constituent frame occurred.
-            if ($batchesAfterTrigger.Count) { throw 'Coalesced updates during the post-trigger window make absent motion inconclusive.' }
             if ($firstHover.EndMs -gt $policy.latestReducedEndpointMs) {
                 throw 'The endpoint arrived too late to distinguish absent motion from a delayed visual read.'
             }
@@ -333,11 +349,11 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
             $trial.exitCode = $LASTEXITCODE
             if ($trial.exitCode -ne 0 -or $raw.Count -ne 1 -or $raw[0] -isnot [string]) {
                 $trial.diagnostic = @($raw | ForEach-Object { $_.ToString() })
-                throw 'The native DXGI hover probe stopped before it could provide a valid trace.'
+                throw 'The native WGC hover probe stopped before it could provide a valid trace.'
             }
-            $trial.rawDxgi = $raw[0] | ConvertFrom-Json
+            $trial.rawWgc = $raw[0] | ConvertFrom-Json
             try {
-                Score-DxgiTrial $trial $points $expectTransition
+                Score-WgcTrial $trial $points $expectTransition
                 $trial.status = 'observed'
             } catch {
                 if ($trial.status -ceq 'started') { $trial.status = 'inconclusive' }
@@ -359,12 +375,12 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
     Select-Motion '轻动效'
     Set-ObservedMotion (-not $original) 'preflight-opposite'
     Set-ObservedMotion $original 'preflight-original'
+    if (-not $original) { Set-ObservedMotion $true 'explicit-light-system-enabled' }
     Start-Sleep -Milliseconds 550
-    Run-Arm 'explicit-light-preflight' $original $true
+    Run-Arm 'explicit-light-preflight' $true $true
 
     $report.phase = 'system-enabled-notification'
     Select-Motion '跟随系统（默认）'
-    if (-not $original) { Set-ObservedMotion $true 'system-enabled' }
     Start-Sleep -Milliseconds 550
     Run-Arm 'system-animations-enabled' $true $true
     $report.phase = 'system-disabled-notification'
@@ -412,7 +428,7 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
 }
 $outcomes = @($report.arms | ForEach-Object {
     [ordered]@{ name=$_.name; passed=$_.pairedObservationPassed
-        trials=@($_.trials | ForEach-Object { [ordered]@{status=$_.status; error=$_.error; batches=$_.postTriggerCoalescedSamples} }) }
+        trials=@($_.trials | ForEach-Object { [ordered]@{status=$_.status; error=$_.error; framesOffered=$_.framesOffered; framesRead=$_.framesRead} }) }
 })
 [ordered]@{status=$report.status; phase=$report.phase; systemRestored=$report.systemRestored; closedNormally=$report.closedNormally; arms=$outcomes;
     setterFlags=$report.setterFlags; motionChanges=$report.motionChanges; candidateSha256=$ExpectedSha256; error=$report.error} |
