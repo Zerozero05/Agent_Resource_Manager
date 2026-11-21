@@ -114,8 +114,25 @@ pub(crate) struct Task {
     result: Option<Arc<TaskResult>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     result_files: Vec<crate::task_outputs::ResultFile>,
-    #[serde(default)]
-    resources: Vec<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_resource_keys",
+        deserialize_with = "deserialize_resource_keys"
+    )]
+    resources: Arc<[String]>,
+}
+
+fn serialize_resource_keys<S: serde::Serializer>(
+    keys: &[String],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    keys.serialize(serializer)
+}
+
+fn deserialize_resource_keys<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Arc<[String]>, D::Error> {
+    Vec::<String>::deserialize(deserializer).map(Arc::from)
 }
 
 #[derive(Serialize)]
@@ -202,11 +219,15 @@ struct TaskRetentionCounts {
     payload_bytes: usize,
     payload_capacity_bytes: usize,
     scheduling_keys: usize,
+    unique_key_sets: usize,
+    unique_scheduling_keys: usize,
     key_utf8_bytes: usize,
     key_buffer_capacity_bytes: usize,
     key_vector_capacity_bytes: usize,
     #[serde(skip)]
     result_addresses: BTreeSet<usize>,
+    #[serde(skip)]
+    key_set_addresses: BTreeSet<usize>,
 }
 
 impl TaskRetentionCounts {
@@ -214,12 +235,16 @@ impl TaskRetentionCounts {
         self.jobs += 1;
         self.recorded_jobs += usize::from(job.recorded);
         self.active_jobs += usize::from(!job.task.terminal());
-        self.scheduling_keys += job.task.resources.len();
-        self.key_vector_capacity_bytes +=
-            job.task.resources.capacity() * std::mem::size_of::<String>();
-        for key in &job.task.resources {
-            self.key_utf8_bytes += key.len();
-            self.key_buffer_capacity_bytes += key.capacity();
+        let keys = &job.task.resources;
+        self.scheduling_keys += keys.len();
+        if !keys.is_empty() && self.key_set_addresses.insert(keys.as_ptr() as usize) {
+            self.unique_key_sets += 1;
+            self.unique_scheduling_keys += keys.len();
+            self.key_vector_capacity_bytes += std::mem::size_of_val(keys.as_ref());
+            for key in keys.iter() {
+                self.key_utf8_bytes += key.len();
+                self.key_buffer_capacity_bytes += key.capacity();
+            }
         }
         if let Some(result) = &job.task.result {
             if self.result_addresses.insert(Arc::as_ptr(result) as usize) {
@@ -230,6 +255,23 @@ impl TaskRetentionCounts {
             }
         }
     }
+}
+
+fn shared_check_keys(jobs: &BTreeMap<String, Job>, task: &Task) -> Option<Arc<[String]>> {
+    if task.action != "check_now" || task.resources.is_empty() {
+        return None;
+    }
+    // Reuse only exact ordered keys from an existing history record. Active
+    // scheduler locks still use the separately owned Resource list.
+    jobs.values()
+        .find(|job| {
+            job.task.id != task.id
+                && job.recorded
+                && job.task.terminal()
+                && job.task.action == "check_now"
+                && job.task.resources == task.resources
+        })
+        .map(|job| Arc::clone(&job.task.resources))
 }
 
 // Unknown action strings can contain arbitrary caller input, so diagnostics use
@@ -328,6 +370,9 @@ impl TaskSystem {
             task.result = None;
             task.result_available = false;
             task.result_expired = true;
+            if let Some(keys) = shared_check_keys(&jobs, &task) {
+                task.resources = keys;
+            }
             jobs.insert(
                 task.id.clone(),
                 Job {
@@ -1147,9 +1192,15 @@ impl TaskSystem {
             .unwrap_or_default();
         let completion = {
             let mut jobs = self.jobs.lock().expect("task registry lock");
+            let shared_keys = jobs
+                .get(id)
+                .and_then(|job| shared_check_keys(&jobs, &job.task));
             let Some(job) = jobs.get_mut(id) else {
                 return;
             };
+            if let Some(keys) = shared_keys {
+                job.task.resources = keys;
+            }
             // Only useful automatic results enter operation history. Empty
             // polling rounds remain transient and cannot evict user actions.
             if job.automatic && !cancelled {
@@ -1416,8 +1467,8 @@ impl TaskSystem {
                     .include(job);
             }
         }
-        // Completion shares result Arcs. Exclude workers, external callers,
-        // allocator overhead and SQLite; these counters are not full heap totals.
+        // Completion shares result Arcs and history can share exact key slices.
+        // Exclude workers, external callers, allocator overhead and SQLite.
         let mut value = serde_json::to_value(total).map_err(|error| error.to_string())?;
         value["formatVersion"] = json!(1);
         value["scope"] = json!("job-owned-result-and-key-buffers");
@@ -3461,7 +3512,7 @@ mod tests {
         }))
         .unwrap();
         task.result = Some(result.clone());
-        task.resources = resources;
+        task.resources = resources.into();
         Job {
             task,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -3472,6 +3523,66 @@ mod tests {
             dedup: None,
             automatic: false,
             resource_automation: false,
+        }
+    }
+
+    #[test]
+    fn completed_checks_share_exact_keys_across_live_history_and_reopen() {
+        let (dir, service) = fixture();
+        let ids = ["one", "one", "two"].map(|skill_id| {
+            let id = start(&service, json!({"action":"check_now","skillId":skill_id}));
+            service.wait(&id).unwrap();
+            id
+        });
+        assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
+
+        let verify_sharing = |tasks: &TaskSystem| {
+            let jobs = tasks.jobs.lock().unwrap();
+            let [first, repeated, distinct] = ids.each_ref().map(|id| &jobs[id].task.resources);
+            assert!(Arc::ptr_eq(first, repeated));
+            assert_eq!(first.len(), distinct.len());
+            assert_ne!(first.as_ref(), distinct.as_ref());
+            assert!(!Arc::ptr_eq(first, distinct));
+            let key_count = first.len();
+            let buffer_bytes: usize = first
+                .iter()
+                .chain(distinct.iter())
+                .map(String::capacity)
+                .sum();
+            drop(jobs);
+
+            let counts = tasks.retention_stats().unwrap();
+            assert_eq!(counts["schedulingKeys"], key_count * 3);
+            assert_eq!(counts["uniqueKeySets"], 2);
+            assert_eq!(counts["uniqueSchedulingKeys"], key_count * 2);
+            assert_eq!(counts["keyBufferCapacityBytes"], buffer_bytes);
+            assert_eq!(
+                counts["keyVectorCapacityBytes"],
+                key_count * 2 * std::mem::size_of::<String>()
+            );
+            assert_eq!(counts["byAction"]["check_now"]["uniqueKeySets"], 2);
+        };
+        verify_sharing(&service);
+
+        let live_keys = ids.each_ref().map(|id| {
+            let keys = service.get(id, false).unwrap()["resources"].clone();
+            assert!(keys.is_array());
+            keys
+        });
+        assert_eq!(live_keys[0], live_keys[1]);
+        assert_ne!(live_keys[0], live_keys[2]);
+        let db = rusqlite::Connection::open(dir.path().join("manager.sqlite3")).unwrap();
+        let saved = history_payloads(&db);
+        for (id, keys) in ids.iter().zip(&live_keys) {
+            let row: Value = serde_json::from_str(&saved[id]).unwrap();
+            assert_eq!(&row["resources"], keys);
+        }
+
+        drop(service);
+        let reopened = TaskSystem::new(Manager::new(dir.path().into()).unwrap()).unwrap();
+        verify_sharing(&reopened);
+        for (id, keys) in ids.iter().zip(&live_keys) {
+            assert_eq!(&reopened.get(id, false).unwrap()["resources"], keys);
         }
     }
 
@@ -3492,7 +3603,7 @@ mod tests {
         keys.push("skill:private-id".to_owned());
         let key_bytes: usize = keys.iter().map(String::len).sum();
         let key_capacity: usize = keys.iter().map(String::capacity).sum();
-        let vector_capacity = keys.capacity() * std::mem::size_of::<String>();
+        let vector_capacity = std::mem::size_of_val(keys.as_slice());
         let first = retention_job("private-one", "check_now", result.clone(), keys);
         let mut second = retention_job("private-two", "resource_list", result.clone(), vec![]);
         second.recorded = false;
@@ -3512,6 +3623,8 @@ mod tests {
         assert_eq!(value["payloadBytes"], result.bytes.len());
         assert_eq!(value["payloadCapacityBytes"], result.bytes.capacity());
         assert_eq!(value["schedulingKeys"], 2);
+        assert_eq!(value["uniqueKeySets"], 1);
+        assert_eq!(value["uniqueSchedulingKeys"], 2);
         assert_eq!(value["keyUtf8Bytes"], key_bytes);
         assert_eq!(value["keyBufferCapacityBytes"], key_capacity);
         assert_eq!(value["keyVectorCapacityBytes"], vector_capacity);
@@ -6244,10 +6357,15 @@ mod tests {
     fn task_history_row_matches_legacy_bytes_without_rewriting() {
         let (dir, service) = fixture();
         let result = Arc::new(TaskResult::new(&json!({"privateResult":true})));
-        let resources = (0..2002)
+        let resources: Vec<_> = (0..2002)
             .map(|index| format!("file:D:\\技能\\{index}\t\"输入\"\n🧪"))
             .collect();
-        let mut job = retention_job("history-row", "check_now", result.clone(), resources);
+        let mut job = retention_job(
+            "history-row",
+            "check_now",
+            result.clone(),
+            resources.clone(),
+        );
         job.task.started_at = Some("2026-11-11T00:00:01Z".into());
         job.task.finished_at = Some("2026-11-11T00:00:02Z".into());
         job.task.error = Some("历史提示".into());
@@ -6259,6 +6377,7 @@ mod tests {
         }]))
         .unwrap();
         let legacy = job.task.metadata();
+        assert_eq!(legacy["resources"], json!(resources));
         let row = job.task.history_row();
         assert_eq!(row.id, job.task.id);
         assert_eq!(row.payload, legacy.to_string());
@@ -7285,7 +7404,7 @@ mod tests {
                 .get_mut(&id)
                 .unwrap()
                 .task
-                .resources = keys.clone();
+                .resources = keys.clone().into();
             service.emit(&id);
             ids.push(id);
         }
