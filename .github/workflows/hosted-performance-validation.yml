@@ -1,18 +1,19 @@
-name: Verify three native workloads on one hosted Windows machine (0ac5e79)
+name: Verify three native workloads on one hosted Windows machine (2d19488)
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44880393531'
-  CANDIDATE_SOURCE: 0ac5e79b7a3d1184e7602f241793f240b0609d44
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_0ac5e79b7a3d1184e7602f241793f240b0609d44
-  CANDIDATE_ARTIFACT_ID: '14698411078'
-  CANDIDATE_SHA256: 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24'
-  CANDIDATE_ARCHIVE_SHA256: '5ea596eb7d95de7df46bc1929c8694e56c8c5b72f7ded2915987aefa83ce152e'
+  CANDIDATE_RUN_ID: '44898573141'
+  CANDIDATE_SOURCE: 2d194880f48bbef0fe9613f3d2a5afffc3b2ce15
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_2d194880f48bbef0fe9613f3d2a5afffc3b2ce15
+  CANDIDATE_ARTIFACT_ID: '14705483396'
+  CANDIDATE_SHA256: '3476141dfca5894b9d9c07254a3de5b7dcf682e65108e6d064b1c48fb866c2f0'
+  CANDIDATE_ARCHIVE_SHA256: '75e6a6d6d198e3f7af41a27bc5014a84f5173778f62b1d81ef7a876ee5aba3a5'
+  CANDIDATE_BUILD_INFO_SHA256: '9d3f26aca7d0aa4ba30c83147838acfa4b86cbb596886ec33e30b3c157756abe'
 jobs:
   measure:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-combined-0ac5e79-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-combined-2d19488-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 50
     defaults:
@@ -29,9 +30,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
-              $env:CANDIDATE_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
-            throw 'Pin the independently verified candidate artifact ID, archive SHA256 and executable SHA256 before measurement.'
+          $name = "Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_$env:CANDIDATE_SOURCE"
+          if ($env:CANDIDATE_RUN_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SOURCE -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:CANDIDATE_ARTIFACT -cne $name -or $env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or
+              $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:CANDIDATE_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:CANDIDATE_BUILD_INFO_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Pin the independently verified commit, asset identity, and ZIP, EXE and BUILD_INFO SHA-256 before measurement.'
           }
           if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
               -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
@@ -51,6 +55,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }
           $exe = Join-Path $candidate 'agent-resource-manager.exe'
           $source = Join-Path $candidate 'BUILD_INFO.json'
+          $originalBuildInfoSha256 = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($originalBuildInfoSha256 -cne $env:CANDIDATE_BUILD_INFO_SHA256) { throw 'Candidate original BUILD_INFO digest changed.' }
           $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
           $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($digest -cne $env:CANDIDATE_SHA256 -or $info.executableSha256 -cne $digest -or
@@ -58,7 +64,7 @@ jobs:
               $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
               $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the pinned executable.' }
           $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
-          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue $originalBuildInfoSha256
           $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
           Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
       - name: Measure check, download, and update in separate native sessions
