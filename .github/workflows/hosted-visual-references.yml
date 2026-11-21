@@ -1,4 +1,4 @@
-name: Prepare hosted visual references for afdcc14
+name: Prepare hosted visual references for afdcc14 (r2)
 on: create
 permissions:
   contents: read
@@ -11,7 +11,7 @@ env:
   CANDIDATE_SHA256: '2a4b27faf9b2aed958760dc30d5f4ad980b8f62a9e3be6e38d321382f8d89db3'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-afdcc14-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-afdcc14-r2-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
@@ -43,7 +43,8 @@ jobs:
           $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
           if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID) { throw 'The exact Windows candidate artifact is missing.' }
           ./scripts/verify-native-uia.ps1 -CompileOnly
-          ./scripts/native-visual-input.ps1 -CompileOnly
+          & pwsh.exe -NoProfile -NonInteractive -File './scripts/native-visual-input.ps1' -CompileOnly
+          if ($LASTEXITCODE -ne 0) { throw 'Visual helper did not pass its compile-only checks.' }
           $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
           gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
           if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }

@@ -270,6 +270,12 @@ function relativeBox(text, frame) {
     assert.ok(validBox(box, frame));
     return box;
 }
+export function referenceObservationRows(value) {
+    // PowerShell's switch enumerates these collections before JSON serialization.
+    const rows = value === null ? [] : Array.isArray(value) ? value : [value];
+    assert.ok(rows.every(row => row && typeof row.name === 'string' && typeof row.type === 'string'), 'Invalid native reference observation.');
+    return rows;
+}
 async function references(descriptor) {
     const { NativeUiaSession } = await import('./native-uia-client.mjs');
     await writeFile(join(descriptor.root, 'references-owner.json'), json({ startedAt: new Date().toISOString() }), { flag: 'wx' });
@@ -286,10 +292,11 @@ async function references(descriptor) {
         visual = await VisualSession.attach(app.identity, descriptor, env);
         await visual.call('prepareForeground');
         ref.frame = visual.identity;
+        const observeRows = async (op, fields) => referenceObservationRows(await app.call(op, fields));
         async function element(name, scope, type, selected) {
             const deadline = performance.now() + visualPolicy.matchTimeoutMs;
             do {
-                const rows = await app.call('state', { name, ...(scope ? { scope } : {}) });
+                const rows = await observeRows('state', { name, ...(scope ? { scope } : {}) });
                 const matches = rows.filter(row => !row.offscreen && (!type || row.type === type));
                 assert.ok(matches.length <= 1, `Ambiguous visible reference element ${name}.`);
                 if (matches.length === 1 && (selected === undefined || matches[0].selected === selected))
@@ -311,9 +318,9 @@ async function references(descriptor) {
         async function semanticList(index) {
             const deadline = performance.now() + visualPolicy.matchTimeoutMs;
             do {
-                const names = await app.call('names');
+                const names = await observeRows('names');
                 const titles = names.filter(row => row.type === 'ControlType.Button' && /^Perf Skill \d{4}$/.test(row.name));
-                const edit = await app.call('state', { name: '搜索 Skill' });
+                const edit = await observeRows('state', { name: '搜索 Skill' });
                 if (edit.some(row => row.enabled && !row.offscreen) && titles.length === (index === null ? 20 : 1) &&
                     (index === null || titles[0].name === `Perf Skill ${String(index).padStart(4, '0')}`))
                     return;
@@ -369,7 +376,7 @@ async function references(descriptor) {
         await nativeSearch(0);
         await nativeClick('openDocument');
         await docRois();
-        const names = await app.call('names'), homeNames = [...new Set(names.filter(row => row.type === 'ControlType.TabItem' && (row.name === '工作台' || row.name.startsWith('工作台 '))).map(row => row.name))];
+        const names = await observeRows('names'), homeNames = [...new Set(names.filter(row => row.type === 'ControlType.TabItem' && (row.name === '工作台' || row.name.startsWith('工作台 '))).map(row => row.name))];
         assert.equal(homeNames.length, 1);
         await point('homeTab', homeNames[0], '工作区标签', 'ControlType.TabItem');
         const documentBox = await point('documentTab', 'Perf Skill 0000', '工作区标签', 'ControlType.TabItem');
@@ -384,7 +391,7 @@ async function references(descriptor) {
         await capture('documentTab', await docRois(), 'Native detail tab became active.');
         await nativeClick('closeDocument');
         await semanticList(0);
-        assert.equal((await app.call('state', { name: '关闭 Perf Skill 0000' })).length, 0);
+        assert.equal((await observeRows('state', { name: '关闭 Perf Skill 0000' })).length, 0);
         await capture('closed', [...await tableRois(), documentBox], 'Native detail tab closure and home search confirmed.');
         await nativeClick('clear');
         await semanticList(null);
