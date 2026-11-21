@@ -1,4 +1,4 @@
-name: Run approved native visual pilot and stability acceptance
+name: Capture compact GitHub filter failure during the approved native pilot
 on: create
 permissions:
   contents: read
@@ -18,10 +18,10 @@ env:
   REFERENCE_ROI_ARCHIVE_SHA256: '0e9ce3fc6d61f9a1c6b958085783ff6a23eb66ee0212a5fb8674a52bdeaeb7f1'
   APPROVAL_SHA256: 'e8cf9823ff163154d90831384e563ed011101873c8d4cd5d73be4d1c08d32de2'
 jobs:
-  stability:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-stability-verified-5480977-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+  pilot:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-pilot-failure-5480977-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 14
     defaults:
       run:
         shell: pwsh
@@ -112,19 +112,22 @@ jobs:
           $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
           $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue $originalBuildInfoSha256
           $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
-      - name: Rehydrate the frozen fixture and run the original pilot and stability modes
-        timeout-minutes: 54
+      - name: Run only the original pilot and capture a terminal GitHub mismatch
+        timeout-minutes: 10
         run: |
           $wrapper = Join-Path $env:RUNNER_TEMP 'arm-visual-wrapper'
           & (Join-Path $wrapper 'run-hosted-visual-stability.ps1') -ReviewBundle (Join-Path $env:RUNNER_TEMP 'arm-visual-approved-review') `
             -RoiBundle (Join-Path $env:RUNNER_TEMP 'arm-visual-approved-rois') -ApprovalFile (Join-Path $wrapper 'visual-approval.json') `
             -ApprovalSha256 $env:APPROVAL_SHA256 -ReferenceReceiptSha256 $env:REFERENCE_RECEIPT_SHA256 -ReferenceCommit $env:REFERENCE_COMMIT `
             -ReferenceRunId $env:REFERENCE_RUN_ID
-      - name: Preserve original pilot and stability reports and verified normal exit evidence
+      - name: Preserve the synthetic diagnostic receipt and optional owned frame
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Agent_Resource_Manager_visual_stability_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arm-visual-stability-result/
+          name: Agent_Resource_Manager_visual_pilot_failure_${{ github.run_id }}_${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/arm-visual-stability-result/pilot-result.json
+            ${{ runner.temp }}/arm-visual-stability-result/pilot-normal-quit.json
+            ${{ runner.temp }}/arm-visual-stability-result/pilot-github-no-match.png
           if-no-files-found: warn
           retention-days: 14

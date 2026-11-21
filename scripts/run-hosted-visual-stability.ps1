@@ -142,6 +142,67 @@ foreach ($source in $descriptor.sources) {
 & node --check $module
 if ($LASTEXITCODE -ne 0) { throw 'The bound native harness did not parse.' }
 
+# Keep the verified module at its original path so the pilot can still check
+# the frozen source inventory. Add evidence collection to a separate entry point.
+function Replace-One([string]$content, [string]$original, [string]$replacement) {
+    $first = $content.IndexOf($original, [StringComparison]::Ordinal)
+    if ($first -lt 0 -or $first -ne $content.LastIndexOf($original, [StringComparison]::Ordinal)) {
+        throw 'The exact pilot diagnostic patch anchor is absent or ambiguous.'
+    }
+    return $content.Substring(0, $first) + $replacement + $content.Substring($first + $original.Length)
+}
+$overlay = Join-Path $workspace 'scripts/hosted-visual-pilot-failure.generated.mjs'
+if (Test-Path -LiteralPath $overlay) { throw 'The pilot diagnostic entry point already exists.' }
+$diagnostic = Replace-One $text 'async function main() { const selected = options(process.argv.slice(2));' @'
+async function main() { const selected = options(process.argv.slice(2));
+    assert.equal(selected.mode, '--pilot', 'Only the diagnostic pilot is available.');
+'@
+$diagnostic = Replace-One $diagnostic '    const save = () => writeFile(reportPath, json(report));' @'
+    report.diagnosticPilotOnly = true;
+    report.diagnosticScriptSha256 = await digest(fileURLToPath(import.meta.url));
+    const save = () => writeFile(reportPath, json(report));
+'@
+$diagnostic = Replace-One $diagnostic '            let consecutive = 0;' @'
+            let consecutive = 0;
+            let lastGitHubMatch;
+            async function captureGitHubMismatch() {
+                if (name !== 'github') return;
+                const box = [...visual.identity.captureBounds];
+                const fileName = 'pilot-github-no-match.png';
+                const witness = report.failureWitness = { state: name, box, lastMatch: lastGitHubMatch ?? null };
+                const path = join(root, fileName);
+                try {
+                    const image = await visual.call('save', { path, box }, 2500);
+                    assert.equal(image.saved, true);
+                    assert.deepEqual(image.box, box);
+                    witness.image = { fileName, sha256: await digest(path), pixelSha256: image.pixelSha256 };
+                } catch (error) {
+                    witness.captureError = error.message;
+                }
+            }
+'@
+$diagnostic = Replace-One $diagnostic '                    if (remaining < 1) throw new Error(`Frozen visible state ${name} exceeded its observation deadline.`);' @'
+                    if (remaining < 1) {
+                        if (name === 'github') {
+                            if (performance.now() < deadline) await sleep(1);
+                            await captureGitHubMismatch();
+                        }
+                        throw new Error(`Frozen visible state ${name} exceeded its observation deadline.`);
+                    }
+'@
+$diagnostic = Replace-One $diagnostic "                    if (!(await visual.call('match', roi, remaining)).matched) allMatch = false;" @'
+                    const observed = await visual.call('match', roi, remaining);
+                    if (name === 'github') lastGitHubMatch = { role: roi.role, box: roi.box, ...observed };
+                    if (!observed.matched) allMatch = false;
+'@
+$diagnostic = Replace-One $diagnostic '            throw new Error(`Frozen visible state ${name} did not match. References were not adapted.`);' @'
+            if (name === 'github') await captureGitHubMismatch();
+            throw new Error(`Frozen visible state ${name} did not match. References were not adapted.`);
+'@
+[IO.File]::WriteAllText($overlay, $diagnostic, [Text.UTF8Encoding]::new($false))
+& node --check $overlay
+if ($LASTEXITCODE -ne 0) { throw 'The guarded diagnostic entry point did not parse.' }
+
 $measurements = Join-Path $env:RUNNER_TEMP 'arm-visual-stability-result'
 New-Item -ItemType Directory -Path $measurements | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $root 'references')) | Out-Null
@@ -162,7 +223,9 @@ if ($LASTEXITCODE -ne 0) { throw 'The deterministic synthetic fixture could not 
 $localDescriptor = Join-Path $root 'visual-dataset.json'
 $quitHelper = Join-Path $PSScriptRoot 'quit-physical-memory-session.ps1'
 
-function Run-Measurement([string]$phase, [int]$maxMinutes) {
+function Run-Pilot {
+    $phase = 'pilot'
+    $maxMinutes = 8
     $reportFile = Join-Path $root "$phase-result.json"
     $proofFile = Join-Path $measurements "$phase-normal-quit.json"
     $lineCount = 0
@@ -175,14 +238,14 @@ function Run-Measurement([string]$phase, [int]$maxMinutes) {
     $startInfo.RedirectStandardError = $true
     $startInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
     $startInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
-    foreach ($arg in @($module, $(if ($phase -eq 'pilot') { '--pilot' } else { '--run' }), $localDescriptor)) {
+    foreach ($arg in @($overlay, '--pilot', $localDescriptor)) {
         $startInfo.ArgumentList.Add($arg)
     }
     foreach ($name in @('GH_TOKEN', 'GITHUB_TOKEN')) { [void]$startInfo.Environment.Remove($name) }
     $process = [Diagnostics.Process]::Start($startInfo)
     $clock = [Diagnostics.Stopwatch]::StartNew()
     try {
-        $stderr = $process.StandardError.ReadToEndAsync()
+        $null = $process.StandardError.ReadToEndAsync()
         for (;;) {
             $read = $process.StandardOutput.ReadLineAsync()
             while (-not $read.Wait(1000)) {
@@ -218,28 +281,26 @@ function Run-Measurement([string]$phase, [int]$maxMinutes) {
         if ($null -eq $quitProof -or $sourceReport.normalExit -ne $true -or $sourceReport.runtimeAndSourcesPreserved -ne $true -or
             $sourceReport.managementDataPreserved -ne $true -or $sourceReport.candidateSha256 -cne $candidateSha256 -or
             $sourceReport.datasetFingerprint -cne $reference.datasetFingerprint -or $sourceReport.referenceSha256 -cne $receipt.referenceSha256 -or
-            $sourceReport.approvalSha256 -cne $ApprovalSha256 -or $sourceReport.measurementsUseAccessibility -ne $false) {
+            $sourceReport.approvalSha256 -cne $ApprovalSha256 -or $sourceReport.measurementsUseAccessibility -ne $false -or
+            $sourceReport.diagnosticPilotOnly -ne $true -or $sourceReport.mode -cne 'pilot') {
             throw 'The original native report failed its identity, data, or exit checks.'
+        }
+        Assert-Digest $overlay $sourceReport.diagnosticScriptSha256
+        if ($null -ne $sourceReport.failureWitness.image) {
+            $image = $sourceReport.failureWitness.image
+            if ($sourceReport.failureWitness.state -cne 'github' -or $sourceReport.status -cne 'failed-or-blocked' -or
+                $image.fileName -cne 'pilot-github-no-match.png') { throw 'Unexpected diagnostic witness scope.' }
+            $imagePath = Join-Path $root $image.fileName
+            Assert-Digest $imagePath $image.sha256
+            Copy-Item -LiteralPath $imagePath -Destination $measurements
         }
         if ($process.ExitCode -ne 0) { throw "$phase did not pass the original native verdict." }
         return $sourceReport
     } finally {
         if (Test-Path -LiteralPath $reportFile -PathType Leaf) { Copy-Item -LiteralPath $reportFile -Destination $measurements }
-        if ($null -ne $stderr -and $stderr.IsCompletedSuccessfully -and $stderr.Result) {
-            [IO.File]::WriteAllText((Join-Path $measurements "$phase-harness-stderr.txt"), $stderr.Result)
-        }
         $process.Dispose()
     }
 }
 
-$pilot = Run-Measurement 'pilot' 8
+$pilot = Run-Pilot
 if ($pilot.status -cne 'pilot-passed') { throw 'The original pilot did not pass.' }
-$pilotSha256 = (Get-FileHash -LiteralPath (Join-Path $root 'pilot-result.json') -Algorithm SHA256).Hash.ToLowerInvariant()
-Assert-Digest (Join-Path $measurements 'pilot-result.json') $pilotSha256
-Save-Json (Join-Path $measurements 'wrapper-provenance.json') ([ordered]@{ candidateSource=$candidateSource; candidateSha256=$candidateSha256
-    referenceRunId=$ReferenceRunId; referenceCommit=$ReferenceCommit; referenceSha256=$receipt.referenceSha256; referenceReceiptSha256=$ReferenceReceiptSha256
-    approvalSha256=$ApprovalSha256; pilotSha256=$pilotSha256; runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion
-    windowsVersion=[Environment]::OSVersion.Version.ToString(); nodeVersion=(& node --version)
-    referenceEnvironment=$receipt.hostEnvironment; fixture=$reference.datasetFingerprint })
-$formal = Run-Measurement 'stability' 44
-if ($formal.status -cne 'visual-stability-passed' -or $formal.verdict.status -cne 'passed') { throw 'The original convergence gate did not pass.' }
