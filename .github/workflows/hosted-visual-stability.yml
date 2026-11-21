@@ -19,7 +19,7 @@ env:
   APPROVAL_SHA256: 'e8cf9823ff163154d90831384e563ed011101873c8d4cd5d73be4d1c08d32de2'
 jobs:
   pilot:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-pilot-receipt-5480977-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-pilot-witness-5480977-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 14
     defaults:

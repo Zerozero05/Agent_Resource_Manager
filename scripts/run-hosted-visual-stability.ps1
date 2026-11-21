@@ -209,7 +209,10 @@ $diagnostic = Replace-One $diagnostic '                    if (remaining < 1) th
                     }
 '@
 $diagnostic = Replace-One $diagnostic "                    if (!(await visual.call('match', roi, remaining)).matched) allMatch = false;" @'
-                    const observed = await visual.call('match', roi, remaining);
+                    // Keep transport alive for the terminal witness. waitState still rejects
+                    // any match that returns after the original absolute deadline.
+                    const readTimeout = name === 'github' ? Math.max(remaining, 500) : remaining;
+                    const observed = await visual.call('match', roi, readTimeout);
                     if (name === 'github') lastGitHubMatch = { role: roi.role, box: roi.box, ...observed };
                     if (!observed.matched) allMatch = false;
 '@
