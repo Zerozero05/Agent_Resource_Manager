@@ -240,6 +240,20 @@ test('zero-result selections remain visible without permanently offering unavail
   assert.deepEqual(options.map(option => option.value),['all','local_only']);
 });
 
+test('status counts do not read names to sort unsearched Skill records', () => {
+  let nameReads = 0;
+  const items = ['synced', 'docs_updated', 'future_status'].map(status => ({
+    id: status,
+    get name() { nameReads++; return status; },
+    status,
+  }));
+  const options = libraryStatusOptions(items, { statusFilter: 'docs_updated' });
+  assert.deepEqual(options.map(option => [option.value, option.count]), [
+    ['all', 3], ['synced', 2], ['review', 1], ['docs_updated', 1],
+  ]);
+  assert.equal(nameReads, 0);
+});
+
 test('unknown baselines with historical evidence never claim that installation records are absent', () => {
   const skill:LibraryItem = {id:'scope',name:'scope',status:'unknown_baseline',baselineCommit:'a'.repeat(40),installedCommit:'b'.repeat(40),changeDetails:[{path:'new.py',change:'different'}]};
   const explanation = statusExplanation(skill);

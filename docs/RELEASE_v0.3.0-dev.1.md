@@ -1,5 +1,16 @@
 # v0.3.0-dev.1
 
+## 65b14b9 候选验收（2026-11-21）
+
+Windows x64 开发候选 `090dc7a9` 对应源码 `65b14b9`。
+
+- Windows 构建通过，前端 751 项和 Rust 960 项通过，17 项按测试声明忽略。隔离本机后台检查能够读取 41 个工具入口。 [Windows 构建](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/44394986153)
+- 在隔离云机用 v0.2.11 安装、升级到此候选并卸载，三个静默操作均成功，四个合成文件均保留。 [安装生命周期](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/44399328261)
+- 检查、下载和更新三种负载共采集 1,200 次有效交互，12 组 P95 为 288–416 ms，均满足已约定的有限容差，均超过原定 200 ms。 [同机三负载](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/44399328367)
+- 30 分钟测试正常退出且闲置 CPU P95 为 1.43%。尾段私有内存波动 96.60 MiB，增长斜率 5.20 MiB/分钟，中位增长 18.66 MiB，三项均超限。 [持续运行](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/44399328561)
+
+后续统计和普通任务结果复制方面的修改须另行绑定 Windows 候选复测。系统减少动效、显示变化和正式切换仍待验证。
+
 ## d2883c2 候选验收（2026-11-19）
 
 以下结果对应 Windows x64 开发候选 `00f3b75b`，源码提交 `d2883c2`。本机仍通过此前交付的入口运行，公开发行仍为 v0.2.11。

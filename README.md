@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 技能库状态与任务结果（开发候选） | 2026-11-21 | 1、减少状态下拉框的重复排序和计数。[详情](CHANGELOG.md#library-status-and-task-results-20261121)<br>2、普通任务直接使用最新库状态字段，省去重复复制。[详情](CHANGELOG.md#library-status-and-task-results-20261121) |
 | 说明渲染与技能库筛选（开发候选） | 2026-11-19 | 1、内容未变时保留已读说明及焦点，手动刷新仍重新读取图片。[详情](CHANGELOG.md#document-render-allocation-20261119)<br>2、空关键词不再构造搜索文本。[详情](CHANGELOG.md#document-render-allocation-20261119) |
 | 工作台按需统计（开发候选） | 2026-11-19 | 1、独立说明等标签页不再计算工作台的分类和汇总。[详情](CHANGELOG.md#workbench-only-summary-20261119) |
 | Windows 工作流运行环境 | 2026-11-19 | 1、固定支持 Node 24 的检出和 Node 安装组件。[详情](CHANGELOG.md#github-actions-node24-20261119) |

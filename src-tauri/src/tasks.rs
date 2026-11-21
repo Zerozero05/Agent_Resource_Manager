@@ -2474,7 +2474,7 @@ fn rebase_result(
     if !top_level && !nested {
         return Ok(());
     }
-    let current = snapshot()?;
+    let mut current = snapshot()?;
     if top_level {
         for field in [
             "skills",
@@ -2497,7 +2497,15 @@ fn rebase_result(
             "managementRevision",
             "readGeneration",
         ] {
-            value[field] = current[field].clone();
+            value[field] = if nested {
+                current[field].clone()
+            } else {
+                // Without a nested consumer, transfer the live values directly.
+                current
+                    .as_object_mut()
+                    .and_then(|fields| fields.remove(field))
+                    .unwrap_or(Value::Null)
+            };
         }
     }
     for field in ["stateSnapshot", "snapshot"] {

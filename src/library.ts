@@ -44,9 +44,12 @@ const statuses: Record<string, {group: LibraryStatusGroup; detail: string}> = {
   local_extra:{group:'review',detail:'范围外有本地文件'}, remote_missing:{group:'problem',detail:'远端对应目录缺失'},
   remote_check_required:{group:'review',detail:'当前远端尚未核对'}, error:{group:'problem',detail:'本次检查未完成'},
 };
+const unknownStatus = {group:'review' as const,detail:'状态未知'};
+const statusInfo = (key: string) => Object.hasOwn(statuses,key) ? statuses[key] : unknownStatus;
+const skillStatusKey = (skill: LibraryItem) => skill.remoteMissing ? 'remote_missing' : skill.error ? 'error' : skill.remoteCheckRequired ? 'remote_check_required' : skill.status || 'unknown';
 export function displayStatus(skill: LibraryItem): {key:string;group:LibraryStatusGroup;label:string;tone:string;detail:string} {
-  const key = skill.remoteMissing ? 'remote_missing' : skill.error ? 'error' : skill.remoteCheckRequired ? 'remote_check_required' : skill.status || 'unknown';
-  const info = Object.hasOwn(statuses,key) ? statuses[key] : {group:'review' as const,detail:'状态未知'};
+  const key = skillStatusKey(skill);
+  const info = statusInfo(key);
   const detail = key === 'unknown_baseline' ? skill.baselineCommit ? '比较范围或差异待核对' : '比较基准尚未核实' : key === 'local_extra' && skill.untrackedFiles?.length ? `范围外有 ${skill.untrackedFiles.length} 个本地文件` : info.detail;
   return {key,group:info.group,...groups[info.group],detail};
 }
@@ -105,13 +108,16 @@ export function githubFolderUrl(source: { repo?: string | null; branch?: string 
 }
 const runtimeAuditNeedsAttention = (skill: LibraryItem) => skill.runtimeAudit?.status === 'needs_review' || skill.runtimeAudit?.status === 'failed';
 export function needsAttention(skill: LibraryItem): boolean {
-  const runtimeAttention = skill.runtimeIssues === undefined ? skill.runtimeWarnings?.length : runtimeAttentionCount(skill.runtimeIssues);
-  return Boolean(skill.associationPending || skill.localNotice || skill.untrackedFiles?.length || runtimeAttention || runtimeAuditNeedsAttention(skill) || attention.has(displayStatus(skill).key));
+  return needsAttentionForStatus(skill);
 }
-export function queryLibrary<T extends LibraryItem>(items: readonly T[], options: LibraryQuery = {}): T[] {
+function needsAttentionForStatus(skill: LibraryItem, status?: string): boolean {
+  const runtimeAttention = skill.runtimeIssues === undefined ? skill.runtimeWarnings?.length : runtimeAttentionCount(skill.runtimeIssues);
+  return Boolean(skill.associationPending || skill.localNotice || skill.untrackedFiles?.length || runtimeAttention || runtimeAuditNeedsAttention(skill) || attention.has(status ?? skillStatusKey(skill)));
+}
+function matchesLibrary(options: LibraryQuery) {
   const terms = normalize(options.query || '').trim().split(/\s+/).filter(Boolean);
   const source = options.sourceFilter || 'all', status = options.statusFilter || 'all';
-  const result = items.filter(skill => {
+  return (skill: LibraryItem) => {
     if (options.categoryFilter === 'favorites' ? !skill.favorite : options.categoryFilter === 'uncategorized' ? Boolean(skill.categoryId) : options.categoryFilter && options.categoryFilter !== 'all' && skill.categoryId !== options.categoryFilter) return false;
     if (source === 'local' && !skill.localPath || source === 'github' && !skill.sourceId || source === 'linked' && !(skill.localPath && skill.sourceId)) return false;
     if (status === 'attention' && !needsAttention(skill)) return false;
@@ -119,8 +125,10 @@ export function queryLibrary<T extends LibraryItem>(items: readonly T[], options
     if (!terms.length) return true;
     const searchable = normalize([skill.name, skill.displayName, skill.alias, skill.notes, skill.description, skill.repo, skill.localPath, skill.remotePath, skill.readOnly ? '只读' : ''].filter(Boolean).join(' '));
     return terms.every(term => searchable.includes(term));
-  });
-  return result.sort((a, b) => {
+  };
+}
+export function queryLibrary<T extends LibraryItem>(items: readonly T[], options: LibraryQuery = {}): T[] {
+  return items.filter(matchesLibrary(options)).sort((a, b) => {
     if (options.sort === 'status') {
       const rank = (s: T) => priority[displayStatus(s).key] ?? 10;
       const difference = rank(a) - rank(b); if (difference) return difference;
@@ -135,8 +143,18 @@ export function queryLibrary<T extends LibraryItem>(items: readonly T[], options
 
 /** Facets use the same category/source/search domain as the list, before its status filter. */
 export function libraryStatusOptions(items: readonly LibraryItem[], options: LibraryQuery = {}): {value: LibraryStatusFilter; label: string; count: number}[] {
-  const base = queryLibrary(items, {...options,statusFilter:'all'}), selected = options.statusFilter || 'all';
-  const count = (value: LibraryStatusFilter) => value === 'all' ? base.length : value === 'attention' ? base.filter(needsAttention).length : base.filter(skill => isStatusGroup(value) ? displayStatus(skill).group === value : displayStatus(skill).key === value).length;
+  const matches = matchesLibrary({...options,statusFilter:'all'}), selected = options.statusFilter || 'all';
+  const groupCounts = new Map<LibraryStatusGroup, number>();
+  let total = 0, attentionCount = 0, selectedCount = 0;
+  for (const skill of items) {
+    if (!matches(skill)) continue;
+    const key = skillStatusKey(skill), { group } = statusInfo(key);
+    groupCounts.set(group, (groupCounts.get(group) ?? 0) + 1);
+    total++;
+    if (needsAttentionForStatus(skill, key)) attentionCount++;
+    if (key === selected) selectedCount++;
+  }
+  const count = (value: LibraryStatusFilter) => value === 'all' ? total : value === 'attention' ? attentionCount : isStatusGroup(value) ? groupCounts.get(value) ?? 0 : selectedCount;
   const candidates: LibraryStatusFilter[] = ['all','attention',...LIBRARY_STATUS_GROUPS.map(group => group.value)];
   if (!candidates.includes(selected)) candidates.push(selected);
   return candidates.map(value => ({value,label:statusFilterLabel(value),count:count(value)})).filter(option => option.value === 'all' || option.count > 0 || option.value === selected);
