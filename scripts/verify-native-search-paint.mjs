@@ -13,10 +13,10 @@ import { VisualSession, inside, requiredStates, validateReferences, visualObserv
 const source = '37f83f135f9fd8facd90255fa33f58d534f8364d';
 const candidateRun = '44889635017';
 const validation = 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data';
-const branch = 'codex/hosted-search-paint-neutral-37f83f1-20261121';
+const branch = 'codex/hosted-search-paint-mismatch-37f83f1-20261121';
 const statePair = ['search-0001', 'search-0002'];
-const measuredTrials = 12;
-const maxCheckAttempts = 24;
+const measuredTrials = 2;
+const maxCheckAttempts = 2;
 const expectedSchedulingKeys = 2002;
 const execute = promisify(execFile);
 const shaPattern = /^[a-f0-9]{64}$/;

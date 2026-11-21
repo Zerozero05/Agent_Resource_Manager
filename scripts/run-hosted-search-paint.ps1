@@ -251,15 +251,46 @@ function Run-Measurement {
             $sourceReport.approvalSha256 -cne $ApprovalSha256 -or $sourceReport.arm -cne 'detached') {
             throw 'The diagnostic report failed its identity, data, observer mode, or exit checks.'
         }
-        if ($process.ExitCode -ne 0 -or $sourceReport.status -cne 'detached-paint-observed' -or @($sourceReport.samples).Count -ne 12) {
+        if ($process.ExitCode -ne 0 -or $sourceReport.status -cne 'detached-paint-observed' -or @($sourceReport.samples).Count -ne 2) {
             throw 'Search-paint diagnostic did not collect sufficient valid observations.'
         }
         return $sourceReport
     } finally {
-        if ($null -ne $stderr -and $stderr.IsCompletedSuccessfully -and $stderr.Result) {
-            [IO.File]::WriteAllText((Join-Path $measurements "$phase-harness-stderr.txt"), $stderr.Result)
+        try {
+            $mismatch = Join-Path $root 'search-paint-mismatch.png'
+            if (Test-Path -LiteralPath $mismatch) {
+                $item = Get-Item -LiteralPath $mismatch -Force
+                if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    $item.Length -lt 24 -or $item.Length -gt 2000000) { throw 'The bounded synthetic frame is not valid.' }
+                $bytes = [IO.File]::ReadAllBytes($item.FullName)
+                if (([Convert]::ToHexString($bytes,0,8)) -cne '89504E470D0A1A0A') { throw 'The diagnostic frame is not a PNG.' }
+                $failure = Get-Content -Raw -LiteralPath $reportFile | ConvertFrom-Json
+                if ($failure.status -cne 'detached-incomplete' -or $failure.arm -cne 'detached' -or
+                    $failure.executableSha256 -cne $candidateSha256 -or
+                    $failure.error -cnotmatch 'Saved search-paint-mismatch\.png at bounds=\[([0-9]+),([0-9]+),([0-9]+),([0-9]+)\]\.') {
+                    throw 'The capture is not bound to the failed owned diagnostic.'
+                }
+                $actualBounds = @([int]$Matches[1],[int]$Matches[2],[int]$Matches[3],[int]$Matches[4])
+                $visible = $receipt.captureBounds
+                if ($actualBounds[2] -lt 2 -or $actualBounds[3] -lt 2 -or $actualBounds[0] -lt $visible[0] -or $actualBounds[1] -lt $visible[1] -or
+                    ($actualBounds[0]+$actualBounds[2]) -gt ($visible[0]+$visible[2]) -or
+                    ($actualBounds[1]+$actualBounds[3]) -gt ($visible[1]+$visible[3])) { throw 'The diagnostic frame leaves the approved client rectangle.' }
+                $target = Join-Path $measurements 'search-paint-mismatch.png'
+                if (Test-Path -LiteralPath $target) { throw 'A mismatch frame is already present.' }
+                Copy-Item -LiteralPath $item.FullName -Destination $target
+                Save-Json (Join-Path $measurements 'search-paint-mismatch-proof.json') ([ordered]@{
+                    workflowCommit=$overlay.workflowCommit; candidateSha256=$candidateSha256; fixture=$reference.datasetFingerprint
+                    gestureScope='two exact owned synthetic search actions'; originalLatencyGateEvaluated=$false
+                    frameSha256=(Get-FileHash -LiteralPath $target).Hash.ToLowerInvariant()
+                    frameBytes=$item.Length; bounds=$actualBounds
+                })
+            }
+        } finally {
+            if ($null -ne $stderr -and $stderr.IsCompletedSuccessfully -and $stderr.Result) {
+                [IO.File]::WriteAllText((Join-Path $measurements "$phase-harness-stderr.txt"), $stderr.Result)
+            }
+            $process.Dispose()
         }
-        $process.Dispose()
     }
 }
 

@@ -415,6 +415,30 @@ public sealed class NativeVisualInput : IDisposable {
     Pixels(bitmap,pixels);
     return new SearchFrame(start,end);
   }
+  static void WriteSearchMismatchPng(Bitmap bitmap,byte[] pixels,Stream output) {
+    // Make the copied desktop RGB visible in PNG viewers regardless of GDI alpha.
+    for(int index=3;index<pixels.Length;index+=4)pixels[index]=255;
+    var area=new Rectangle(0,0,bitmap.Width,bitmap.Height);
+    var data=bitmap.LockBits(area,ImageLockMode.WriteOnly,PixelFormat.Format32bppArgb);
+    try {
+      int stride=bitmap.Width*4;
+      for(int row=0;row<bitmap.Height;row++)
+        Marshal.Copy(pixels,row*stride,IntPtr.Add(data.Scan0,row*data.Stride),stride);
+    } finally {bitmap.UnlockBits(data);}
+    bitmap.Save(output,ImageFormat.Png);
+  }
+  string PreserveSearchMismatch(int[] bounds,Bitmap bitmap,byte[] pixels) {
+    Unobscured(bounds);
+    const string filename="search-paint-mismatch.png";
+    string path=FilePath(Path.Combine(root,filename));
+    try {
+      using(var output=new FileStream(path,FileMode.CreateNew,FileAccess.Write,FileShare.None))
+        WriteSearchMismatchPng(bitmap,pixels,output);
+      return " Saved "+filename+" at bounds=["+string.Join(",",bounds)+"].";
+    } catch(IOException) {
+      return " A new mismatch PNG could not be written.";
+    }
+  }
   public object SearchPaint(string value,SearchRoi[] previousRois,SearchRoi[] targetRois) {
     Guard();
     ValidateSearch(value);
@@ -439,7 +463,8 @@ public sealed class NativeVisualInput : IDisposable {
         if(frame.end>deadline)break;
         bool matches=SearchMatches(pixels,bounds,target);
         if(firstHit!=null) {
-          if(!matches)throw new InvalidOperationException("The first visible search result failed the independent confirmation."+SearchMismatch(pixels,bounds,previous,target));
+          if(!matches)throw new InvalidOperationException("The first visible search result failed the independent confirmation."+
+            SearchMismatch(pixels,bounds,previous,target)+PreserveSearchMismatch(bounds,bitmap,pixels));
           Guard();
           long lower=lastMiss==null?dispatch.start:Math.Max(dispatch.start,lastMiss.start);
           return new{typed=value,qpcFrequency=Stopwatch.Frequency.ToString(),inputStartedQpc=dispatch.start.ToString(),
@@ -451,8 +476,9 @@ public sealed class NativeVisualInput : IDisposable {
         if(matches)firstHit=frame;
         else lastMiss=frame;
       }
+      throw new TimeoutException("The frozen search result and its independent confirmation were not observed within the native bound."+
+        SearchMismatch(pixels,bounds,previous,target)+PreserveSearchMismatch(bounds,bitmap,pixels));
     }
-    throw new TimeoutException("The frozen search result and its independent confirmation were not observed within the native bound."+SearchMismatch(pixels,bounds,previous,target));
   }
   public static int CheckSearchPaintComparator() {
     var bounds=new[]{4,8,4,3};
@@ -478,8 +504,16 @@ public sealed class NativeVisualInput : IDisposable {
       byte[] reused=Pixels(bitmap,pixels);
       if(!Object.ReferenceEquals(reused,pixels)||!SearchMatches(reused,bounds,target))
         throw new InvalidOperationException("Sampled bitmap decoding must reuse the buffer and preserve visible RGB.");
+      reused[0]=17;reused[1]=34;reused[2]=51;reused[3]=0;
+      using(var png=new MemoryStream()) {
+        WriteSearchMismatchPng(bitmap,reused,png);
+        png.Position=0;
+        using(var decoded=new Bitmap(png))
+          if(decoded.Size!=bitmap.Size||decoded.GetPixel(0,0)!=Color.FromArgb(255,51,34,17))
+            throw new InvalidOperationException("The mismatch PNG must preserve the owned frame size and visible RGB.");
+      }
     }
-    return 8;
+    return 9;
   }
   public object Sheet(string path,string[] names,string[] paths) {
     Guard();path=FilePath(path);
