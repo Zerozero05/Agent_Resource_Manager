@@ -926,10 +926,18 @@ public sealed class NativeUiMeasurement : IDisposable {
     if(clock.ElapsedMilliseconds>=budgetMs)throw new TimeoutException("The read-only reference observation exceeded its remaining deadline.");
     return value;
   }
+  object FirstSearchValue() {
+    AutomationElement edit=Find(AutomationElement.FromHandle(window),"搜索 Skill",ControlType.Edit,false);
+    object pattern;
+    string value=edit!=null&&edit.TryGetCurrentPattern(ValuePattern.Pattern,out pattern)?((ValuePattern)pattern).Current.Value:null;
+    // Do not retain text other than the known synthetic query.
+    const string expected="perf-skill-0000";
+    return new{readable=value!=null,matchesExpected=value==expected,observed=value==expected?expected:null,empty=value==String.Empty};
+  }
   public object ReadReference(string operation,string name,string scope,int budgetMs) {
-    if(operation!="names"&&operation!="state")throw new InvalidOperationException("Only read-only reference queries may retry.");
+    if(operation!="names"&&operation!="state"&&operation!="firstSearchValue")throw new InvalidOperationException("Only read-only reference queries may retry.");
     uint expectedInput=LastInputTick();
-    return ReadReferenceWithRetry(() => operation=="names"?Names():InspectNamed(name,scope,true),() => {
+    return ReadReferenceWithRetry(() => operation=="names"?Names():operation=="state"?InspectNamed(name,scope,true):FirstSearchValue(),() => {
       Identity(true);
       if(LastInputTick()!=expectedInput)throw new InvalidOperationException("Desktop input changed during the same owned reference observation.");
     },budgetMs);
@@ -1529,7 +1537,8 @@ try {
                 if($request.op -in @('keyboardShortcut','keyboardEdit','keyboardField','keyboardIme','prepareKeyboardForeground') -and ($PrivateUi -or -not $KeyboardInput)){throw 'Keyboard operations require an explicitly enabled non-private functional session.'}
                 if($request.op -in @('driverMemory','collectDriverMemory') -and (-not $DriverMemoryDiagnostic -or $Mode -ne 'bridge' -or -not $AccessibilityInput -or $KeyboardInput -or $PrivateUi)){throw 'Driver memory diagnostics require an explicitly enabled non-private accessibility-only bridge session without keyboard input.'}
                 $referenceReadBudget=$request.referenceReadBudgetMs
-                if($null -ne $referenceReadBudget -and ($request.op -cnotin @('names','state') -or $PrivateUi -or
+                if($request.op -ceq 'firstSearchValue' -and $null -eq $referenceReadBudget){throw 'The first-search value requires an owned reference observation budget.'}
+                if($null -ne $referenceReadBudget -and ($request.op -cnotin @('names','state','firstSearchValue') -or $PrivateUi -or
                   ($referenceReadBudget -isnot [int] -and $referenceReadBudget -isnot [long]) -or $referenceReadBudget -lt 1 -or $referenceReadBudget -gt 15000)){
                   throw 'A reference read retry requires an exact names or state query and its remaining original deadline.'
                 }
@@ -1582,6 +1591,7 @@ try {
                     'names' {if($null -ne $referenceReadBudget){$session.ReadReference('names','','',[int]$referenceReadBudget)}else{$session.Names()}}
                     'snapshot' {$session.Names()}
                     'state' {if($null -ne $referenceReadBudget){$session.ReadReference('state',[string]$request.name,[string]$request.scope,[int]$referenceReadBudget)}else{$session.InspectNamed([string]$request.name,[string]$request.scope)}}
+                    'firstSearchValue' {$session.ReadReference('firstSearchValue','','',[int]$referenceReadBudget)}
                     'fields' {$session.FormFields()}
                     'invokeName' {$session.InvokeUnique([string]$request.name,[string]$request.scope);@{invoked=$true;functionalOnly=$true}}
                     'setField' {@{value=$session.SetField([string]$request.name,[string]$request.value,[bool]$request.numeric,[string]$request.scope);functionalOnly=$true}}

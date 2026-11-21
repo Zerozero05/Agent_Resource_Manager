@@ -21,6 +21,7 @@ const candidateSha256 = '9436a75a4cf40316f80702e43c7b4da35067ec9e16a0ce592846599
 const buildInfoSha256 = '0bdcc16ff13fffa08045b791abcb93897b24c91153675127c6fddd8dbc1c0028';
 const transportSha256 = 'f9dfe387f6900925808cdd16b9785f29b96e90c40b554b828b17557f99bd846f';
 const hostedReferenceFrame = null;
+const hostedFirstSearchProbe = false;
 const helper = fileURLToPath(new URL('native-visual-input.ps1', import.meta.url));
 const sourceFiles = ['verify-native-visual-stability.mjs', 'native-visual-input.ps1', 'performance-policy.mjs', 'performance-fixture.mjs', 'diagnose-native-idle-memory.mjs', 'native-uia-client.mjs', 'verify-native-uia.ps1'].map(name => fileURLToPath(new URL(name, import.meta.url)));
 const format = 'agent-resource-manager-native-visual-stability-v1';
@@ -368,6 +369,34 @@ async function references(descriptor) {
             await nativeSearch(index);
             if (!index) {
                 await point('clear', '清空搜索');
+                if (hostedFirstSearchProbe) {
+                    assert.ok(hostedReferenceFrame, 'First-search diagnosis requires the verified hosted frame.');
+                    const frame = await visual.call('identity');
+                    const deadline = performance.now() + visualPolicy.matchTimeoutMs;
+                    const title = 'Perf Skill 0000';
+                    const unscoped = await observeRows('state', { name: title }, deadline);
+                    const scoped = await observeRows('state', { name: title, scope: tableName }, deadline);
+                    const tables = await observeRows('state', { name: tableName }, deadline);
+                    const edits = await observeRows('state', { name: '搜索 Skill' }, deadline);
+                    const remaining = Math.floor(deadline - performance.now());
+                    assert.ok(remaining > 0, 'The first-search observation reached its deadline.');
+                    const searchValue = await app.call('firstSearchValue', { referenceReadBudgetMs: remaining }, remaining);
+                    assert.deepEqual(await visual.call('identity'), frame, 'The owned viewport or desktop input changed during the diagnostic.');
+                    await visual.finish();
+                    visual = null;
+                    await app.quit();
+                    app = null;
+                    const evidence = {
+                        status: 'diagnostic-first-search-observed', syntheticOnly: true,
+                        candidateSha256, datasetFingerprint: descriptor.dataset.dataFingerprint,
+                        normalExit: true, frame, initialTable: ref.states.all.rois[0].box,
+                        expectedSearch: 'perf-skill-0000', searchValue, title: { name: title, unscoped, scoped }, tables, edits,
+                    };
+                    const path = join(descriptor.root, 'first-search-observation.json');
+                    await writeFile(path, json(evidence), { flag: 'wx' });
+                    console.log(json({ status: evidence.status, path }));
+                    return;
+                }
                 await point('openDocument', 'Perf Skill 0000', '可横向滚动的 Skill 列表');
             }
             const title = `Perf Skill ${String(index).padStart(4, '0')}`;

@@ -1,4 +1,4 @@
-name: Prepare hosted visual references for afdcc14 (bounded provider retry)
+name: Diagnose the first hosted Skill search for afdcc14
 on: create
 permissions:
   contents: read
@@ -11,9 +11,9 @@ env:
   CANDIDATE_SHA256: '2a4b27faf9b2aed958760dc30d5f4ad980b8f62a9e3be6e38d321382f8d89db3'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-afdcc14-provider-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-first-search-afdcc14-20261121' }}
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 7
     defaults:
       run:
         shell: pwsh
@@ -60,9 +60,9 @@ jobs:
           $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())
           $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
           Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
-      - name: Generate owned synthetic ROI references only
+      - name: Observe only the first owned synthetic search
         id: generate
-        timeout-minutes: 18
+        timeout-minutes: 3
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
           $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
@@ -144,6 +144,7 @@ jobs:
               buildInfoSha256 = $infoDigest
               transportSha256 = $env:CANDIDATE_SHA256
               hostedReferenceFrame = $referenceFrame
+              hostedFirstSearchProbe = $true
             }
             $text = [IO.File]::ReadAllText($module)
             foreach ($key in $entries.Keys) {
@@ -165,71 +166,49 @@ jobs:
                 (Split-Path -Parent $referenceRoot) -ine $approved -or (Split-Path -Leaf $referenceRoot) -cnotmatch '^native-visual-[A-Za-z0-9]+$') {
               throw 'Expected the exact generated visual descriptor.'
             }
-            $stage = 'capture-owned-references'
+            $stage = 'observe-owned-first-search'
             $capture = @(& node $module --references $descriptorPath)
             if ($LASTEXITCODE -ne 0) {
               $detail = Join-Path $referenceRoot 'reference-failure.json'
               if (Test-Path -LiteralPath $detail -PathType Leaf) {
                 $referenceError = Get-Content -LiteralPath $detail -Raw | ConvertFrom-Json
               }
-              throw 'The original reference generation did not complete.'
+              throw 'The owned first-search diagnosis did not complete.'
             }
             $result = ($capture -join [Environment]::NewLine) | ConvertFrom-Json
-            $referencePath = Join-Path $referenceRoot 'visual-references.json'
+            $observationPath = Join-Path $referenceRoot 'first-search-observation.json'
             $driverPath = Join-Path $referenceRoot 'reference-driver.json'
             $descriptor = Get-Content -LiteralPath $descriptorPath -Raw | ConvertFrom-Json
-            $refs = Get-Content -LiteralPath $referencePath -Raw | ConvertFrom-Json
+            $observed = Get-Content -LiteralPath $observationPath -Raw | ConvertFrom-Json
             $driver = Get-Content -LiteralPath $driverPath -Raw | ConvertFrom-Json
-            $stage = 'validate-reference-receipt'
-            if ($result.status -cne 'references-generated-review-required' -or $result.referenceCount -ne 72 -or
-                $result.visualApprovalRequired -ne $true -or $result.pilotRequired -ne $true -or (Resolve-Path -LiteralPath $result.path).Path -ine $referencePath -or
+            $stage = 'validate-first-search-observation'
+            if ($result.status -cne 'diagnostic-first-search-observed' -or (Resolve-Path -LiteralPath $result.path).Path -ine $observationPath -or
                 $descriptor.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $descriptor.buildInfoSha256 -cne $infoDigest -or
                 $descriptor.dataset.syntheticOnly -ne $true -or $descriptor.dataset.skillCount -ne 1000 -or $descriptor.dataset.toolCount -ne 100 -or
-                $refs.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $refs.datasetFingerprint -cne $descriptor.dataset.dataFingerprint -or
-                $refs.semanticReferencePhaseCompleted -ne $true -or $refs.capture -cne 'foreground-owned-CopyFromScreen' -or
+                $observed.status -cne $result.status -or $observed.syntheticOnly -ne $true -or $observed.normalExit -ne $true -or
+                $observed.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $observed.datasetFingerprint -cne $descriptor.dataset.dataFingerprint -or
+                $observed.expectedSearch -cne 'perf-skill-0000' -or $observed.title.name -cne 'Perf Skill 0000' -or
+                ($null -ne $observed.searchValue.observed -and $observed.searchValue.observed -cne $observed.expectedSearch) -or
+                $observed.frame.foreground -ne $true -or $observed.frame.pid -ne $driver.pid -or
+                $observed.frame.creationFileTime -cne $driver.creationFileTime -or $observed.frame.windowHandle -ne $driver.windowHandle -or
                 $driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or $driver.closedNormally -ne $true -or $driver.dataDirectory -ine $descriptor.dataset.dataDir) {
-              throw 'The reference receipt does not bind to a completed synthetic session and graceful exit.'
+              throw 'The diagnostic receipt does not bind to the completed synthetic session and graceful exit.'
             }
             foreach ($field in $referenceFrame.Keys) {
-              if ($refs.frame.$field -ne $referenceFrame[$field]) { throw 'The captured reference frame differs from the hosted preflight.' }
+              if ($observed.frame.$field -ne $referenceFrame[$field]) { throw 'The diagnostic frame differs from the hosted preflight.' }
             }
-            $sheets = @($refs.reviewSheets)
-            $roiCount = @($refs.states.PSObject.Properties.Value | ForEach-Object { $_.rois }).Count
-            if ($sheets.Count -ne 9 -or $roiCount -ne 210) { throw 'Expected exactly nine montage sheets from 210 synthetic crops.' }
-            $sheetPaths = for ($i = 0; $i -lt $sheets.Count; $i++) {
-              $sheet = $sheets[$i]
-              $path = Join-Path $referenceRoot ("references/review-{0:D2}.png" -f ($i + 1))
-              if ((Resolve-Path -LiteralPath $sheet.path).Path -ine $path -or
-                  ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                  (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sheet.sha256) {
-                throw 'A synthetic ROI review sheet failed its exact path or digest check.'
-              }
-              $path
-            }
-            $output = Join-Path $env:RUNNER_TEMP 'arm-visual-reference-review'
-            New-Item -ItemType Directory -Path $output | Out-Null
-            foreach ($path in @($descriptorPath, $referencePath, $driverPath) + $sheetPaths) { Copy-Item -LiteralPath $path -Destination $output }
             $receipt = [ordered]@{
-              status = 'references-generated-review-required'
+              status = $observed.status
               candidateSource = $env:CANDIDATE_SOURCE
               candidateSha256 = $env:CANDIDATE_SHA256
               candidateRunId = $env:CANDIDATE_RUN_ID
               candidateArtifactId = $env:CANDIDATE_ARTIFACT_ID
-              buildInfoSha256 = $infoDigest
-              referenceSha256 = (Get-FileHash -LiteralPath $referencePath -Algorithm SHA256).Hash.ToLowerInvariant()
-              descriptorSha256 = (Get-FileHash -LiteralPath $descriptorPath -Algorithm SHA256).Hash.ToLowerInvariant()
-              driverSha256 = (Get-FileHash -LiteralPath $driverPath -Algorithm SHA256).Hash.ToLowerInvariant()
               desktop = $desktop
-              referenceFrame = $referenceFrame
-              referenceCount = 72
-              roiCount = $roiCount
-              sheets = $sheets.Count
-              normalExit = $true
-              visualReviewCompleted = $false
-              pilotRun = $false
+              observation = $observed
             }
-            $receipt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $output 'receipt.json') -Encoding utf8NoBOM
-            $receipt | ConvertTo-Json -Depth 5 -Compress
+            $output = Join-Path $env:RUNNER_TEMP 'arm-visual-first-search.json'
+            $receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $output -Encoding utf8NoBOM
+            $receipt | ConvertTo-Json -Depth 12 -Compress
           } catch {
             [ordered]@{status='reference-preflight-failed'; stage=$stage; candidateSource=$env:CANDIDATE_SOURCE;
               candidateSha256=$env:CANDIDATE_SHA256; message=$_.Exception.Message; referenceError=$referenceError;
@@ -245,12 +224,12 @@ jobs:
             [ordered]@{status='reference-preflight-failed'; stage='workflow-setup-or-candidate-preflight'; candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$env:CANDIDATE_SHA256} |
               ConvertTo-Json | Set-Content -LiteralPath $failure -Encoding utf8NoBOM
           }
-      - name: Upload only synthetic reference sheets and bound manifests
+      - name: Upload only the synthetic first-search observation
         if: ${{ steps.generate.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Agent_Resource_Manager_visual_references_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arm-visual-reference-review/
+          name: Agent_Resource_Manager_first_search_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-visual-first-search.json
           if-no-files-found: error
           retention-days: 14
       - name: Upload only the synthetic preflight failure receipt
