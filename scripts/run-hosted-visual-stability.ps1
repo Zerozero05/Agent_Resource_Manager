@@ -10,10 +10,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$candidateSource = '0ac5e79b7a3d1184e7602f241793f240b0609d44'
-$candidateRun = '44880393531'
-$candidateArtifact = '14698411078'
-$candidateSha256 = 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24'
+$candidateSource = '37f83f135f9fd8facd90255fa33f58d534f8364d'
+$candidateRun = '44889635017'
+$candidateArtifact = $env:CANDIDATE_ARTIFACT_ID
+$candidateSha256 = $env:CANDIDATE_SHA256
+$candidateBuildInfoSha256 = $env:CANDIDATE_BUILD_INFO_SHA256
+if ($candidateArtifact -cnotmatch '^[0-9]+$' -or $candidateSha256 -cnotmatch '^[a-f0-9]{64}$' -or
+    $candidateBuildInfoSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Exact candidate provenance is required.' }
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:GITHUB_REPOSITORY -ine 'Zerozero05/Agent_Resource_Manager' -or -not [Environment]::UserInteractive -or
     [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
@@ -112,7 +115,8 @@ Assert-Digest $executable $candidateSha256
 Assert-Digest $buildInfo $receipt.buildInfoSha256
 $info = Get-Content -Raw -LiteralPath $buildInfo | ConvertFrom-Json
 if ($info.buildMode -cne 'release' -or $info.sourceCommit -cne $candidateSource -or $info.executableSha256 -cne $candidateSha256 -or
-    $info.workflowRunId -ne $candidateRun -or $info.workflowRunAttempt -ne 1 -or $info.repository -ine $env:GITHUB_REPOSITORY) {
+    $info.originalBuildInfoSha256 -cne $candidateBuildInfoSha256 -or $info.workflowRunId -ne $candidateRun -or
+    $info.workflowRunAttempt -ne 1 -or $info.repository -ine $env:GITHUB_REPOSITORY) {
     throw 'The verified release build metadata is not for the exact candidate.'
 }
 
