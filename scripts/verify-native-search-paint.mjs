@@ -13,8 +13,8 @@ import { VisualSession, inside, requiredStates, validateReferences, visualObserv
 const source = '37f83f135f9fd8facd90255fa33f58d534f8364d';
 const candidateRun = '44889635017';
 const validation = 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data';
-const branch = 'codex/hosted-search-paint-f7447a0-20261121';
-const statePair = ['search-0000', 'search-0001'];
+const branch = 'codex/hosted-search-paint-neutral-37f83f1-20261121';
+const statePair = ['search-0001', 'search-0002'];
 const measuredTrials = 12;
 const maxCheckAttempts = 24;
 const expectedSchedulingKeys = 2002;
@@ -333,7 +333,8 @@ async function main(args) {
         // Prime the fixed left state without including the positioning or scroll time in the measurement.
         await visual.call('scrollLibrary', { ...reference.controls.search, up: true });
         await visual.call('click', reference.controls.search);
-        assert.equal((await visual.call('text', { value: 'perf-skill-0000' })).typed, 'perf-skill-0000');
+        const initialQuery = 'perf-skill-' + statePair[0].slice(-4);
+        assert.equal((await visual.call('text', { value: initialQuery })).typed, initialQuery);
         const firstState = reference.states[statePair[0]];
         const primeDeadline = performance.now() + 15000;
         let primed = false;

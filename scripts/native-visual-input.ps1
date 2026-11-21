@@ -379,18 +379,29 @@ public sealed class NativeVisualInput : IDisposable {
       }
     return new[]{left,top,right-left,bottom-top};
   }
-  // Compare visible RGB of every anchor in one copied rectangle.
-  static bool SearchMatches(byte[] frame,int[] bounds,SearchAnchor[] anchors) {
-    foreach(SearchAnchor anchor in anchors) {
-      int[] box=anchor.box;
-      int stride=box[2]*4;
-      for(int row=0;row<box[3];row++) {
-        int offset=((box[1]-bounds[1]+row)*bounds[2]+box[0]-bounds[0])*4;
-        for(int channel=0;channel<stride;channel++)
-          if(channel%4!=3&&frame[offset+channel]!=anchor.pixels[row*stride+channel])return false;
-      }
+  // Compare visible RGB without the desktop bitmap's unused alpha channel.
+  static bool SearchAnchorMatches(byte[] frame,int[] bounds,SearchAnchor anchor) {
+    int[] box=anchor.box;
+    int stride=box[2]*4;
+    for(int row=0;row<box[3];row++) {
+      int offset=((box[1]-bounds[1]+row)*bounds[2]+box[0]-bounds[0])*4;
+      for(int channel=0;channel<stride;channel++)
+        if(channel%4!=3&&frame[offset+channel]!=anchor.pixels[row*stride+channel])return false;
     }
     return true;
+  }
+  static bool SearchMatches(byte[] frame,int[] bounds,SearchAnchor[] anchors) {
+    foreach(SearchAnchor anchor in anchors)
+      if(!SearchAnchorMatches(frame,bounds,anchor))return false;
+    return true;
+  }
+  static string SearchMismatch(byte[] frame,int[] bounds,SearchAnchor[] previous,SearchAnchor[] target) {
+    string Describe(SearchAnchor[] anchors) {
+      return "title="+SearchAnchorMatches(frame,bounds,anchors[0])+
+        ", table="+SearchAnchorMatches(frame,bounds,anchors[1])+
+        ", count="+SearchAnchorMatches(frame,bounds,anchors[2]);
+    }
+    return " Last owned frame, previous ("+Describe(previous)+"), target ("+Describe(target)+").";
   }
   SearchFrame CaptureSearchFrame(int[] bounds,Bitmap bitmap,Graphics graphics,byte[] pixels) {
     Unobscured(bounds);
@@ -416,7 +427,7 @@ public sealed class NativeVisualInput : IDisposable {
     using(var graphics=Graphics.FromImage(bitmap)) {
       SearchFrame initial=CaptureSearchFrame(bounds,bitmap,graphics,pixels);
       if(!SearchMatches(pixels,bounds,previous)||SearchMatches(pixels,bounds,target))
-        throw new InvalidOperationException("The previous search must be visible and the target absent before any input.");
+        throw new InvalidOperationException("The previous search must be visible and the target absent before any input."+SearchMismatch(pixels,bounds,previous,target));
       GuardSearchFocus();
       var dispatch=Send(input,false);
       const int timeoutMs=4000;
@@ -428,7 +439,7 @@ public sealed class NativeVisualInput : IDisposable {
         if(frame.end>deadline)break;
         bool matches=SearchMatches(pixels,bounds,target);
         if(firstHit!=null) {
-          if(!matches)throw new InvalidOperationException("The first visible search result failed the independent confirmation.");
+          if(!matches)throw new InvalidOperationException("The first visible search result failed the independent confirmation."+SearchMismatch(pixels,bounds,previous,target));
           Guard();
           long lower=lastMiss==null?dispatch.start:Math.Max(dispatch.start,lastMiss.start);
           return new{typed=value,qpcFrequency=Stopwatch.Frequency.ToString(),inputStartedQpc=dispatch.start.ToString(),
@@ -441,7 +452,7 @@ public sealed class NativeVisualInput : IDisposable {
         else lastMiss=frame;
       }
     }
-    throw new TimeoutException("The frozen search result and its independent confirmation were not observed within the native bound.");
+    throw new TimeoutException("The frozen search result and its independent confirmation were not observed within the native bound."+SearchMismatch(pixels,bounds,previous,target));
   }
   public static int CheckSearchPaintComparator() {
     var bounds=new[]{4,8,4,3};
