@@ -10,7 +10,13 @@ using ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface;
 using Microsoft::WRL::Wrappers::HStringReference;
 
 constexpr int FrameBuffers = 4;
+constexpr int64_t MinUpdateInterval100ns = 10000;
 constexpr double FrameToCpuLimitMs = 32.0;
+
+void MarkPhase(const char* phase) {
+    std::fprintf(stderr, "ARM-WGC-PHASE %s\n", phase);
+    std::fflush(stderr);
+}
 
 struct Runtime {
     Runtime() { Check(RoInitialize(RO_INIT_MULTITHREADED), "RoInitialize"); }
@@ -97,6 +103,7 @@ class Capture {
     ComPtr<Wgc::IGraphicsCaptureSession> session;
     Wgc::CloseOnExit closeSession;
     Wgc::Notifications notifications;
+    Wgc::TimeSpan updateIntervalBefore{}, updateInterval{};
     unsigned framesRead{};
 
 public:
@@ -141,14 +148,26 @@ public:
         ComPtr<Wgc::IGraphicsCaptureSession2> cursor;
         Check(session.As(&cursor), "WGC cursor option interface");
         Check(cursor->put_IsCursorCaptureEnabled(false), "exclude pointer from WGC pixels");
+        ComPtr<Wgc::IGraphicsCaptureSession5> cadence;
+        Check(session.As(&cadence), "WGC minimum update interval interface");
+        Check(cadence->get_MinUpdateInterval(&updateIntervalBefore), "read original WGC minimum update interval");
+        Check(cadence->put_MinUpdateInterval(Wgc::TimeSpan{Wgc::MinUpdateInterval100ns}),
+            "set 1 ms WGC minimum update interval");
+        Check(cadence->get_MinUpdateInterval(&updateInterval), "read back WGC minimum update interval");
+        if (updateInterval.Duration != Wgc::MinUpdateInterval100ns)
+            throw std::runtime_error("WGC did not retain the exact 1 ms session interval");
         notifications.Subscribe(pool.Get());
         const auto row = RowDescription(width, D3D11_USAGE_STAGING);
         Check(device.device->CreateTexture2D(&row, nullptr, &staging), "allocate one WGC readback row");
         target.Verify();
+        Wgc::MarkPhase("session-starting");
         Check(session->StartCapture(), "WGC StartCapture");
+        Wgc::MarkPhase("session-started");
     }
 
     const RECT& Bounds() const { return bounds; }
+    int64_t UpdateIntervalBefore100ns() const { return updateIntervalBefore.Duration; }
+    int64_t UpdateInterval100ns() const { return updateInterval.Duration; }
 
     Sample Poll() {
         Sample sample{};
@@ -190,9 +209,13 @@ public:
 
     Wgc::FrameCounts Finish() {
         target.Verify();
+        Wgc::MarkPhase("session-closing");
         closeSession.Close();
+        Wgc::MarkPhase("notifications-detaching");
         const auto offered = notifications.Stop();
+        Wgc::MarkPhase("pool-closing");
         closePool.Close();
+        Wgc::MarkPhase("capture-closed");
         return {offered, framesRead};
     }
 

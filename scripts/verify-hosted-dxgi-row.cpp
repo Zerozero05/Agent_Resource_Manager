@@ -485,6 +485,9 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
     const auto neutralArrived = Counter();
     const auto frequency = Frequency();
     while (DeltaMs(neutralArrived, Counter(), frequency) < 250) Sleep(4);
+#ifdef ARM_WGC_MOTION
+    Wgc::MarkPhase("capture-constructing");
+#endif
     Capture capture(target);
     const IdleFrameWait idleWait;
     const auto primeStarted = Counter();
@@ -499,6 +502,9 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
 
     std::vector<Sample> trace;
     trace.reserve(1024);
+#ifdef ARM_WGC_MOTION
+    Wgc::MarkPhase("observing-hover");
+#endif
     const auto baselineStarted = Counter();
     while (DeltaMs(baselineStarted, Counter(), capture.frequency) < 95) {
         const auto sample = capture.Poll();
@@ -516,6 +522,7 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
     }
     const auto observationEnd = Counter();
 #ifdef ARM_WGC_MOTION
+    Wgc::MarkPhase("observation-complete");
     const auto counts = capture.Finish();
 #endif
     target.MovePointer(neutral);
@@ -527,9 +534,10 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
     const auto& bounds = capture.Bounds();
     std::printf("\"method\":\"WGC.CreateForWindow\",\"defaultCaptureBorder\":true,"
                 "\"captureBounds\":[%ld,%ld,%ld,%ld],\"frameBuffers\":%d,\"framesOffered\":%u,"
-                "\"framesRead\":%u,\"rowWidth\":%u,\"baseline\":",
+                "\"framesRead\":%u,\"updateIntervalBefore100ns\":%lld,\"updateInterval100ns\":%lld,"
+                "\"rowWidth\":%u,\"baseline\":",
         bounds.left, bounds.top, bounds.right, bounds.bottom, Wgc::FrameBuffers,
-        counts.offered, counts.read, capture.width);
+        counts.offered, counts.read, capture.UpdateIntervalBefore100ns(), capture.UpdateInterval100ns(), capture.width);
 #else
     std::printf("\"rowWidth\":%u,\"systemMemory\":%s,\"baseline\":",
         capture.width, capture.systemMemory() ? "true" : "false");
@@ -553,6 +561,10 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
         printSample(trace[i]);
     }
     std::puts("]}");
+#ifdef ARM_WGC_MOTION
+    std::fflush(stdout);
+    Wgc::MarkPhase("report-serialized");
+#endif
     return 0;
 }
 }
@@ -562,7 +574,7 @@ int wmain(int argc, wchar_t** argv) {
         if (argc == 2 && std::wcscmp(argv[1], L"--synthetic") == 0) return RunSynthetic();
         const bool hover = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover") == 0;
 #ifdef ARM_WGC_MOTION
-        const bool allowed = hover && EnvEquals(L"GITHUB_REF_NAME", L"codex/hosted-wgc-motion-3536ca0-20261121") &&
+        const bool allowed = hover && EnvEquals(L"GITHUB_REF_NAME", L"codex/hosted-wgc-motion-r2-3536ca0-20261121") &&
             EnvEquals(L"GITHUB_REPOSITORY", L"Zerozero05/Agent_Resource_Manager") &&
             EnvEquals(L"ImageOS", L"win25-vs2026") && EnvEquals(L"ImageVersion", L"20261116.315.1");
 #else
@@ -586,8 +598,12 @@ int wmain(int argc, wchar_t** argv) {
 #ifndef ARM_WGC_MOTION
         if (row) return RunHosted(target);
 #endif
-        return RunHover(target, {ParseCoordinate(argv[8]), ParseCoordinate(argv[9])},
+        const auto result = RunHover(target, {ParseCoordinate(argv[8]), ParseCoordinate(argv[9])},
             {ParseCoordinate(argv[10]), ParseCoordinate(argv[11])});
+#ifdef ARM_WGC_MOTION
+        Wgc::MarkPhase("trial-released");
+#endif
+        return result;
     } catch (const CaptureError& error) {
         std::fprintf(stderr, "%s failed (HRESULT 0x%08lx)\n", error.operation,
             static_cast<unsigned long>(error.result));

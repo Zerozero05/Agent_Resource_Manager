@@ -12,7 +12,7 @@ env:
   CANDIDATE_SHA256: 'aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7'
 jobs:
   motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-wgc-motion-3536ca0-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-wgc-motion-r2-3536ca0-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:

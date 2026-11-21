@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:GITHUB_REPOSITORY -cne 'Zerozero05/Agent_Resource_Manager' -or
-    $env:GITHUB_REF_NAME -cne 'codex/hosted-wgc-motion-3536ca0-20261121' -or
+    $env:GITHUB_REF_NAME -cne 'codex/hosted-wgc-motion-r2-3536ca0-20261121' -or
     $env:ImageOS -cne 'win25-vs2026' -or $env:ImageVersion -cne '20261116.315.1' -or
     $env:CANDIDATE_SOURCE -cne '3536ca0e5cf7c897b860b5ce32d8b415904b9e45' -or
     $ExpectedSha256 -cne 'aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7' -or
@@ -25,10 +25,12 @@ $report = [ordered]@{ candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$Ex
     previousRun=[ordered]@{id='44854495440'; status='inconclusive'; reason='A two-update DXGI batch interrupted the first positive control under that run''s policy.'}
     previousR2=[ordered]@{id='44855333628'; status='incomplete'; passedArms=2; totalArms=4}
     previousR3=[ordered]@{id='44857754039'; status='incomplete'; qualifiedTrialsPerArm=@(1,1,3,0); reason='Coalesced updates and over-budget compositor gaps in seven positive trials.'}
+    previousWgc=[ordered]@{id='44874304347'; status='incomplete'; qualifiedTrialsPerArm=@(1,0,1,0)
+        reason='Eight full traces exceeded 32 ms at the first frame or during transition. One separate native probe exited 0xC0000005.'}
     notificationProbe=[ordered]@{id='44857288176'; setterFlags=2; stateChanged=$true; matchingNotifications=0}
     setterFlags=3; motionChanges=@()
     notificationScope='A separate hidden top-level window observes real settings broadcasts in the hosted session. WebView-specific receipt is not inferred.'
-    capture='One Windows Graphics Capture session per trial on the exact owned root HWND, with the default capture border. No-update polls retain the last row. Raw times retain both WGC 100-ns compositor time and QPC acquisition, read and release. FrameArrived and reads must agree. WGC does not expose an independent count of frames dropped before delivery.'
+    capture='One Windows Graphics Capture session per trial on the exact owned root HWND, with the default capture border and a verified minimum update interval of 1 ms. No-update polls retain the last row. Raw times retain both WGC 100-ns compositor time and QPC acquisition, read and release. FrameArrived and reads must agree. WGC does not expose an independent count of frames dropped before delivery.'
     runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion
     scope='Native foreground hover pixels on one inactive sidebar control. No DOM or CSS readback and no display-DPI or whole-app animation claim.' }
 function Write-Report { $report | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $output -Encoding utf8NoBOM }
@@ -191,6 +193,8 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         $anchor = $raw.baseline
         $bounds = $raw.captureBounds
         if ($raw.method -cne 'WGC.CreateForWindow' -or $raw.defaultCaptureBorder -ne $true -or
+            $null -eq $raw.updateIntervalBefore100ns -or $raw.updateIntervalBefore100ns -lt 0 -or
+            $raw.updateInterval100ns -ne 10000 -or
             $raw.frameBuffers -ne 4 -or $raw.framesOffered -lt 1 -or $raw.framesRead -ne $raw.framesOffered -or
             $raw.framesRead -ne (1 + @($raw.samples | Where-Object kind -CEQ 'window').Count) -or
             $bounds.Count -ne 4 -or $points.background[0] -lt $bounds[0] -or $points.background[2] -ge $bounds[2] -or
@@ -340,18 +344,27 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
             if ($button.Current.IsOffscreen -or $button.Current.BoundingRectangle -ne $geometry) {
                 throw 'The original navigation target moved or became unavailable.'
             }
-            $trial = [ordered]@{ attempt=$attempt; status='started' }
+            $trial = [ordered]@{ attempt=$attempt; status='started'; nativePhases=@() }
             $arm.trials += $trial
             $probeArguments = @($session.Pid, $session.CreationFileTime, $session.Handle,
                 $points.background[0], $points.background[1], $points.background[2],
                 $points.neutral[0], $points.neutral[1], $points.hover[0], $points.hover[1])
             $raw = @(& $probe --hosted-hover @probeArguments 2>&1)
             $trial.exitCode = $LASTEXITCODE
-            if ($trial.exitCode -ne 0 -or $raw.Count -ne 1 -or $raw[0] -isnot [string]) {
-                $trial.diagnostic = @($raw | ForEach-Object { $_.ToString() })
+            $traceOutput = @()
+            foreach ($line in $raw) {
+                if ($line.ToString() -cmatch '\AARM-WGC-PHASE (?<stage>[a-z-]{1,32})\z') {
+                    $trial.nativePhases += $Matches.stage
+                } else {
+                    $traceOutput += $line
+                }
+            }
+            if ($trial.exitCode -ne 0 -or $traceOutput.Count -ne 1 -or $traceOutput[0] -isnot [string] -or
+                $trial.nativePhases[-1] -cne 'trial-released') {
+                $trial.diagnostic = @($traceOutput | Where-Object { $_ -isnot [string] } | ForEach-Object { $_.ToString() })
                 throw 'The native WGC hover probe stopped before it could provide a valid trace.'
             }
-            $trial.rawWgc = $raw[0] | ConvertFrom-Json
+            $trial.rawWgc = $traceOutput[0] | ConvertFrom-Json
             try {
                 Score-WgcTrial $trial $points $expectTransition
                 $trial.status = 'observed'
@@ -428,7 +441,8 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
 }
 $outcomes = @($report.arms | ForEach-Object {
     [ordered]@{ name=$_.name; passed=$_.pairedObservationPassed
-        trials=@($_.trials | ForEach-Object { [ordered]@{status=$_.status; error=$_.error; framesOffered=$_.framesOffered; framesRead=$_.framesRead} }) }
+        trials=@($_.trials | ForEach-Object { [ordered]@{status=$_.status; error=$_.error; exitCode=$_.exitCode
+            lastNativePhase=$_.nativePhases[-1]; framesOffered=$_.framesOffered; framesRead=$_.framesRead} }) }
 })
 [ordered]@{status=$report.status; phase=$report.phase; systemRestored=$report.systemRestored; closedNormally=$report.closedNormally; arms=$outcomes;
     setterFlags=$report.setterFlags; motionChanges=$report.motionChanges; candidateSha256=$ExpectedSha256; error=$report.error} |
