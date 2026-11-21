@@ -47,10 +47,23 @@ function Find-OwnedButton([string]$title) {
     [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::Button),
     [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::IsOffscreenProperty, $false)
   ))
-  $found = $root.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)
-  if ($found.Count -gt 1) { throw 'Normal exit control identity is ambiguous.' }
-  if ($found.Count -eq 1 -and $found[0].Current.IsEnabled) { return $found[0] }
+  try {
+    $found = $root.FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)
+    if ($null -ne $found -and $found.Current.IsEnabled) { return $found }
+  } catch [Windows.Automation.ElementNotAvailableException] {
+    # The detached UIA provider can replace initial elements. No action was sent.
+  }
   return $null
+}
+
+function Wait-OwnedButton([string]$title) {
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  do {
+    $button = Find-OwnedButton $title
+    if ($button) { return $button }
+    Start-Sleep -Milliseconds 50
+  } while ($clock.ElapsedMilliseconds -lt 15000)
+  throw "The owned normal exit button is unavailable: $title."
 }
 
 function Invoke-OwnedButton($button) {
@@ -70,15 +83,9 @@ try {
   Assert-OwnedWindow
   $quit = Find-OwnedButton '完全退出管理器'
   if (-not $quit) {
-    $help = Find-OwnedButton '工作区快捷键'
-    if (-not $help) { throw 'The exact normal exit menu is unavailable.' }
+    $help = Wait-OwnedButton '工作区快捷键'
     Invoke-OwnedButton $help
-    $deadline = [Diagnostics.Stopwatch]::StartNew()
-    do {
-      $quit = Find-OwnedButton '完全退出管理器'
-      if (-not $quit) { Start-Sleep -Milliseconds 75 }
-    } until ($quit -or $deadline.ElapsedMilliseconds -ge 10000)
-    if (-not $quit) { throw 'The exact normal exit action did not become available.' }
+    $quit = Wait-OwnedButton '完全退出管理器'
   }
   Invoke-OwnedButton $quit
   if (-not $owned.WaitForExit(15000)) { throw 'Normal exit timed out. No forced termination was attempted.' }
