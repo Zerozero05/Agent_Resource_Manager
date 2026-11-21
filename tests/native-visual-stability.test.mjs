@@ -154,7 +154,7 @@ test('visual requests use one JSON line for the PowerShell ReadLine protocol', a
 function reference() {
     const boxes = { 'result-table': [100, 140, 600, 400], 'result-count': [100, 70, 440, 56], 'result-title': [110, 170, 160, 30], 'closed-tab-slot': [160, 15, 100, 30], 'active-document-tab': [160, 15, 100, 30] };
     return { format: 'agent-resource-manager-native-visual-stability-v1', root, datasetFingerprint: 'fixed', candidateSha256: '9436a75a4cf40316f80702e43c7b4da35067ec9e16a0ce592846599433e9b1aa', semanticReferencePhaseCompleted: true, capture: 'foreground-owned-CopyFromScreen', frame: { left: 60, top: 60, width: 1296, height: 889, dpi: 96 }, policy: visualPolicy,
-        controls: Object.fromEntries(['search', 'clear', 'github', 'all', 'openDocument', 'homeTab', 'documentTab', 'closeDocument', 'check'].map(name => [name, { x: 30, y: 30 }])),
+        controls: Object.fromEntries(['search', 'clear', 'github', 'allFiltered', 'openDocument', 'homeTab', 'documentTab', 'closeDocument', 'check'].map(name => [name, { x: 30, y: 30 }])),
         states: Object.fromEntries(requiredStates.map(name => [name, { semanticConfirmedByNativeDriver: true, rois: requiredRegions(name).map(region => ({ ...region, box: [...(boxes[region.role] || [100, 140, 50, 30])], path: root + '/references/' + name + '-' + region.role + '.png', sha256: 'a'.repeat(64) })) }])) };
 }
 test('visual modes are explicit and reject implicit or extra arguments', () => {
@@ -191,6 +191,7 @@ test('every state has exactly its original ordered ROI roles and semantic source
 });
 test('result counters and titles cannot lose or replace their source names, roles or frozen geometry', () => {
     for (const change of [
+        r => { r.controls.all = r.controls.allFiltered; delete r.controls.allFiltered; },
         r => { delete r.states['search-0017'].rois[0].role; },
         r => { delete r.states['search-0017'].rois[0].source.name; },
         r => { r.states['search-0017'].rois[0].source.name = 'Perf Skill 0018'; },

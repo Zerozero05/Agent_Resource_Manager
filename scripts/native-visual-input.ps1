@@ -160,23 +160,33 @@ public sealed class NativeVisualInput : IDisposable {
     Guard();
   }
   static INPUT Key(ushort vk,bool up=false){return new INPUT{type=1,value=new UNION{key=new KEY{vk=vk,flags=up?2u:0u}}};}
-  public object Click(int x,int y) {
+  MOUSE PointMovement(int x,int y) {
     Guard();
     if(x<0||y<0||x>=rectangle.r-rectangle.l||y>=rectangle.b-rectangle.t||
        GetAncestor(WindowFromPoint(new POINT(rectangle.l+x,rectangle.t+y)),2)!=window)
       throw new InvalidOperationException("Frozen click is outside the hit-testable owned window.");
     int left=GetSystemMetrics(76),top=GetSystemMetrics(77),width=GetSystemMetrics(78),height=GetSystemMetrics(79);
-    var movement=new MOUSE {
+    return new MOUSE {
       x=(rectangle.l+x-left)*65535/Math.Max(1,width-1),
       y=(rectangle.t+y-top)*65535/Math.Max(1,height-1),
       flags=0x0001u|0x8000u|0x4000u
     };
+  }
+  public object Click(int x,int y) {
     Send(new[]{
-      new INPUT{type=0,value=new UNION{mouse=movement}},
+      new INPUT{type=0,value=new UNION{mouse=PointMovement(x,y)}},
       new INPUT{type=0,value=new UNION{mouse=new MOUSE{flags=2}}},
       new INPUT{type=0,value=new UNION{mouse=new MOUSE{flags=4}}}
     });
     return new{clicked=true,x=x,y=y,lastInputTick=inputTick};
+  }
+  public object ScrollLibrary(int x,int y,bool up) {
+    uint delta=up?1200u:unchecked((uint)-1200);
+    Send(new[]{
+      new INPUT{type=0,value=new UNION{mouse=PointMovement(x,y)}},
+      new INPUT{type=0,value=new UNION{mouse=new MOUSE{flags=0x0800u,data=delta}}}
+    });
+    return new{scrolledUp=up,x=x,y=y,lastInputTick=inputTick};
   }
   public object Text(string value) {
     Guard();
@@ -319,6 +329,10 @@ try {
         'prepareForeground' {$session.PrepareForeground()}
         'identity' {$session.Observe()}
         'click' {$session.Click([int]$request.x,[int]$request.y)}
+        'scrollLibrary' {
+          if($request.up -isnot [bool]) {throw 'A frozen library scroll direction is required'}
+          $session.ScrollLibrary([int]$request.x,[int]$request.y,[bool]$request.up)
+        }
         'text' {$session.Text([string]$request.value)}
         'save' {$session.Save([string]$request.path,[int[]]$request.box)}
         'match' {$session.Match([string]$request.path,[int[]]$request.box,[string]$request.sha256)}

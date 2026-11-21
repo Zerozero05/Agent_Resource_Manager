@@ -21,6 +21,7 @@ const candidateSha256 = '9436a75a4cf40316f80702e43c7b4da35067ec9e16a0ce592846599
 const buildInfoSha256 = '0bdcc16ff13fffa08045b791abcb93897b24c91153675127c6fddd8dbc1c0028';
 const transportSha256 = 'f9dfe387f6900925808cdd16b9785f29b96e90c40b554b828b17557f99bd846f';
 const hostedReferenceFrame = null;
+const hostedFirstSearchReceipt = null;
 const helper = fileURLToPath(new URL('native-visual-input.ps1', import.meta.url));
 const sourceFiles = ['verify-native-visual-stability.mjs', 'native-visual-input.ps1', 'performance-policy.mjs', 'performance-fixture.mjs', 'diagnose-native-idle-memory.mjs', 'native-uia-client.mjs', 'verify-native-uia.ps1'].map(name => fileURLToPath(new URL(name, import.meta.url)));
 const format = 'agent-resource-manager-native-visual-stability-v1';
@@ -30,7 +31,7 @@ const digest = async (path) => hash(await readFile(path));
 const same = (left, right) => resolve(left).toLowerCase() === resolve(right).toLowerCase();
 const sleep = milliseconds => new Promise(done => setTimeout(done, Math.max(0, milliseconds)));
 const sources = async () => Promise.all(sourceFiles.map(async (path) => ({ path, sha256: await digest(path) })));
-const requiredControls = ['search', 'clear', 'github', 'all', 'openDocument', 'homeTab', 'documentTab', 'closeDocument', 'check'];
+const requiredControls = ['search', 'clear', 'github', 'allFiltered', 'openDocument', 'homeTab', 'documentTab', 'closeDocument', 'check'];
 export const requiredStates = Object.freeze([...Array.from({ length: 66 }, (_, index) => `search-${String(index).padStart(4, '0')}`), 'all', 'github', 'document', 'homeDocument', 'documentTab', 'closed']);
 export const visualPolicy = Object.freeze({ match: 'exact-normalized-BGRA', matchTimeoutMs: 15000, stableObservations: 2, observationGapMs: 50, referenceSettleMs: 250, preparationIdleMs: 120000, normalQuitWaitMs: 180000 });
 const tableName = '可横向滚动的 Skill 列表';
@@ -82,6 +83,7 @@ export function validateReferences(ref, descriptor) {
     assert.equal(ref.semanticReferencePhaseCompleted, true);
     assert.ok(same(ref.root, descriptor.root));
     assert.equal(ref.datasetFingerprint, descriptor.dataset.dataFingerprint);
+    if (hostedFirstSearchReceipt) assert.deepEqual(ref.firstSearchPreflight, hostedFirstSearchReceipt);
     assert.ok(Number.isSafeInteger(ref.frame.left) && Number.isSafeInteger(ref.frame.top));
     assert.ok(Number.isSafeInteger(ref.frame.width) && ref.frame.width >= 600 && Number.isSafeInteger(ref.frame.height) && ref.frame.height >= 400 && Number.isSafeInteger(ref.frame.dpi) && ref.frame.dpi > 0);
     assert.deepEqual(Object.keys(ref.states).sort(), [...requiredStates].sort());
@@ -294,14 +296,24 @@ async function references(descriptor) {
         if (hostedReferenceFrame) assert.equal(visual.identity.dpi, hostedReferenceFrame.dpi, 'Hosted display DPI changed before reference input.');
         await visual.call('prepareForeground');
         ref.frame = visual.identity;
-        const observeRows = async (op, fields) => referenceObservationRows(await app.call(op, fields));
+        if (hostedFirstSearchReceipt) {
+            assert.equal(descriptor.dataset.dataFingerprint, hostedFirstSearchReceipt.datasetFingerprint);
+            ref.firstSearchPreflight = hostedFirstSearchReceipt;
+        }
+        const observeRows = async (op, fields, deadline = performance.now() + visualPolicy.matchTimeoutMs) => {
+            if (!hostedReferenceFrame) return referenceObservationRows(await app.call(op, fields));
+            const remaining = Math.floor(deadline - performance.now());
+            assert.ok(remaining > 0, 'The owned reference observation reached its original deadline.');
+            const scoped = fields?.scope ? { referenceAllowPendingScope: true } : {};
+            return referenceObservationRows(await app.call(op, { ...fields, ...scoped, referenceReadBudgetMs: remaining }, remaining));
+        };
         async function element(name, scope, type, selected) {
             const deadline = performance.now() + visualPolicy.matchTimeoutMs;
             do {
-                const rows = await observeRows('state', { name, ...(scope ? { scope } : {}) });
+                const rows = await observeRows('state', { name, ...(scope ? { scope } : {}) }, deadline);
                 const matches = rows.filter(row => !row.offscreen && (!type || row.type === type));
                 assert.ok(matches.length <= 1, `Ambiguous visible reference element ${name}.`);
-                if (matches.length === 1 && (selected === undefined || matches[0].selected === selected))
+                if (matches.length === 1 && matches[0].enabled && (selected === undefined || matches[0].selected === selected))
                     return matches[0];
                 await sleep(50);
             } while (performance.now() < deadline);
@@ -320,9 +332,9 @@ async function references(descriptor) {
         async function semanticList(index) {
             const deadline = performance.now() + visualPolicy.matchTimeoutMs;
             do {
-                const names = await observeRows('names');
+                const names = await observeRows('names', undefined, deadline);
                 const titles = names.filter(row => row.type === 'ControlType.Button' && /^Perf Skill \d{4}$/.test(row.name));
-                const edit = await observeRows('state', { name: '搜索 Skill' });
+                const edit = await observeRows('state', { name: '搜索 Skill' }, deadline);
                 if (edit.some(row => row.enabled && !row.offscreen) && titles.length === (index === null ? 20 : 1) &&
                     (index === null || titles[0].name === `Perf Skill ${String(index).padStart(4, '0')}`))
                     return;
@@ -331,7 +343,27 @@ async function references(descriptor) {
             throw new Error('The native reference list did not confirm its exact expected row count and title.');
         }
         async function nativeClick(key) { await visual.call('click', ref.controls[key]); }
+        const scrollLibrary = up => visual.call('scrollLibrary', { ...ref.controls.search, up });
+        async function confirmInitialSearchPosition() {
+            const deadline = performance.now() + visualPolicy.matchTimeoutMs;
+            do {
+                const edit = await element('搜索 Skill', undefined, 'ControlType.Edit');
+                if (edit.bounds === initialSearchBounds) return;
+                await sleep(50);
+            } while (performance.now() < deadline);
+            throw new Error('Clearing the candidate list did not restore the initial search position.');
+        }
+        async function clearSearch() {
+            const clear = await element('清空搜索', undefined, 'ControlType.Button');
+            assert.deepEqual(relativeBox(clear.bounds, ref.frame), ref.controls.clear.box,
+                'Clear moved away from its frozen filtered position.');
+            await nativeClick('clear');
+            await scrollLibrary(true);
+            await semanticList(null);
+            await confirmInitialSearchPosition();
+        }
         async function nativeSearch(index) {
+            await confirmInitialSearchPosition();
             await nativeClick('search');
             await visual.call('text', { value: `perf-skill-${String(index).padStart(4, '0')}` });
             await semanticList(index);
@@ -353,29 +385,41 @@ async function references(descriptor) {
             }
             ref.states[name] = { semanticConfirmedByNativeDriver: true, semantic, rois };
         }
+        const initialSearchBounds = (await element('搜索 Skill', undefined, 'ControlType.Edit')).bounds;
         await point('search', '搜索 Skill', undefined, 'ControlType.Edit');
         await point('github', 'GitHub', '来源筛选');
-        await point('all', '全部', '来源筛选');
         await point('check', '检查本地与 GitHub 变化');
         await semanticList(null);
         await capture('all', await tableRois(), 'Native initial list readiness and fixed 1000-Skill fixture.');
         for (let index = 0; index < 66; index++) {
             await nativeSearch(index);
+            const title = `Perf Skill ${String(index).padStart(4, '0')}`;
+            const result = await element(title, '可横向滚动的 Skill 列表', 'ControlType.Button');
             if (!index) {
+                if (hostedFirstSearchReceipt) {
+                    const edit = await element('搜索 Skill', undefined, 'ControlType.Edit');
+                    assert.equal(edit.hasKeyboardFocus, true);
+                    const value = await app.call('firstSearchValue', { referenceReadBudgetMs: 12000 }, 12000);
+                    assert.equal(value.matchesExpected, true);
+                    assert.equal(edit.bounds, hostedFirstSearchReceipt.filteredSearchBounds);
+                    assert.equal(result.bounds, hostedFirstSearchReceipt.resultBounds);
+                }
                 await point('clear', '清空搜索');
                 await point('openDocument', 'Perf Skill 0000', '可横向滚动的 Skill 列表');
             }
-            const title = `Perf Skill ${String(index).padStart(4, '0')}`;
-            const titleBox = relativeBox((await element(title, '可横向滚动的 Skill 列表', 'ControlType.Button')).bounds, ref.frame);
+            const titleBox = relativeBox(result.bounds, ref.frame);
             await capture(`search-${String(index).padStart(4, '0')}`, [titleBox, ...await tableRois()], `Native one-row result and exact title ${title} confirmed.`);
+            await clearSearch();
         }
-        await nativeClick('clear');
-        await semanticList(null);
         await nativeClick('github');
+        await scrollLibrary(false);
+        await point('allFiltered', '全部', '来源筛选');
         await capture('github', [relativeBox((await element('当前筛选无结果')).bounds, ref.frame)], 'Native GitHub filter confirmed empty result.');
-        await nativeClick('all');
+        await nativeClick('allFiltered');
+        await scrollLibrary(true);
         await semanticList(null);
         await nativeSearch(0);
+        assert.deepEqual(relativeBox((await element('Perf Skill 0000', '可横向滚动的 Skill 列表', 'ControlType.Button')).bounds, ref.frame), ref.controls.openDocument.box);
         await nativeClick('openDocument');
         await docRois();
         const names = await observeRows('names'), homeNames = [...new Set(names.filter(row => row.type === 'ControlType.TabItem' && (row.name === '工作台' || row.name.startsWith('工作台 '))).map(row => row.name))];
@@ -395,8 +439,7 @@ async function references(descriptor) {
         await semanticList(0);
         assert.equal((await observeRows('state', { name: '关闭 Perf Skill 0000' })).length, 0);
         await capture('closed', [...await tableRois(), documentBox], 'Native detail tab closure and home search confirmed.');
-        await nativeClick('clear');
-        await semanticList(null);
+        await clearSearch();
         ref.reviewSheets = [];
         const reviewCrops = Object.entries(ref.states).flatMap(([name, state]) => state.rois.map(roi => ({ name: `${name} ${roi.role}`, path: roi.path })));
         for (let index = 0; index < reviewCrops.length; index += 24) {
@@ -509,16 +552,19 @@ async function run(descriptor, pilot) {
             await sleep(visualPolicy.observationGapMs);
         } while (performance.now() < deadline); throw new Error(`Frozen visible state ${name} did not match. References were not adapted.`); }
         async function click(key) { const result = await visual.call('click', ref.controls[key]); report.actions.push({ key, result }); }
+        async function scrollLibrary(up) { const result = await visual.call('scrollLibrary', { ...ref.controls.search, up }); report.actions.push({ key: 'scrollLibrary', result }); }
         async function search(index) { await click('search'); await visual.call('text', { value: `perf-skill-${String(index).padStart(4, '0')}` }); await waitState(`search-${String(index).padStart(4, '0')}`); }
         async function cycle(index) { for (const [action, value] of cycleActions(index)) {
             if (action === 'search')
                 await search(value);
             else if (action === 'clear') {
                 await click('clear');
+                await scrollLibrary(true);
                 await waitState('all');
             }
             else if (action === 'filter') {
-                await click(value ? 'github' : 'all');
+                await click(value ? 'github' : 'allFiltered');
+                await scrollLibrary(!value);
                 await waitState(value ? 'github' : 'all');
             }
             else if (action === 'document') {

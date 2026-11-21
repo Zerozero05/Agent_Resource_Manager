@@ -1,17 +1,17 @@
-name: Prepare hosted visual references for afdcc14 (r3)
+name: Prepare hosted visual references for 2314ea8
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44853682116'
-  CANDIDATE_SOURCE: afdcc146bce08db6ef3082be4b1fbcd59beb5d8b
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_afdcc146bce08db6ef3082be4b1fbcd59beb5d8b
-  CANDIDATE_ARTIFACT_ID: '14687451764'
-  CANDIDATE_SHA256: '2a4b27faf9b2aed958760dc30d5f4ad980b8f62a9e3be6e38d321382f8d89db3'
+  CANDIDATE_RUN_ID: '44862742843'
+  CANDIDATE_SOURCE: 2314ea88080a401be1acfa150d029f1a928b99aa
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_2314ea88080a401be1acfa150d029f1a928b99aa
+  CANDIDATE_ARTIFACT_ID: '14691310680'
+  CANDIDATE_SHA256: 'b95ad24619e1d00e8d100777739afd70323fb827e272b31ef549124bd0063e97'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-afdcc14-frame-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-2314ea8-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
@@ -129,6 +129,18 @@ jobs:
               height=$height
               dpi=[int]$desktop.dpi
             }
+            if ($referenceFrame.left -ne 60 -or $referenceFrame.top -ne 60 -or
+                $referenceFrame.width -ne 960 -or $referenceFrame.height -ne 650 -or $referenceFrame.dpi -ne 96) {
+              throw 'The hosted frame does not match the verified 2314ea8 first-search geometry. No manager was launched.'
+            }
+            $firstSearch = [ordered]@{
+              runId = '44864093902'
+              artifactId = '14690948651'
+              sha256 = 'd461a7ce3a1bcb3ed38c4846e99fda4831a2599104712a3c3f77e9ac9bc45ccf'
+              datasetFingerprint = 'bd3bb8c680b1b7578d376583ab4b416c88ee47b66ae66b813bee455ca31ba3a1'
+              filteredSearchBounds = '411,294,501,52'
+              resultBounds = '433,671,201,31'
+            }
             $stage = 'bind-verified-inputs'
             if (Test-Path -LiteralPath $approved) { throw 'Expected a fresh synthetic visual reference root.' }
             [IO.Directory]::CreateDirectory($approved) | Out-Null
@@ -144,6 +156,7 @@ jobs:
               buildInfoSha256 = $infoDigest
               transportSha256 = $env:CANDIDATE_SHA256
               hostedReferenceFrame = $referenceFrame
+              hostedFirstSearchReceipt = $firstSearch
             }
             $text = [IO.File]::ReadAllText($module)
             foreach ($key in $entries.Keys) {
@@ -192,6 +205,9 @@ jobs:
             }
             foreach ($field in $referenceFrame.Keys) {
               if ($refs.frame.$field -ne $referenceFrame[$field]) { throw 'The captured reference frame differs from the hosted preflight.' }
+            }
+            foreach ($field in $firstSearch.Keys) {
+              if ($refs.firstSearchPreflight.$field -cne $firstSearch[$field]) { throw 'The captured references do not bind to the verified first-search observation.' }
             }
             $sheets = @($refs.reviewSheets)
             $roiCount = @($refs.states.PSObject.Properties.Value | ForEach-Object { $_.rois }).Count
