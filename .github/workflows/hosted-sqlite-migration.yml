@@ -1,0 +1,232 @@
+name: Verify isolated native SQLite migration and recovery
+on: create
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: verify-native-sqlite-migration-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  CANDIDATE_SOURCE: '0ac5e79b7a3d1184e7602f241793f240b0609d44'
+  CANDIDATE_BRANCH: 'codex/task-history-retention-fef68f9-20261121'
+  CANDIDATE_RUN_ID: '44880393531'
+  CANDIDATE_ARTIFACT_ID: '14698411078'
+  CANDIDATE_ARCHIVE_SHA256: '5ea596eb7d95de7df46bc1929c8694e56c8c5b72f7ded2915987aefa83ce152e'
+  CANDIDATE_SHA256: 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24'
+  CANDIDATE_VERSION: '0.3.0-dev.1'
+  LEGACY_VERSION: '0.2.11'
+  LEGACY_SETUP_SHA256: 'd1a439fe476d05736c21bb6ee8c59e0ae0bbdaae54943106b5ec3a0b5dbf76aa'
+  LEGACY_EXE_SHA256: '1ca90747eca2ac3229762928d05036724229e910463c28be40925e9b2fb2092f'
+jobs:
+  migration:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-sqlite-migration-0ac5e79-20261121' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Require explicit candidate pins and an isolated interactive Windows runner
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne 'Zerozero05/Agent_Resource_Manager' -or
+              $env:CANDIDATE_SOURCE -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:CANDIDATE_BRANCH -cnotmatch '^codex/[A-Za-z0-9_/-]+$' -or
+              $env:CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or
+              $env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or
+              $env:CANDIDATE_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Pin the exact independently verified candidate before using the runner.'
+          }
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) {
+            throw 'An isolated GitHub-hosted interactive Windows session with a D drive is required.'
+          }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) {
+            throw 'Another manager is already running. Nothing will be closed or reused.'
+          }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.CANDIDATE_SOURCE }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify workflow and runner inputs, then extract two pinned executables
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $productCommit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $productCommit -cne $env:CANDIDATE_SOURCE) {
+            throw 'The checked-out migration scripts do not match the exact candidate commit.'
+          }
+          $changes = @(git diff --name-only $productCommit $env:GITHUB_SHA --)
+          if ($LASTEXITCODE -ne 0 -or $changes.Count -ne 1 -or $changes[0] -cne '.github/workflows/hosted-sqlite-migration.yml') {
+            throw 'The test branch must differ from the candidate by the migration workflow only.'
+          }
+
+          $artifactName = "Agent_Resource_Manager_v$($env:CANDIDATE_VERSION)_windows_x64_candidate_$productCommit"
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or
+              $run.head_sha -cne $productCommit -or $run.head_branch -cne $env:CANDIDATE_BRANCH -or
+              $run.run_attempt -ne 1 -or $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push') {
+            throw 'The exact successful Windows candidate run is unavailable.'
+          }
+          $asset = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:CANDIDATE_ARTIFACT_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $asset.expired -ne $false -or $asset.name -cne $artifactName -or
+              $asset.workflow_run.id -ne $run.id -or $asset.digest -cne "sha256:$env:CANDIDATE_ARCHIVE_SHA256") {
+            throw 'The candidate artifact does not belong to the exact independently pinned build.'
+          }
+
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip/7z.exe'
+          if (-not (Test-Path -LiteralPath $sevenZip -PathType Leaf)) { throw 'The runner is missing its preinstalled 7-Zip.' }
+          $owned = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-sqlite-migration-bin') -ErrorAction Stop
+          $audit = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-sqlite-migration-audit') -ErrorAction Stop
+          $archivePath = Join-Path $owned.FullName 'candidate.zip'
+          $candidate = Join-Path $owned.FullName 'agent-resource-manager.exe'
+          $buildInfoPath = Join-Path $owned.FullName 'BUILD_INFO.json'
+          $legacyName = "Skill_Manager_v$($env:LEGACY_VERSION)_windows_x64_setup.exe"
+          $legacySetup = Join-Path $owned.FullName $legacyName
+          try {
+            $headers = @{
+              Authorization = "Bearer $env:GH_TOKEN"
+              Accept = 'application/vnd.github+json'
+              'X-GitHub-Api-Version' = '2022-11-28'
+            }
+            Invoke-WebRequest -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:CANDIDATE_ARTIFACT_ID/zip" -Headers $headers -OutFile $archivePath
+            if ((Get-FileHash -LiteralPath $archivePath).Hash.ToLowerInvariant() -cne $env:CANDIDATE_ARCHIVE_SHA256) {
+              throw 'Downloaded candidate archive differs from the exact SHA256.'
+            }
+            gh release download "v$env:LEGACY_VERSION" --repo $env:GITHUB_REPOSITORY --pattern $legacyName --dir $owned.FullName
+            if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $legacySetup).Hash.ToLowerInvariant() -cne $env:LEGACY_SETUP_SHA256) {
+              throw 'The published legacy setup differs from the exact SHA256.'
+            }
+          } finally {
+            $headers = $null
+            $env:GH_TOKEN = $null
+          }
+          $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
+          try {
+            foreach ($path in @($candidate, $buildInfoPath)) {
+              $matches = @($archive.Entries | Where-Object { $_.FullName -ceq [IO.Path]::GetFileName($path) })
+              if ($matches.Count -ne 1) { throw "Expected exactly one root entry for $([IO.Path]::GetFileName($path))." }
+              [IO.Compression.ZipFileExtensions]::ExtractToFile($matches[0], $path, $false)
+            }
+          } finally { $archive.Dispose() }
+          $buildInfo = Get-Content -LiteralPath $buildInfoPath -Raw | ConvertFrom-Json
+          if ((Get-FileHash -LiteralPath $candidate).Hash.ToLowerInvariant() -cne $env:CANDIDATE_SHA256 -or
+              $buildInfo.executableSha256 -cne $env:CANDIDATE_SHA256 -or $buildInfo.sourceCommit -cne $productCommit -or
+              $buildInfo.workflowRunId -ne $run.id -or $buildInfo.workflowRunAttempt -ne 1 -or
+              $buildInfo.repository -cne $env:GITHUB_REPOSITORY -or $buildInfo.version -cne $env:CANDIDATE_VERSION -or
+              (Get-Item -LiteralPath $candidate).VersionInfo.ProductVersion -cne $env:CANDIDATE_VERSION) {
+            throw 'The extracted candidate program and build metadata do not match the pinned run.'
+          }
+          $buildInfo | Add-Member -NotePropertyName sourceIdentity -NotePropertyValue $productCommit
+          $buildInfo | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $buildInfo | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $buildInfoPath).Hash.ToLowerInvariant())
+          $buildInfo | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $owned.FullName 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+
+          $legacyRoot = Join-Path $owned.FullName 'legacy'
+          & $sevenZip e $legacySetup '-ir!skill-manager.exe' "-o$legacyRoot" -aos
+          $legacy = Join-Path $legacyRoot 'skill-manager.exe'
+          if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $legacy).Hash.ToLowerInvariant() -cne $env:LEGACY_EXE_SHA256 -or
+              (Get-Item -LiteralPath $legacy).VersionInfo.ProductVersion -cne $env:LEGACY_VERSION) {
+            throw 'The extracted old program does not match the published baseline.'
+          }
+          [ordered]@{
+            candidateSource = $productCommit; candidateRun = $run.id; candidateArtifact = $asset.id
+            candidateArchiveSha256 = $env:CANDIDATE_ARCHIVE_SHA256; candidateExeSha256 = $env:CANDIDATE_SHA256
+            originalBuildInfoSha256 = $buildInfo.originalBuildInfoSha256
+            legacySetupSha256 = $env:LEGACY_SETUP_SHA256; legacyExeSha256 = $env:LEGACY_EXE_SHA256
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $audit.FullName 'provenance.json') -Encoding utf8NoBOM
+      - name: Exercise real old and new executables on a fresh synthetic database
+        run: |
+          $owned = Join-Path $env:RUNNER_TEMP 'arm-sqlite-migration-bin'
+          $audit = Join-Path $env:RUNNER_TEMP 'arm-sqlite-migration-audit'
+          $approved = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          $name = "hosted-sqlite-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $fixture = Join-Path $approved $name
+          if (Test-Path -LiteralPath $fixture) { throw 'The exact synthetic fixture directory already exists.' }
+          [IO.Directory]::CreateDirectory($approved) | Out-Null
+          $data = Join-Path $fixture 'data'
+          $legacy = Join-Path $owned 'legacy/skill-manager.exe'
+          $candidate = Join-Path $owned 'agent-resource-manager.exe'
+          $buildInfo = Join-Path $owned 'BUILD_INFO.native-validation.json'
+          $receipt = [ordered]@{
+            status = 'failed'; syntheticOnly = $true; stages = @()
+            scope = 'Synthetic old schema and native upgrade or recovery on a separate Windows runner. No installer execution, downgrade, or production data.'
+          }
+          function Invoke-MigrationPhase([string]$Phase, [string[]]$Options) {
+            Write-Output "Running migration phase $Phase"
+            & node ./scripts/verify-native-migration.mjs --phase $Phase --variant recovery-downgrade @Options
+            if ($LASTEXITCODE -ne 0) { throw "Native SQLite migration phase failed: $Phase." }
+          }
+
+          $phase = 'prepare'
+          try {
+            Invoke-MigrationPhase $phase @('--name', $name)
+            $receipt.stages += $phase
+            $fixtureOption = @('--fixture', $fixture)
+            $legacyOptions = $fixtureOption + @('--legacy', $legacy)
+            $candidateOptions = $fixtureOption + @('--candidate', $candidate, '--candidate-build-info', $buildInfo)
+            foreach ($item in @(
+                @{ phase = 'initialize'; options = $legacyOptions; sha = $env:LEGACY_EXE_SHA256 },
+                @{ phase = 'seed'; options = $fixtureOption },
+                @{ phase = 'legacy'; options = $legacyOptions; sha = $env:LEGACY_EXE_SHA256 },
+                @{ phase = 'candidate'; options = $candidateOptions; sha = $env:CANDIDATE_SHA256 },
+                @{ phase = 'recovery-seed'; options = $fixtureOption },
+                @{ phase = 'recovery'; options = $candidateOptions; sha = $env:CANDIDATE_SHA256 })) {
+              $phase = $item.phase
+              Invoke-MigrationPhase $phase $item.options
+              if ($item.sha) {
+                $nativeReceipt = Get-Content -LiteralPath (Join-Path $fixture "$phase-driver.json") -Raw | ConvertFrom-Json
+                if ($nativeReceipt.closedNormally -ne $true -or $nativeReceipt.dataDirectory -ine $data -or
+                    $nativeReceipt.executableSha256 -cne $item.sha) {
+                  throw "Native process identity or normal exit is missing at $phase."
+                }
+              }
+              $receipt.stages += $phase
+            }
+            $phase = 'check-comparisons'
+            $migration = Get-Content -LiteralPath (Join-Path $fixture 'native-migration-comparison.json') -Raw | ConvertFrom-Json
+            $recovery = Get-Content -LiteralPath (Join-Path $fixture 'recovery-comparison.json') -Raw | ConvertFrom-Json
+            if ($migration.passed -ne $true -or $migration.syntheticOnly -ne $true -or
+                $migration.oldExecutableSha256 -cne $env:LEGACY_EXE_SHA256 -or
+                $migration.candidateExecutableSha256 -cne $env:CANDIDATE_SHA256 -or
+                $migration.candidateSourceIdentity -cne $env:CANDIDATE_SOURCE -or
+                $recovery.passed -ne $true -or $recovery.syntheticOnly -ne $true -or
+                $recovery.candidateExecutableSha256 -cne $env:CANDIDATE_SHA256 -or
+                $recovery.candidateSourceIdentity -cne $env:CANDIDATE_SOURCE -or
+                $recovery.seededCandidateSha256 -cne $env:CANDIDATE_SHA256 -or
+                $recovery.observedBackend.mcpBridgeNormalExit -ne $true) {
+              throw 'The native SQLite comparisons do not prove both migration and recovery for the exact candidate.'
+            }
+            $receipt.status = 'passed'
+          } finally {
+            $receipt.lastPhase = $phase
+            $receipt.reports = @(foreach ($name in @(
+                'initialize-driver.json', 'legacy-seed-provenance.json', 'legacy-driver.json',
+                'candidate-driver.json', 'native-migration-comparison.json', 'recovery-driver.json', 'recovery-comparison.json')) {
+              $path = Join-Path $fixture $name
+              if (Test-Path -LiteralPath $path -PathType Leaf) {
+                $details = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+                [ordered]@{
+                  name = $name; passed = $details.passed; status = $details.status; closedNormally = $details.closedNormally
+                  differentFields = @($details.differences | Where-Object field | ForEach-Object { $_.field })
+                  sha256 = (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant()
+                }
+              }
+            })
+            $receipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $audit 'migration-summary.json') -Encoding utf8NoBOM
+          }
+      - name: Upload only synthetic audit summaries
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        with:
+          name: Agent_Resource_Manager_sqlite_migration_${{ github.run_id }}_${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/arm-sqlite-migration-audit/provenance.json
+            ${{ runner.temp }}/arm-sqlite-migration-audit/migration-summary.json
+          if-no-files-found: warn
+          retention-days: 14
