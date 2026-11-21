@@ -35,7 +35,7 @@ function Save-Json([string]$path, $value) {
 
 $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).ProviderPath
 Set-Location -LiteralPath $workspace
-if ($env:GITHUB_REF_NAME -cne 'codex/hosted-check-merge-pair-37f83f1-20261121' -or
+if ($env:GITHUB_REF_NAME -cne 'codex/hosted-check-only-pair-37f83f1-20261121' -or
     (git rev-parse HEAD) -cne $env:GITHUB_SHA -or $LASTEXITCODE -ne 0) {
     throw 'The exact paired diagnostic checkout is required.'
 }
@@ -177,7 +177,7 @@ function Prepare-Arm($arm) {
     return @{root=$armRoot.FullName; executable=$exe; descriptor=$local.FullName}
 }
 function Run-Measurement($arm, $prepared) {
-    $phase = 'retention-short'
+    $phase = 'retention-short-check-only'
     $maxMinutes = 7
     $root = $prepared.root
     $executable = $prepared.executable
@@ -216,7 +216,7 @@ function Run-Measurement($arm, $prepared) {
             if ($null -ne $quitProof) { throw 'Duplicate normal-quit signal.' }
             $inProgress = Get-Content -Raw -LiteralPath $reportFile | ConvertFrom-Json
             $identity = $inProgress.identity
-            if ($inProgress.mode -cne $phase -or $inProgress.candidateSha256 -cne $candidateSha256 -or
+            if ($inProgress.mode -cne $phase -or $inProgress.scope -cne 'check-only' -or $inProgress.candidateSha256 -cne $candidateSha256 -or
                 $inProgress.referenceSha256 -cne $receipt.referenceSha256 -or $inProgress.approvalSha256 -cne $ApprovalSha256 -or
                 $identity.pid -ne $inProgress.pid -or $identity.pid -le 0 -or $identity.windowHandle -le 0 -or
                 $identity.creationFileTime -cnotmatch '^[0-9]+$') { throw 'The native report does not bind an exact normal-quit owner.' }
@@ -237,7 +237,8 @@ function Run-Measurement($arm, $prepared) {
         if ($null -eq $quitProof -or $sourceReport.normalExit -ne $true -or $sourceReport.runtimeAndSourcesPreserved -ne $true -or
             $sourceReport.managementDataPreserved -ne $true -or $sourceReport.candidateSha256 -cne $candidateSha256 -or
             $sourceReport.datasetFingerprint -cne $reference.datasetFingerprint -or $sourceReport.referenceSha256 -cne $receipt.referenceSha256 -or
-            $sourceReport.approvalSha256 -cne $ApprovalSha256 -or $sourceReport.measurementsUseAccessibility -ne $false) {
+            $sourceReport.approvalSha256 -cne $ApprovalSha256 -or $sourceReport.scope -cne 'check-only' -or
+            $sourceReport.measurementsUseAccessibility -ne $false) {
             throw 'The original native report failed its identity, data, or exit checks.'
         }
         if ($process.ExitCode -ne 0) { throw "$phase did not pass the original native verdict." }
@@ -282,10 +283,13 @@ if ($locations.before -ieq $locations.after -or $arms[0].sha256 -ceq $arms[1].sh
     throw 'The two completed arms did not reproduce the same independent physical workload and fixture.'
 }
 function Summarize-Arm($report) {
-    if ($report.status -cne 'retention-short-completed' -or $report.normalExit -ne $true -or
+    if ($report.status -cne 'retention-short-check-only-completed' -or $report.scope -cne 'check-only' -or
+        $report.normalExit -ne $true -or
         $report.measurementsUseAccessibility -ne $false -or $report.samples.Count -ne 14 -or
-        $report.cycles.Count -ne 13 -or $report.checks.Count -ne 12 -or $report.history.jobs -ne 12 -or
-        $report.history.keysPerJob -ne 2002) {
+        ($report.cycles.index -join ',') -cne ((0..12) -join ',') -or
+        @($report.cycles | Where-Object { $_.state -cne 'all' }).Count -ne 0 -or
+        $report.actions.Count -ne 12 -or @($report.actions | Where-Object { $_.key -cne 'check' -or $_.result.clicked -ne $true }).Count -ne 0 -or
+        $report.checks.Count -ne 12 -or $report.history.jobs -ne 12 -or $report.history.keysPerJob -ne 2002) {
         throw 'An arm was incomplete or escaped its explicit short scope.'
     }
     $first, $last = $report.samples[0], $report.samples[-1]
@@ -328,8 +332,9 @@ $sampleSkew = for ($index = 0; $index -lt $before.samples.Count; $index++) {
     [Math]::Abs($after.samples[$index].elapsedMs - $before.samples[$index].elapsedMs)
 }
 Save-Json (Join-Path $measurements 'comparison.json') ([ordered]@{
-    status='paired-short-check-merge-diagnostic-completed'
-    interpretation='Same-host short comparison with fixed arm order and fresh data. Private-byte differences are observations; no convergence or latency acceptance.'
+    status='paired-short-check-only-diagnostic-completed'; scope='check-only'
+    interpretation='Same-host check-only comparison with fixed arm order and fresh data. Twelve physical check clicks with the library held on All. Private-byte differences are observations.'
+    navigationGateEvaluated=$false; latencyGateEvaluated=$false
     convergenceGateEvaluated=$false; previousFailureReplaced=$false
     sameHost=[ordered]@{runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion; node=(& node --version); windows=[Environment]::OSVersion.Version.ToString()}
     referenceSha256=$receipt.referenceSha256; referenceSource=$candidateSource; approvalSha256=$ApprovalSha256

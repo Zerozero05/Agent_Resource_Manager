@@ -1,4 +1,4 @@
-name: Compare short native check memory after merge and discovery changes
+name: Compare native check-only private memory
 on: create
 permissions:
   contents: read
@@ -26,8 +26,8 @@ env:
   REFERENCE_RECEIPT_SHA256: '0f71346dbe30fc00347f4866610f3bc86393c01a041e18a0057cd81b25f5cfda'
   APPROVAL_SHA256: '4e9493b679f7be75f0137900f9963fafa71c67de0d94ab99746fa88d79eda33a'
 jobs:
-  short-history-pair:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-check-merge-pair-37f83f1-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+  short-check-only-pair:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-check-only-pair-37f83f1-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 22
     defaults:
@@ -112,7 +112,7 @@ jobs:
           Get-Artifact $env:AFTER_RUN_ID $env:AFTER_ARTIFACT_ID "${namePrefix}_$($env:AFTER_SOURCE)" $env:AFTER_ARCHIVE_SHA256 (Join-Path $env:RUNNER_TEMP 'arm-retention-after')
           Get-Artifact $env:REFERENCE_RUN_ID $env:REFERENCE_REVIEW_ARTIFACT_ID "Agent_Resource_Manager_visual_references_$($env:REFERENCE_RUN_ID)_1" $env:REFERENCE_REVIEW_ARCHIVE_SHA256 (Join-Path $env:RUNNER_TEMP 'arm-visual-approved-review')
           Get-Artifact $env:REFERENCE_RUN_ID $env:REFERENCE_ROI_ARTIFACT_ID "Agent_Resource_Manager_visual_reference_rois_$($env:REFERENCE_RUN_ID)_1" $env:REFERENCE_ROI_ARCHIVE_SHA256 (Join-Path $env:RUNNER_TEMP 'arm-visual-approved-rois')
-      - name: Run both owned processes with the same short physical workload
+      - name: Run both owned processes on the same check-only workload
         timeout-minutes: 16
         run: |
           $parameters = @{
@@ -125,11 +125,11 @@ jobs:
               ReferenceRunId = $env:REFERENCE_RUN_ID
           }
           ./scripts/run-hosted-history-pair.ps1 @parameters
-      - name: Preserve short comparison and owned-exit evidence
+      - name: Preserve check-only comparison and owned-exit evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Agent_Resource_Manager_short_check_merge_pair_${{ github.run_id }}_${{ github.run_attempt }}
+          name: Agent_Resource_Manager_short_check_only_pair_${{ github.run_id }}_${{ github.run_attempt }}
           path: ${{ runner.temp }}/arm-retention-result/
           if-no-files-found: warn
           retention-days: 14

@@ -668,7 +668,7 @@ async function run(descriptor, pilot, shortRetention = false) {
     if (shortRetention) {
         assert.equal(process.env.GITHUB_ACTIONS, 'true');
         assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
-        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-check-merge-pair-37f83f1-20261121');
+        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-check-only-pair-37f83f1-20261121');
         assert.ok(hostedRetentionReference);
         assert.equal(hash(refBytes), hostedRetentionReference.sha256);
     }
@@ -694,11 +694,12 @@ async function run(descriptor, pilot, shortRetention = false) {
             await ordinary(roi.path);
             assert.equal(await digest(roi.path), roi.sha256);
         }
-    const name = shortRetention ? 'retention-short' : pilot ? 'pilot' : 'stability', reportPath = join(root, name + '-result.json');
+    const name = shortRetention ? 'retention-short-check-only' : pilot ? 'pilot' : 'stability', reportPath = join(root, name + '-result.json');
     await writeFile(join(root, name + '-owner.json'), json({ referenceSha256: hash(refBytes) }), { flag: 'wx' });
     await mkdir(join(root, 'temp'), { recursive: true });
     const env = environment(root);
     const report = { format, mode: name, status: 'running', startedAt: new Date().toISOString(), candidateSha256, transportSha256, descriptorPath: join(root, 'visual-dataset.json'), datasetFingerprint: descriptor.dataset.dataFingerprint, referenceSha256: hash(refBytes), approvalSha256: hash(approvalBytes), visualApproval: approval, policy: PERFORMANCE_POLICY, visualPolicy, measurementsUseAccessibility: false, capture: 'foreground-owned-CopyFromScreen', calibration: [], samples: [], cycles: [], checks: [], actions: [], normalExit: false, limitations: ['Visual state checks cover frozen visible ROIs, not hidden AX/DOM counts. Unicode search injection is not IME evidence. Previous UIA convergence failure remains retained. Normal Quit happens after sampling.'] };
+    if (shortRetention) report.scope = 'check-only';
     const save = () => writeFile(reportPath, json(report));
     let child, exit, identity, visual, baseline;
     try {
@@ -796,29 +797,34 @@ async function run(descriptor, pilot, shortRetention = false) {
                 throw new Error('The check task was not observed. The click was not replayed.');
             await sleep(30);
         } }
-        async function sample(elapsedMs) { const deadline = performance.now() + 60000; for (;;) {
+        async function sample(elapsedMs, afterIdle) { const deadline = performance.now() + 60000; for (;;) {
             const value = await observe(descriptor, identity, env, 'tasks');
             if (!value.tasks.some(task => ['running', 'queued'].includes(task.status)))
                 break;
             assert.ok(performance.now() < deadline, 'Active tasks prevent an idle sample.');
             await sleep(50);
-        } const raw = await observe(descriptor, identity, env, 'sample'), current = await visual.call('identity'); assert.equal(raw.inputTickBefore, current.lastInputTick); assert.equal(raw.lastInputTick, current.lastInputTick); return { ...idleObservation(raw, identity, cpus().length), elapsedMs, observedAt: new Date().toISOString() }; }
-        await waitState('all');
+        }
+        if (afterIdle) await afterIdle();
+        const raw = await observe(descriptor, identity, env, 'sample'), current = await visual.call('identity'); assert.equal(raw.inputTickBefore, current.lastInputTick); assert.equal(raw.lastInputTick, current.lastInputTick); return { ...idleObservation(raw, identity, cpus().length), elapsedMs, observedAt: new Date().toISOString() }; }
+        if (!shortRetention) await waitState('all');
         if (shortRetention) {
             report.shortRetentionPolicy = shortRetentionPolicy;
-            report.limitations.push('Short same-host diagnostic only. No result from this mode can pass or replace the 61-point convergence gate.');
-            await cycle(0);
+            report.limitations.push('Check-only short diagnostic with the library held on All. It does not rerun the navigation pair or evaluate the 61-point convergence or interaction latency gates.');
+            async function verifyAll(index) {
+                await waitState('all');
+                report.cycles.push({ index, state: 'all', completedAt: new Date().toISOString() });
+            }
+            await verifyAll(0);
             const start = performance.now();
             report.samples.push(await sample(0));
             for (let index = 1; index <= shortRetentionPolicy.cycles; index++) {
                 await sleep(start + index * shortRetentionPolicy.intervalMs - performance.now());
                 await check();
-                await cycle(index);
-                const value = await sample(0);
+                const value = await sample(0, () => verifyAll(index));
                 value.elapsedMs = performance.now() - start;
                 report.samples.push(value);
                 await save();
-                console.log(json({ phase: 'retention-short', sample: index, of: shortRetentionPolicy.cycles }).trim());
+                console.log(json({ phase: 'retention-short-check-only', sample: index, of: shortRetentionPolicy.cycles }).trim());
             }
             await sleep(shortRetentionPolicy.cooldownMs);
             const tail = await sample(0);
@@ -914,7 +920,7 @@ async function run(descriptor, pilot, shortRetention = false) {
         if (pilot && report.status === 'pilot-operations-completed' && report.normalExit && report.runtimeAndSourcesPreserved)
             report.status = 'pilot-passed';
         if (shortRetention && report.status === 'short-operations-completed' && report.normalExit && report.runtimeAndSourcesPreserved && report.managementDataPreserved)
-            report.status = 'retention-short-completed';
+            report.status = 'retention-short-check-only-completed';
         report.finishedAt = new Date().toISOString();
         await save();
         console.log(json({ status: report.status, reportPath, normalExit: report.normalExit, previousFailureReplaced: false }));
