@@ -20,6 +20,7 @@ const buildInfo = join(dirname(executable), 'candidate-build-info.json');
 const candidateSha256 = '9436a75a4cf40316f80702e43c7b4da35067ec9e16a0ce592846599433e9b1aa';
 const buildInfoSha256 = '0bdcc16ff13fffa08045b791abcb93897b24c91153675127c6fddd8dbc1c0028';
 const transportSha256 = 'f9dfe387f6900925808cdd16b9785f29b96e90c40b554b828b17557f99bd846f';
+const hostedReferenceFrame = null;
 const helper = fileURLToPath(new URL('native-visual-input.ps1', import.meta.url));
 const sourceFiles = ['verify-native-visual-stability.mjs', 'native-visual-input.ps1', 'performance-policy.mjs', 'performance-fixture.mjs', 'diagnose-native-idle-memory.mjs', 'native-uia-client.mjs', 'verify-native-uia.ps1'].map(name => fileURLToPath(new URL(name, import.meta.url)));
 const format = 'agent-resource-manager-native-visual-stability-v1';
@@ -289,7 +290,8 @@ async function references(descriptor) {
         process.env.TEMP = env.TEMP;
         process.env.TMP = env.TMP;
         app = await NativeUiaSession.launch({ executable, sha256: candidateSha256, transportSha256, dataDir: descriptor.dataset.dataDir, reportPath: join(descriptor.root, 'reference-driver.json') });
-        visual = await VisualSession.attach(app.identity, descriptor, env);
+        visual = await VisualSession.attach(app.identity, descriptor, env, hostedReferenceFrame);
+        if (hostedReferenceFrame) assert.equal(visual.identity.dpi, hostedReferenceFrame.dpi, 'Hosted display DPI changed before reference input.');
         await visual.call('prepareForeground');
         ref.frame = visual.identity;
         const observeRows = async (op, fields) => referenceObservationRows(await app.call(op, fields));
