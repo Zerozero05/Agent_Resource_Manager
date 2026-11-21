@@ -382,19 +382,22 @@ async function references(descriptor) {
                     assert.ok(remaining > 0, 'The first-search observation reached its deadline.');
                     const searchValue = await app.call('firstSearchValue', { referenceReadBudgetMs: remaining }, remaining);
                     assert.deepEqual(await visual.call('identity'), frame, 'The owned viewport or desktop input changed during the diagnostic.');
-                    await visual.finish();
-                    visual = null;
-                    await app.quit();
-                    app = null;
-                    const evidence = {
-                        status: 'diagnostic-first-search-observed', syntheticOnly: true,
-                        candidateSha256, datasetFingerprint: descriptor.dataset.dataFingerprint,
-                        normalExit: true, frame, initialTable: ref.states.all.rois[0].box,
-                        expectedSearch: 'perf-skill-0000', searchValue, title: { name: title, unscoped, scoped }, tables, edits,
-                    };
                     const path = join(descriptor.root, 'first-search-observation.json');
-                    await writeFile(path, json(evidence), { flag: 'wx' });
-                    console.log(json({ status: evidence.status, path }));
+                    const status = 'diagnostic-first-search-observed';
+                    try {
+                        await visual.finish();
+                        visual = null;
+                        await app.quit();
+                        app = null;
+                    } finally {
+                        await writeFile(path, json({
+                            status, syntheticOnly: true,
+                            candidateSha256, datasetFingerprint: descriptor.dataset.dataFingerprint,
+                            normalExit: app === null, frame, initialTable: ref.states.all.rois[0].box,
+                            expectedSearch: 'perf-skill-0000', searchValue, title: { name: title, unscoped, scoped }, tables, edits,
+                        }), { flag: 'wx' });
+                    }
+                    console.log(json({ status, path }));
                     return;
                 }
                 await point('openDocument', 'Perf Skill 0000', '可横向滚动的 Skill 列表');

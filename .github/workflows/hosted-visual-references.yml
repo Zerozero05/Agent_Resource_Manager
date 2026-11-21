@@ -1,17 +1,17 @@
-name: Diagnose the first hosted Skill search for afdcc14
+name: Verify first hosted Skill search for 2314ea8
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44853682116'
-  CANDIDATE_SOURCE: afdcc146bce08db6ef3082be4b1fbcd59beb5d8b
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_afdcc146bce08db6ef3082be4b1fbcd59beb5d8b
-  CANDIDATE_ARTIFACT_ID: '14687451764'
-  CANDIDATE_SHA256: '2a4b27faf9b2aed958760dc30d5f4ad980b8f62a9e3be6e38d321382f8d89db3'
+  CANDIDATE_RUN_ID: '44862742843'
+  CANDIDATE_SOURCE: 2314ea88080a401be1acfa150d029f1a928b99aa
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_2314ea88080a401be1acfa150d029f1a928b99aa
+  CANDIDATE_ARTIFACT_ID: '14691310680'
+  CANDIDATE_SHA256: 'b95ad24619e1d00e8d100777739afd70323fb827e272b31ef549124bd0063e97'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-first-search-afdcc14-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-first-search-fixed-2314ea8-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 7
     defaults:
@@ -75,6 +75,7 @@ jobs:
           $desktop = $null
           $referenceFrame = $null
           $referenceError = $null
+          $observation = $null
           try {
             Add-Type -TypeDefinition @'
           using System;
@@ -167,44 +168,47 @@ jobs:
               throw 'Expected the exact generated visual descriptor.'
             }
             $stage = 'observe-owned-first-search'
+            $observationPath = Join-Path $referenceRoot 'first-search-observation.json'
             $capture = @(& node $module --references $descriptorPath)
             if ($LASTEXITCODE -ne 0) {
               $detail = Join-Path $referenceRoot 'reference-failure.json'
               if (Test-Path -LiteralPath $detail -PathType Leaf) {
                 $referenceError = Get-Content -LiteralPath $detail -Raw | ConvertFrom-Json
               }
+              if (Test-Path -LiteralPath $observationPath -PathType Leaf) {
+                $observation = Get-Content -LiteralPath $observationPath -Raw | ConvertFrom-Json
+              }
               throw 'The owned first-search diagnosis did not complete.'
             }
             $result = ($capture -join [Environment]::NewLine) | ConvertFrom-Json
-            $observationPath = Join-Path $referenceRoot 'first-search-observation.json'
             $driverPath = Join-Path $referenceRoot 'reference-driver.json'
             $descriptor = Get-Content -LiteralPath $descriptorPath -Raw | ConvertFrom-Json
-            $observed = Get-Content -LiteralPath $observationPath -Raw | ConvertFrom-Json
+            $observation = Get-Content -LiteralPath $observationPath -Raw | ConvertFrom-Json
             $driver = Get-Content -LiteralPath $driverPath -Raw | ConvertFrom-Json
             $stage = 'validate-first-search-observation'
             if ($result.status -cne 'diagnostic-first-search-observed' -or (Resolve-Path -LiteralPath $result.path).Path -ine $observationPath -or
                 $descriptor.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $descriptor.buildInfoSha256 -cne $infoDigest -or
                 $descriptor.dataset.syntheticOnly -ne $true -or $descriptor.dataset.skillCount -ne 1000 -or $descriptor.dataset.toolCount -ne 100 -or
-                $observed.status -cne $result.status -or $observed.syntheticOnly -ne $true -or $observed.normalExit -ne $true -or
-                $observed.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $observed.datasetFingerprint -cne $descriptor.dataset.dataFingerprint -or
-                $observed.expectedSearch -cne 'perf-skill-0000' -or $observed.title.name -cne 'Perf Skill 0000' -or
-                ($null -ne $observed.searchValue.observed -and $observed.searchValue.observed -cne $observed.expectedSearch) -or
-                $observed.frame.foreground -ne $true -or $observed.frame.pid -ne $driver.pid -or
-                $observed.frame.creationFileTime -cne $driver.creationFileTime -or $observed.frame.windowHandle -ne $driver.windowHandle -or
+                $observation.status -cne $result.status -or $observation.syntheticOnly -ne $true -or $observation.normalExit -ne $true -or
+                $observation.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $observation.datasetFingerprint -cne $descriptor.dataset.dataFingerprint -or
+                $observation.expectedSearch -cne 'perf-skill-0000' -or $observation.title.name -cne 'Perf Skill 0000' -or
+                ($null -ne $observation.searchValue.observed -and $observation.searchValue.observed -cne $observation.expectedSearch) -or
+                $observation.frame.foreground -ne $true -or $observation.frame.pid -ne $driver.pid -or
+                $observation.frame.creationFileTime -cne $driver.creationFileTime -or $observation.frame.windowHandle -ne $driver.windowHandle -or
                 $driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or $driver.closedNormally -ne $true -or $driver.dataDirectory -ine $descriptor.dataset.dataDir) {
               throw 'The diagnostic receipt does not bind to the completed synthetic session and graceful exit.'
             }
             foreach ($field in $referenceFrame.Keys) {
-              if ($observed.frame.$field -ne $referenceFrame[$field]) { throw 'The diagnostic frame differs from the hosted preflight.' }
+              if ($observation.frame.$field -ne $referenceFrame[$field]) { throw 'The diagnostic frame differs from the hosted preflight.' }
             }
             $receipt = [ordered]@{
-              status = $observed.status
+              status = $observation.status
               candidateSource = $env:CANDIDATE_SOURCE
               candidateSha256 = $env:CANDIDATE_SHA256
               candidateRunId = $env:CANDIDATE_RUN_ID
               candidateArtifactId = $env:CANDIDATE_ARTIFACT_ID
               desktop = $desktop
-              observation = $observed
+              observation = $observation
             }
             $output = Join-Path $env:RUNNER_TEMP 'arm-visual-first-search.json'
             $receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $output -Encoding utf8NoBOM
@@ -212,8 +216,8 @@ jobs:
           } catch {
             [ordered]@{status='reference-preflight-failed'; stage=$stage; candidateSource=$env:CANDIDATE_SOURCE;
               candidateSha256=$env:CANDIDATE_SHA256; message=$_.Exception.Message; referenceError=$referenceError;
-              desktop=$desktop; referenceFrame=$referenceFrame} |
-              ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $failure -Encoding utf8NoBOM
+              desktop=$desktop; referenceFrame=$referenceFrame; observation=$observation} |
+              ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $failure -Encoding utf8NoBOM
             throw
           }
       - name: Record a pre-reference failure
@@ -240,3 +244,52 @@ jobs:
           path: ${{ runner.temp }}/arm-visual-reference-failure.json
           if-no-files-found: error
           retention-days: 14
+      - name: Verify that the owned first result and search field are visible
+        run: |
+          function Test-SearchBounds($row, $frame) {
+            $parts = ([string]$row.bounds).Split(',')
+            if ($parts.Count -ne 4) { return $false }
+            $bounds = foreach ($part in $parts) {
+              $value = 0.0
+              if (![double]::TryParse($part, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value) -or
+                  ![double]::IsFinite($value)) { return $false }
+              $value
+            }
+            $left, $top, $width, $height = $bounds
+            return $width -gt 0 -and $height -gt 0 -and $left -ge $frame.left -and $top -ge $frame.top -and
+              ($left + $width) -le ($frame.left + $frame.width) -and ($top + $height) -le ($frame.top + $frame.height)
+          }
+          function Get-FirstSearchProblems($observation) {
+            if ($observation.frame.foreground -ne $true -or $observation.normalExit -ne $true) {
+              'The owned foreground session must exit normally.'
+            }
+            foreach ($scope in @('scoped', 'unscoped')) {
+              $rows = @($observation.title.$scope)
+              $row = $rows[0]
+              if ($rows.Count -ne 1 -or $row.name -cne 'Perf Skill 0000' -or
+                  $row.type -cne 'ControlType.Button' -or $row.enabled -ne $true) {
+                "Expected one enabled Skill title button in the $scope query."
+              } else {
+                if ($row.offscreen -ne $false) { "The $scope Skill title is offscreen." }
+                if (!(Test-SearchBounds $row $observation.frame)) { "The $scope Skill title is outside the owned frame." }
+              }
+            }
+            if ($observation.title.scoped[0].bounds -cne $observation.title.unscoped[0].bounds) {
+              'The scoped and unscoped queries located different Skill titles.'
+            }
+            $edits = @($observation.edits)
+            $edit = $edits[0]
+            if ($edits.Count -ne 1 -or $edit.name -cne '搜索 Skill' -or $edit.type -cne 'ControlType.Edit' -or
+                $edit.enabled -ne $true -or $edit.offscreen -ne $false -or $edit.hasKeyboardFocus -ne $true -or
+                !(Test-SearchBounds $edit $observation.frame)) {
+              'Expected one visible, enabled and focused search edit inside the owned frame.'
+            }
+            if ($observation.searchValue.readable -ne $true -or $observation.searchValue.matchesExpected -ne $true -or
+                $observation.searchValue.observed -cne 'perf-skill-0000') {
+              'The focused search edit did not read back the exact synthetic query.'
+            }
+          }
+          $receipt = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'arm-visual-first-search.json') -Raw | ConvertFrom-Json
+          $problems = @(Get-FirstSearchProblems $receipt.observation)
+          if ($problems.Count) { throw ('First search verification failed. ' + ($problems -join ' ')) }
+          Write-Output 'The first Skill result and the still-focused search edit were visible in the owned frame. The session exited normally.'
