@@ -442,8 +442,7 @@ fn latest(
 }
 fn scan(m: &Manager, request: &Value) -> Result<Value, String> {
     allowed(request, &["action", "automatic"])?;
-    normal(m)?;
-    crate::maintenance::ensure_automatic_allowed(&m.snapshot()["settings"])?;
+    m.ensure_live_maintenance_allowed("基本模式不修改或执行自动更新许可")?;
     let grants = m.resource_automation_store(StoreRequest::List)?;
     let grants: Vec<AutomationGrant> = serde_json::from_value(grants["authorizations"].clone())
         .map_err(|_| "自动更新许可不可读")?;

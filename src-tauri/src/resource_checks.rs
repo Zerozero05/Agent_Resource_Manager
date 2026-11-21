@@ -460,10 +460,8 @@ fn run_due_with(
     at: DateTime<Utc>,
     mut read_source: impl FnMut(&CheckSource) -> Result<Option<ReleaseSummary>, String>,
 ) -> Result<Value, String> {
-    if m.basic_mode {
-        return Err("基本模式不联网检查工具版本".into());
-    }
-    crate::maintenance::ensure_automatic_allowed(&m.snapshot()["settings"])?;
+    const BASIC_MODE_ERROR: &str = "基本模式不联网检查工具版本";
+    m.ensure_live_maintenance_allowed(BASIC_MODE_ERROR)?;
     let resources = m.resource_store(ResourceStore::List)?;
     let records: Vec<ResourceRecord> =
         serde_json::from_value(resources["resources"].clone()).map_err(|_| "工具目录格式无效")?;
@@ -509,12 +507,11 @@ fn run_due_with(
             continue;
         }
         crate::network::check_cancelled()?;
-        crate::maintenance::ensure_automatic_allowed(&m.snapshot()["settings"])?;
+        m.ensure_live_maintenance_allowed(BASIC_MODE_ERROR)?;
         let result = read_source(&source);
         crate::network::check_cancelled()?;
         let record = observation(source, previous, at, result)?;
-        // The store hook checks the live maintenance policy again; the detached
-        // snapshot here cannot authorize a save after pause/basic/source changes.
+        // Recheck maintenance and source state on the live writer before saving.
         let saved = m.resource_check_store(StoreRequest::Save {
             expected_revision: previous.map(|v| v.revision).unwrap_or(0),
             record: Box::new(record),

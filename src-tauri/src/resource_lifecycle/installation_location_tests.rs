@@ -200,6 +200,12 @@ macro_rules! unused_store {
 }
 
 impl crate::model::ManagerRuntime for LiveSnapshot {
+    fn ensure_live_maintenance_allowed(&self, basic_mode_error: &str) -> Result<(), String> {
+        if self.0["startup"]["basicMode"] == true {
+            return Err(basic_mode_error.into());
+        }
+        crate::maintenance::ensure_automatic_allowed(&self.0["settings"])
+    }
     fn snapshot(&self) -> Value {
         self.0.clone()
     }

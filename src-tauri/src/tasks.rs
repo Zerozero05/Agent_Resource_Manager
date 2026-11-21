@@ -1871,6 +1871,17 @@ impl WorkerHook {
 }
 
 impl ManagerRuntime for WorkerHook {
+    fn ensure_live_maintenance_allowed(&self, basic_mode_error: &str) -> Result<(), String> {
+        let service = self
+            .service
+            .upgrade()
+            .ok_or("Task service is unavailable")?;
+        let manager = service
+            .manager
+            .lock()
+            .map_err(|_| "Manager state lock failed")?;
+        manager.ensure_live_maintenance_allowed(basic_mode_error)
+    }
     fn capability_evidence_store(
         &self,
         request: crate::resource_capability_evidence::StoreRequest,

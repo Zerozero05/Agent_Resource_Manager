@@ -65,6 +65,7 @@ pub(crate) trait ManagerRuntime: Send + Sync {
     fn save(&self, manager: &Manager) -> Result<(), String>;
     fn begin_automatic_commit(&self) -> Result<(), String>;
     fn snapshot(&self) -> Value;
+    fn ensure_live_maintenance_allowed(&self, basic_mode_error: &str) -> Result<(), String>;
     fn resource_store(&self, request: crate::resources::StoreRequest) -> Result<Value, String>;
     fn resource_check_store(
         &self,
@@ -294,6 +295,18 @@ impl Manager {
     pub(crate) fn startup_status(&self) -> Value {
         let catalog = self.resource_catalog_available;
         json!({"basicMode":self.basic_mode,"readOnly":self.basic_mode,"resourceCatalogAvailable":catalog,"dataDir":self.data_dir,"warnings":if self.basic_mode && !catalog {vec!["当前数据库没有工具目录；基本模式不会创建新表。"]}else{vec![]}})
+    }
+    pub(crate) fn ensure_live_maintenance_allowed(
+        &self,
+        basic_mode_error: &str,
+    ) -> Result<(), String> {
+        if self.basic_mode {
+            return Err(basic_mode_error.into());
+        }
+        if let Some(runtime) = &self.runtime {
+            return runtime.ensure_live_maintenance_allowed(basic_mode_error);
+        }
+        crate::maintenance::ensure_automatic_allowed(&self.state.settings)
     }
     pub(crate) fn ensure_request_allowed(&self, request: &Value) -> Result<(), String> {
         if self.basic_mode

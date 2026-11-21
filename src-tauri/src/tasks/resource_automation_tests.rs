@@ -62,3 +62,53 @@ fn only_internal_result_recording_can_finish_after_a_maintenance_pause() {
     manager.basic_mode = true;
     assert!(ensure_task_allowed(&manager, &finish, true).is_err());
 }
+
+#[test]
+fn periodic_maintenance_reads_the_live_writer_after_detaching() {
+    let (_root, service) = fixture();
+    let scan = json!({"action":"__resource_automation_scan","automatic":true});
+    let due = json!({"action":"__resource_version_due","automatic":true});
+    let hook = Arc::new(WorkerHook {
+        service: Arc::downgrade(&service),
+        base: None,
+        action: "__resource_automation_scan".into(),
+        request: scan.clone(),
+        cancel: Arc::new(AtomicBool::new(false)),
+        cancellable: true,
+        commit_started: AtomicBool::new(false),
+        internal_resource_automation: true,
+    });
+    let mut worker = service.manager.lock().unwrap().detached(hook, false);
+    let run = |worker: &mut Manager| {
+        [
+            crate::resource_automation::engine::dispatch_step(worker, &scan),
+            crate::resource_checks::dispatch_due(worker, &due),
+        ]
+    };
+    assert!(run(&mut worker).into_iter().all(|result| result.is_ok()));
+
+    service.manager.lock().unwrap().state.settings["maintenance"] =
+        json!({"revision":1,"pausedManually":true,"pauseUntil":null,"window":null});
+    assert!(worker.state.settings.get("maintenance").is_none());
+    for result in run(&mut worker) {
+        assert_eq!(result.unwrap_err(), "自动维护已暂停，等待手动恢复");
+    }
+
+    {
+        let mut manager = service.manager.lock().unwrap();
+        manager.state.settings["maintenance"] =
+            json!({"revision":2,"pausedManually":false,"pauseUntil":null,"window":null});
+        manager.basic_mode = true;
+    }
+    assert!(!worker.basic_mode);
+    let [scan_result, due_result] = run(&mut worker);
+    assert_eq!(scan_result.unwrap_err(), "基本模式不修改或执行自动更新许可");
+    assert_eq!(due_result.unwrap_err(), "基本模式不联网检查工具版本");
+
+    service.manager.lock().unwrap().basic_mode = false;
+    assert!(run(&mut worker).into_iter().all(|result| result.is_ok()));
+    drop(service);
+    for result in run(&mut worker) {
+        assert_eq!(result.unwrap_err(), "Task service is unavailable");
+    }
+}
