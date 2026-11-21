@@ -1176,12 +1176,15 @@ fn save_association_state(m: &mut Manager, previous: crate::model::State) -> Res
     Ok(m.snapshot())
 }
 
-fn save_association_changes(m: &mut Manager, previous: crate::model::State) -> Result<(), String> {
+fn save_association_changes(
+    m: &mut Manager,
+    previous: crate::model::State,
+) -> Result<crate::model::State, String> {
     if let Err(error) = m.save() {
         m.state = previous;
         return Err(error);
     }
-    Ok(())
+    Ok(previous)
 }
 
 fn auto_associate(m: &mut Manager) -> Result<Value, String> {
@@ -1245,9 +1248,9 @@ fn refresh(m: &mut Manager, req: &Value) -> Result<Value, String> {
     Ok(m.snapshot())
 }
 
-fn refresh_and_save(m: &mut Manager, req: &Value) -> Result<(), String> {
+fn refresh_and_save(m: &mut Manager, req: &Value) -> Result<Option<Vec<Value>>, String> {
     if req["localOnly"] == true {
-        return refresh_local(m, req);
+        return refresh_local(m, req).map(Some);
     }
     let selected = m.refresh_selection(req)?;
     let previous = m.state.clone();
@@ -1452,9 +1455,9 @@ fn refresh_and_save(m: &mut Manager, req: &Value) -> Result<(), String> {
     }
     if automatic && semantic_state(&m.state)? == semantic_state(&previous)? {
         m.state = previous;
-        return Ok(());
+        return Ok(None);
     }
-    save_association_changes(m, previous)
+    save_association_changes(m, previous).map(|previous| Some(previous.skills))
 }
 
 fn check_fingerprint(source: &Value, skills: &[Value]) -> Result<String, String> {
@@ -1538,8 +1541,9 @@ fn semantic_state(state: &crate::model::State) -> Result<Value, String> {
 }
 
 pub(crate) fn check(m: &mut Manager, req: &Value) -> Result<Value, String> {
-    let before = m.state.skills.clone();
-    refresh_and_save(m, req)?;
+    let previous_skills = refresh_and_save(m, req)?;
+    // An unchanged automatic check restores the prior state without saving.
+    let before = previous_skills.as_deref().unwrap_or(&m.state.skills);
     let associated = m
         .state
         .skills
@@ -1573,7 +1577,7 @@ pub(crate) fn check(m: &mut Manager, req: &Value) -> Result<Value, String> {
         .iter()
         .filter(|skill| skill["associationPending"] == true)
         .count();
-    let docs_updated = documentation_updates(&before, &m.state.skills);
+    let docs_updated = documentation_updates(before, &m.state.skills);
     Ok(json!({
         "checkSummary": {
             "newRemote": new_remote,
@@ -1661,7 +1665,7 @@ fn refresh_matches(selected: &Option<BTreeSet<String>>, skill: &Value) -> bool {
         .as_ref()
         .is_none_or(|ids| skill["id"].as_str().is_some_and(|id| ids.contains(id)))
 }
-fn refresh_local(m: &mut Manager, req: &Value) -> Result<(), String> {
+fn refresh_local(m: &mut Manager, req: &Value) -> Result<Vec<Value>, String> {
     let selected = m.refresh_selection(req)?;
     let previous = m.state.clone();
     let source_errors: BTreeMap<String, Value> = m
@@ -1760,7 +1764,7 @@ fn refresh_local(m: &mut Manager, req: &Value) -> Result<(), String> {
             }
         }
     }
-    save_association_changes(m, previous)
+    save_association_changes(m, previous).map(|previous| previous.skills)
 }
 fn note_untracked(skill: &mut Value, all: &BTreeMap<String, String>, scope: &[String]) {
     let untracked: Vec<_> = all.keys().filter(|p| !scope.contains(p)).cloned().collect();
@@ -3264,6 +3268,41 @@ mod association_behavior_tests {
         assert!(skill_needs_attention(&updated));
         updated["error"] = json!("offline");
         assert_eq!(documentation_updates(&[old], &[updated]), 0);
+    }
+
+    #[test]
+    fn unchanged_automatic_check_summary_uses_the_restored_skills() {
+        let d = fixture();
+        let mut m = Manager::new(d.path().join("data")).unwrap();
+        m.state.skills.push(json!({
+            "id":"one","sourceId":"source","repo":"fixture/repo",
+            "status":"docs_updated","remoteDocHash":"current","error":null
+        }));
+        let previous = m.state.clone();
+        let revision = m.snapshot()["stateRevision"].clone();
+        let result = check(&mut m, &json!({"automatic":true,"remoteOnly":true})).unwrap();
+        assert_eq!(result["checkSummary"]["newRemote"], 0);
+        assert_eq!(result["checkSummary"]["docsUpdated"], 0);
+        assert!(m.state == previous);
+        assert_eq!(m.snapshot()["stateRevision"], revision);
+    }
+
+    #[test]
+    fn failed_check_save_restores_before_skills_in_both_paths() {
+        let d = fixture();
+        let root = package(d.path(), "shared-skill", "initial instructions");
+        let mut m = Manager::new(d.path().join("data")).unwrap();
+        m.upsert_skill(local_record(&root, true));
+        m.save().unwrap();
+        let previous = m.state.clone();
+        let revision = m.snapshot()["stateRevision"].clone();
+        m.basic_mode = true;
+        for local_only in [true, false] {
+            let result = check(&mut m, &json!({"localOnly":local_only}));
+            assert!(result.unwrap_err().contains("基本模式"));
+            assert!(m.state == previous);
+            assert_eq!(m.snapshot()["stateRevision"], revision);
+        }
     }
 
     fn fixture() -> tempfile::TempDir {

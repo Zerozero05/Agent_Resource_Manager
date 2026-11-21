@@ -183,7 +183,11 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
   }, [managerSnapshot, tasks.run, acceptSnapshot, refreshState, basicMode]);
   const acceptWorkspace = useCallback((next: WorkspaceNavigation) => {
     accepting.current = accepting.current.then(async () => {
-      if (!mounted.current || next.revision < current.current.revision) return;
+      const previous = current.current;
+      if (!mounted.current || next.revision < previous.revision) return;
+      // Commands can also broadcast the navigation in their replies. Transfers
+      // can change at the same revision, so compare the full navigation there.
+      if (next.revision === previous.revision && JSON.stringify(next) === JSON.stringify(previous)) return;
       const owner = next.windows.find(window => window.label === label);
       const incoming = (next.transfers || []) as Transfer[];
       const targets = incoming.filter(item => item.targetWindowLabel === label);

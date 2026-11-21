@@ -129,6 +129,30 @@ test('restored detail labels follow current Skill and cached alias without chang
   assert.deepEqual(fixture.taskCalls, []);
 });
 
+test('duplicate navigation skips a workspace render but a transfer at the same revision still restores its pane', async () => {
+  const fixture = await mount();
+  const detail: WorkspacePane = { id: 'detail-transfer', kind: 'detail', skillId: 'a-skill', state: {} };
+  const layout = {
+    revision: 2,
+    windows: [
+      { label: 'main', activePaneId: 'home', panes: fixture.panes() },
+      { label: 'other', activePaneId: detail.id, panes: [detail] },
+    ],
+    transfers: [] as { id: string; paneId: string; sourceWindowLabel: string; targetWindowLabel: string }[],
+  };
+  const publish = (value: typeof layout) => fixture.listeners.get('workspace-changed')!({ payload: value });
+  await act(async () => publish(layout));
+  const before = fixture.panes();
+  const callStart = fixture.calls.length;
+  await act(async () => publish(structuredClone(layout)));
+  assert.equal(fixture.panes(), before, 'an identical event and reply must not rebuild the workspace');
+  assert.equal(fixture.calls.length, callStart);
+  await act(async () => publish({ ...layout, transfers: [{ id: 'transfer-1', paneId: detail.id, sourceWindowLabel: 'other', targetWindowLabel: 'main' }] }));
+  assert.deepEqual(fixture.panes().map(pane => pane.id), ['home', detail.id]);
+  assert.deepEqual(fixture.calls.slice(callStart), [{ action: 'workspace_get_pane_runtime', paneId: detail.id }]);
+});
+
+
 test('a failed pane read does not prevent another pane in the same snapshot from restoring on retry', async () => {
   let failSecondRead = true;
   const firstPane: WorkspacePane = { id: 'detail-first', skillId: 'first', kind: 'detail', state: {} };
