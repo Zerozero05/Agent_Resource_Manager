@@ -202,12 +202,12 @@ function Run-Measurement([string]$phase, [int]$maxMinutes) {
             $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($spec | ConvertTo-Json -Compress)))
             $quitText = & pwsh.exe -NoProfile -NonInteractive -MTA -File $quitHelper -Spec $encoded
             if ($LASTEXITCODE -ne 0) { throw 'The exact normal quit did not complete.' }
-            $quitProof = $quitText | ConvertFrom-Json
+            $quitProof = ($quitText -join "`n") | ConvertFrom-Json -ErrorAction Stop
+            Save-Json $proofFile $quitProof
             if ($quitProof.exited -ne $true -or $quitProof.exitCode -ne 0 -or $quitProof.pid -ne $identity.pid -or
                 $quitProof.creationFileTime -cne $identity.creationFileTime -or $quitProof.windowHandle -ne $identity.windowHandle) {
                 throw 'The normal-exit receipt did not match the sampled owner.'
             }
-            Save-Json $proofFile $quitProof
         }
         if (-not $process.WaitForExit(5000)) { throw 'Native harness did not complete after output closed.' }
         $sourceReport = Get-Content -Raw -LiteralPath $reportFile | ConvertFrom-Json

@@ -21,6 +21,9 @@ using System.Runtime.InteropServices;
 public static class PhysicalMemoryQuit {
   [DllImport("user32.dll")]
   public static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool GetExitCodeProcess(Microsoft.Win32.SafeHandles.SafeProcessHandle process, out uint exitCode);
 }
 '@
 $owned = [Diagnostics.Process]::GetProcessById([int]$identity.pid)
@@ -81,6 +84,7 @@ try {
     throw 'The exact diagnostic window is unavailable for normal exit.'
   }
   Assert-OwnedWindow
+  $processHandle = $owned.SafeHandle
   $quit = Find-OwnedButton '完全退出管理器'
   if (-not $quit) {
     $help = Wait-OwnedButton '工作区快捷键'
@@ -89,7 +93,11 @@ try {
   }
   Invoke-OwnedButton $quit
   if (-not $owned.WaitForExit(15000)) { throw 'Normal exit timed out. No forced termination was attempted.' }
-  @{exited=$true; exitCode=$owned.ExitCode; pid=$identity.pid; creationFileTime=$identity.creationFileTime;
+  [uint32]$exitStatus = 0
+  if (-not [PhysicalMemoryQuit]::GetExitCodeProcess($processHandle, [ref]$exitStatus)) {
+    throw 'The kernel did not return the observed process exit code.'
+  }
+  @{exited=$true; exitCode=[long]$exitStatus; pid=[long]$identity.pid; creationFileTime=[string]$identity.creationFileTime;
     windowHandle=$ownedWindow.ToInt64(); method='post-measurement-owned-normal-quit'; osInputSent=$false} | ConvertTo-Json -Compress
 } finally {
   $owned.Dispose()
