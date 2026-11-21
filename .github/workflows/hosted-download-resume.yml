@@ -1,0 +1,184 @@
+name: Verify explicit download continuation after a Windows restart
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  CANDIDATE_RUN_ID: '44896797301'
+  CANDIDATE_SOURCE: c2aed09d8e90079a8f41682335a7606cadba99b2
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_c2aed09d8e90079a8f41682335a7606cadba99b2
+  CANDIDATE_ARTIFACT_ID: '14703704901'
+  CANDIDATE_SHA256: '2d68c43280db7d0f6b6f6a2ad212d16e6eb5d4ad46d8d76d5569fbb770e2690a'
+  CANDIDATE_ARCHIVE_SHA256: '34b7ca73644743071b269e49231f081490bea3f22b5671ce4bae5a2b7cee32d5'
+  CANDIDATE_BUILD_INFO_SHA256: 'c4847175a3269141f40c52bdd6d5cffe16beccb8228b4d06aa8b8688bd928eda'
+  OFFICIAL_DOWNLOAD_SHA256: '59c37586e45e5e111a78686e98a9d11ae71a7b4b1a334c41aef82831ea5b0a05'
+jobs:
+  resume:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-download-resume-c2aed09-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify hosted runner and exact candidate provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:CANDIDATE_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:CANDIDATE_BUILD_INFO_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:OFFICIAL_DOWNLOAD_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Require the independently verified candidate artifact ID, exact SHA256 values and the official asset digest.'
+          }
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) { throw 'Expected a fresh hosted Windows interactive D-drive session.' }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no existing manager in the isolated runner.' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
+              $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push' -or
+              $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+          $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID -or
+              $match[0].digest -cne "sha256:$env:CANDIDATE_ARCHIVE_SHA256") { throw 'The exact Windows candidate artifact is missing.' }
+          ./scripts/verify-native-uia.ps1 -CompileOnly
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          gh run download $env:CANDIDATE_RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:CANDIDATE_ARTIFACT --dir $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows candidate download failed.' }
+          $exe = Join-Path $candidate 'agent-resource-manager.exe'
+          $source = Join-Path $candidate 'BUILD_INFO.json'
+          $originalBuildInfoSha256 = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($originalBuildInfoSha256 -cne $env:CANDIDATE_BUILD_INFO_SHA256) { throw 'Original candidate BUILD_INFO hash did not match.' }
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          $digest = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:CANDIDATE_SHA256 -or $info.executableSha256 -cne $digest -or
+              $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or
+              $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
+              $info.version -cne '0.3.0-dev.1') { throw 'Build provenance does not bind to the pinned executable.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue $originalBuildInfoSha256
+          $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+          Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId)"
+      - name: Verify confirmed download continuation after normal restart
+        timeout-minutes: 10
+        run: |
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          $resourceRoot = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\resources'
+          if ((Test-Path -LiteralPath $root) -or (Test-Path -LiteralPath $resourceRoot)) {
+            throw 'Expected wholly fresh synthetic data and download roots.'
+          }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) {
+            throw 'Expected no other manager before either owned launch.'
+          }
+          $audit = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-native-download-resume-evidence')
+          $record = [ordered]@{ status='incomplete'; candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$env:CANDIDATE_SHA256; nativeExitCode=$null }
+          try {
+            $specification = Join-Path $env:RUNNER_TEMP 'pinned-agent-reach-download.json'
+            [ordered]@{
+              repository='Panniantong/Agent-Reach'; tag='v1.6.0'; releaseId=421526768; assetId=668240314
+              assetName='agent-reach.zip'; assetBytes=676536
+            } | ConvertTo-Json -Compress | Set-Content -LiteralPath $specification -Encoding utf8NoBOM
+            $arguments = @('--suite', 'download-resume', '--candidate', (Join-Path $candidate 'agent-resource-manager.exe'),
+              '--candidate-build-info', (Join-Path $candidate 'BUILD_INFO.native-validation.json'),
+              '--download-spec', $specification, '--accessibility-input', '--popup-select', 'true')
+            $PSNativeCommandUseErrorActionPreference = $false
+            & node scripts/verify-uia-performance.mjs @arguments
+            $record.nativeExitCode = $LASTEXITCODE
+            $results = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue)
+            if ($results.Count -ne 1 -or ($results[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw 'Expected exactly one owned native observation directory.'
+            }
+            $record['rawDirectory'] = $results[0].Name
+            foreach ($name in @('report.json','observations.jsonl','policy-before-run.json','download-resume-spec.json',
+              'candidate-download-resume-before-quit-driver.json','candidate-download-resume-after-reopen-driver.json')) {
+              $file = Join-Path $results[0].FullName $name
+              if (Test-Path -LiteralPath $file -PathType Leaf) {
+                if (((Get-Item -LiteralPath $file).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                  throw 'A diagnostic receipt is not an ordinary generated file.'
+                }
+                Copy-Item -LiteralPath $file -Destination $audit.FullName
+              }
+            }
+            if ($record.nativeExitCode -ne 0) { throw 'The original native download continuation workflow did not finish successfully.' }
+            $report = Get-Content -LiteralPath (Join-Path $audit.FullName 'report.json') -Raw | ConvertFrom-Json
+            $resume = $report.downloadResume
+            $partial = $resume.interrupted
+            $complete = $resume.completed
+            if ($report.suite -cne 'download-resume' -or $report.status -cne 'passed-native-download-restart-continue-only' -or
+                $report.candidate.source -cne $env:CANDIDATE_SOURCE -or $report.candidate.sha256 -cne $env:CANDIDATE_SHA256 -or
+                $report.harnessChangedDuringRun -ne $false -or $report.dataset.syntheticOnly -ne $true -or
+                $resume.passed -ne $true -or $resume.performanceAcceptanceClaimed -ne $false -or
+                $resume.effectiveSpecification.repository -cne 'Panniantong/Agent-Reach' -or $resume.effectiveSpecification.tag -cne 'v1.6.0' -or
+                $resume.effectiveSpecification.releaseId -ne 421526768 -or $resume.effectiveSpecification.assetId -ne 668240314 -or
+                $resume.effectiveSpecification.assetName -cne 'agent-reach.zip' -or $resume.effectiveSpecification.assetBytes -ne 676536 -or
+                $partial.normalExit -ne $true -or $partial.bytes -le 0 -or $partial.bytes -ge 676536 -or
+                $partial.sha256 -cnotmatch '^[a-f0-9]{64}$' -or $complete.savedPrefixBytes -ne $partial.bytes -or
+                $complete.savedPrefixSha256 -cne $partial.sha256 -or $complete.downloadId -cne $partial.downloadId -or
+                $complete.restoredStatus -cne 'interrupted' -or $complete.restoredBytes -ne $partial.bytes -or
+                $complete.noAutomaticRestartObservedMs -lt 2000 -or $complete.noInstallationOrInvocation -ne $true -or
+                $complete.bytes -ne 676536 -or $complete.productionZipInventoryFiles -lt 1 -or
+                $complete.sha256 -cne $env:OFFICIAL_DOWNLOAD_SHA256 -or
+                $resume.finalOriginalDataSha256 -cne $resume.originalDataSha256 -or
+                $partial.originalDataSha256 -cne $resume.originalDataSha256) {
+              throw 'The restart, unchanged prefix, explicit continuation, genuine asset, or protected-data evidence did not match.'
+            }
+            $data = Join-Path $results[0].FullName 'mixed-native-fixture\data'
+            $resourceDirectory = @(Get-ChildItem -LiteralPath $resourceRoot -Directory -Filter 'native-download-resume-*')
+            if ($resourceDirectory.Count -ne 1 -or ($resourceDirectory[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $resume.effectiveSpecification.directory -ine $resourceDirectory[0].FullName -or $report.dataset.dataDir -ine $data) {
+              throw 'Validation escaped its sole synthetic fixture or download directory.'
+            }
+            if ($complete.downloadId -cnotmatch '^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$') {
+              throw 'The continued target must use its original UUID.'
+            }
+            $archive = Join-Path $resourceDirectory[0].FullName "$($complete.downloadId)-agent-reach.zip"
+            if ($complete.archivePath -ine $archive -or $partial.targetPath -ine $archive -or
+                -not (Test-Path -LiteralPath $archive -PathType Leaf) -or
+                ((Get-Item -LiteralPath $archive).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $env:OFFICIAL_DOWNLOAD_SHA256) {
+              throw 'The completed archive is outside the owned location or its independently pinned SHA differs.'
+            }
+            $labels = @('candidate-download-resume-before-quit','candidate-download-resume-after-reopen')
+            $before = Get-Content -LiteralPath (Join-Path $audit.FullName "$($labels[0])-driver.json") -Raw | ConvertFrom-Json
+            $after = Get-Content -LiteralPath (Join-Path $audit.FullName "$($labels[1])-driver.json") -Raw | ConvertFrom-Json
+            $events = @(Get-Content -LiteralPath (Join-Path $audit.FullName 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json })
+            $exits = @($events | Where-Object { $_.kind -ceq 'native-normal-exit' -and $_.closedNormally -eq $true })
+            if ($exits.Count -ne 2 -or $exits[0].label -cne $labels[0] -or $exits[1].label -cne $labels[1] -or
+                $exits[0].pid -ne $partial.processId -or $exits[0].creationFileTime -cne $partial.creationFileTime -or
+                $exits[1].pid -ne $complete.secondProcessId -or $exits[1].creationFileTime -cne $complete.secondCreationFileTime -or
+                ($exits[0].pid -eq $exits[1].pid -and $exits[0].creationFileTime -ceq $exits[1].creationFileTime) -or
+                $before.closedNormally -ne $true -or $after.closedNormally -ne $true -or
+                $before.dataDirectory -ine $data -or $after.dataDirectory -ine $data -or
+                $before.executableSha256 -cne $env:CANDIDATE_SHA256 -or $after.executableSha256 -cne $env:CANDIDATE_SHA256 -or
+                (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue)) {
+              throw 'The two exact owned processes did not independently confirm normal exits and one shared synthetic state.'
+            }
+            $record['officialAssetId'] = 668240314
+            $record['officialAssetSha256'] = $env:OFFICIAL_DOWNLOAD_SHA256
+            $record['savedPrefixBytes'] = $partial.bytes
+            $record['sameDownloadIdentity'] = $complete.downloadId
+            $record['normalExits'] = 2
+            $record['reportSha256'] = (Get-FileHash -LiteralPath (Join-Path $audit.FullName 'report.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+            $record.status = 'verified-native-download-restart-continue-only'
+          } catch {
+            $record['error'] = $_.Exception.Message
+            throw
+          } finally {
+            $record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $audit.FullName 'receipt.json') -Encoding utf8NoBOM
+          }
+      - name: Upload only restart continuation audit evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Agent_Resource_Manager_download_resume_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-native-download-resume-evidence/
+          if-no-files-found: warn
+          retention-days: 14
