@@ -937,10 +937,37 @@ public sealed class NativeUiMeasurement : IDisposable {
     const string expected="perf-skill-0000";
     return new{readable=value!=null,matchesExpected=value==expected,observed=value==expected?expected:null,empty=value==String.Empty};
   }
+  object[] ReferenceScopeNames(string scopeName) {
+    bool library=scopeName=="可横向滚动的 Skill 列表";
+    if(!library&&scopeName!="工作区标签")throw new InvalidOperationException("Unsupported visual reference scope.");
+    ControlType scopeType=library?ControlType.Group:ControlType.Tab;
+    ControlType childType=library?ControlType.Button:ControlType.TabItem;
+    AutomationElementCollection scopes=AutomationElement.FromHandle(window).FindAll(TreeScope.Descendants,new AndCondition(
+      new PropertyCondition(AutomationElement.NameProperty,scopeName),new PropertyCondition(AutomationElement.ControlTypeProperty,scopeType)));
+    if(scopes.Count==0)return Array.Empty<object>();
+    if(scopes.Count!=1)throw new InvalidOperationException("The fixed visual reference scope is ambiguous.");
+    List<object> values=new List<object>();
+    CacheRequest cache=new CacheRequest();
+    cache.Add(AutomationElement.NameProperty);
+    using(cache.Activate()){
+      foreach(AutomationElement child in scopes[0].FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,childType))){
+        string name=child.Cached.Name;
+        if(!String.IsNullOrEmpty(name))values.Add(new{name=name,type=childType.ProgrammaticName});
+      }
+    }
+    return values.ToArray();
+  }
   public object ReadReference(string operation,string name,string scope,int budgetMs,bool allowPendingScope=false) {
-    if(operation!="names"&&operation!="state"&&operation!="firstSearchValue")throw new InvalidOperationException("Only read-only reference queries may retry.");
+    if(operation!="names"&&operation!="scopeNames"&&operation!="state"&&operation!="firstSearchValue")throw new InvalidOperationException("Only read-only reference queries may retry.");
     uint expectedInput=LastInputTick();
-    return ReadReferenceWithRetry(() => operation=="names"?Names():operation=="state"?InspectNamed(name,scope,true,allowPendingScope):FirstSearchValue(),() => {
+    return ReadReferenceWithRetry(() => {
+      switch(operation){
+        case "names":return Names();
+        case "scopeNames":return ReferenceScopeNames(scope);
+        case "state":return InspectNamed(name,scope,true,allowPendingScope);
+        default:return FirstSearchValue();
+      }
+    },() => {
       Identity(true);
       if(LastInputTick()!=expectedInput)throw new InvalidOperationException("Desktop input changed during the same owned reference observation.");
     },budgetMs);
@@ -1540,8 +1567,8 @@ try {
                 if($request.op -in @('keyboardShortcut','keyboardEdit','keyboardField','keyboardIme','prepareKeyboardForeground') -and ($PrivateUi -or -not $KeyboardInput)){throw 'Keyboard operations require an explicitly enabled non-private functional session.'}
                 if($request.op -in @('driverMemory','collectDriverMemory') -and (-not $DriverMemoryDiagnostic -or $Mode -ne 'bridge' -or -not $AccessibilityInput -or $KeyboardInput -or $PrivateUi)){throw 'Driver memory diagnostics require an explicitly enabled non-private accessibility-only bridge session without keyboard input.'}
                 $referenceReadBudget=$request.referenceReadBudgetMs
-                if($request.op -ceq 'firstSearchValue' -and $null -eq $referenceReadBudget){throw 'The first-search value requires an owned reference observation budget.'}
-                if($null -ne $referenceReadBudget -and ($request.op -cnotin @('names','state','firstSearchValue') -or $PrivateUi -or
+                if($request.op -cin @('firstSearchValue','scopeNames') -and $null -eq $referenceReadBudget){throw 'This operation requires an owned reference observation budget.'}
+                if($null -ne $referenceReadBudget -and ($request.op -cnotin @('names','scopeNames','state','firstSearchValue') -or $PrivateUi -or
                   ($referenceReadBudget -isnot [int] -and $referenceReadBudget -isnot [long]) -or $referenceReadBudget -lt 1 -or $referenceReadBudget -gt 15000)){
                   throw 'A reference read retry requires an exact names or state query and its remaining original deadline.'
                 }
@@ -1596,6 +1623,7 @@ try {
                         finally{$report.ownedFocusDiagnostic=$session.LastOwnedFocusDiagnostic}
                     }
                     'names' {if($null -ne $referenceReadBudget){$session.ReadReference('names','','',[int]$referenceReadBudget)}else{$session.Names()}}
+                    'scopeNames' {$session.ReadReference('scopeNames','',[string]$request.scope,[int]$referenceReadBudget)}
                     'snapshot' {$session.Names()}
                     'state' {if($null -ne $referenceReadBudget){$session.ReadReference('state',[string]$request.name,[string]$request.scope,[int]$referenceReadBudget,[bool]$request.referenceAllowPendingScope)}else{$session.InspectNamed([string]$request.name,[string]$request.scope)}}
                     'firstSearchValue' {$session.ReadReference('firstSearchValue','','',[int]$referenceReadBudget)}
@@ -1673,7 +1701,8 @@ try {
     if($session -and -not $session.Exited -and -not $clientReleased){
       if($session.InputPending){$report.inputStillPending=$true;$report.closeError='No diagnostics or exit input was sent while the prior native input was pending.'}
       else {
-        if(-not $PrivateUi){
+        if($null -ne $referenceReadBudget){$report.wholeUiDiagnostics='omitted-bounded-reference-read'}
+        elseif(-not $PrivateUi){
             try { $report.windowIdentity=$session.WindowIdentity() } catch { $report.windowIdentityError=$_.Exception.GetBaseException().Message }
             try { $report.names=$session.Names() } catch { $report.namesError=$_.Exception.GetBaseException().Message }
             if($report.lastOperation -eq 'search'){try{$report.searchObservation=$session.SearchObservation();$report.failureScreenshot=[IO.Path]::ChangeExtension($OutputFile,'.png');$session.Capture($report.failureScreenshot)}catch{$report.searchObservationError=$_.Exception.GetBaseException().Message}}

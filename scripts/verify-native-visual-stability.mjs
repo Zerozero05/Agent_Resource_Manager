@@ -36,6 +36,9 @@ export const requiredStates = Object.freeze([...Array.from({ length: 66 }, (_, i
 export const visualPolicy = Object.freeze({ match: 'exact-normalized-BGRA', matchTimeoutMs: 15000, stableObservations: 2, observationGapMs: 50, referenceSettleMs: 250, preparationIdleMs: 120000, normalQuitWaitMs: 180000 });
 const tableName = '可横向滚动的 Skill 列表';
 const documentParagraph = '仅用于隔离的本地性能验收，不调用外部程序，不连接远端。';
+const documentWheelDelta = -120;
+const maximumDocumentWheelSteps = 12;
+const boxCenter = ([x, y, width, height]) => ({ x: x + Math.floor(width / 2), y: y + Math.floor(height / 2) });
 export function requiredRegions(state) {
     assert.ok(requiredStates.includes(state), 'Unknown visual reference state.');
     const table = { role: 'result-table', source: { kind: 'native-element', name: tableName } };
@@ -111,6 +114,21 @@ export function validateReferences(ref, descriptor) {
                 title.box[1] + title.box[3] <= table.box[1] + table.box[3], `Result title escaped its confirmed table in ${name}.`);
         }
     }
+    const { point, descriptionBox, initialBox, steps, returnedBox } = ref.documentReading;
+    assert.ok(validBox(descriptionBox, ref.frame));
+    assert.deepEqual(point, boxCenter(descriptionBox), 'The native document wheel must target the observed description tab.');
+    const canRecordBounds = box => Array.isArray(box) && box.length === 4 && box.every(Number.isSafeInteger) && box[2] >= 2 && box[3] >= 2;
+    assert.ok(canRecordBounds(initialBox));
+    assert.ok(Array.isArray(steps) && steps.length <= maximumDocumentWheelSteps);
+    let previousBox = initialBox;
+    for (const step of steps) {
+        assert.equal(step.wheelDelta, documentWheelDelta);
+        assert.ok(canRecordBounds(step.paragraphBox) && step.paragraphBox[1] < previousBox[1], 'Each frozen wheel event must move the exact paragraph upward.');
+        previousBox = step.paragraphBox;
+    }
+    assert.deepEqual(ref.states.document.rois[1].box, previousBox, 'The document ROI must bind to the actual final wheel state.');
+    assert.deepEqual(returnedBox, previousBox, 'The document moved during the tab round trip.');
+    assert.deepEqual(ref.states.documentTab.rois[1].box, returnedBox, 'The returned document ROI must bind to the retained position.');
     assert.deepEqual(ref.policy, visualPolicy);
     assert.equal(ref.capture, 'foreground-owned-CopyFromScreen');
     return true;
@@ -263,12 +281,17 @@ async function observe(descriptor, identity, env, mode) {
     }
     return result;
 }
-function relativeBox(text, frame) {
+function unclippedNativeBox(text, frame) {
     const numbers = text.split(',').map(Number);
     assert.equal(numbers.length, 4);
     assert.ok(numbers.every(Number.isFinite));
-    const left = Math.max(0, Math.floor(numbers[0] - frame.left)), top = Math.max(0, Math.floor(numbers[1] - frame.top));
-    const right = Math.min(frame.width, Math.ceil(numbers[0] - frame.left + numbers[2])), bottom = Math.min(frame.height, Math.ceil(numbers[1] - frame.top + numbers[3]));
+    const left = Math.floor(numbers[0] - frame.left), top = Math.floor(numbers[1] - frame.top);
+    return [left, top, Math.ceil(numbers[0] - frame.left + numbers[2]) - left, Math.ceil(numbers[1] - frame.top + numbers[3]) - top];
+}
+function relativeBox(text, frame) {
+    const [x, y, width, height] = unclippedNativeBox(text, frame);
+    const left = Math.max(0, x), top = Math.max(0, y);
+    const right = Math.min(frame.width, x + width), bottom = Math.min(frame.height, y + height);
     const box = [left, top, right - left, bottom - top];
     assert.ok(validBox(box, frame));
     return box;
@@ -286,8 +309,29 @@ async function references(descriptor) {
     await mkdir(join(descriptor.root, 'references'));
     const env = environment(descriptor.root);
     const savedTemp = process.env.TEMP, savedTmp = process.env.TMP;
-    let app, visual, failure;
+    let app, visual, failure, lastRead, exitEvidence;
+    let referencePhase = 'launch-reference-session', quitRequested = false;
     const ref = { format, root: descriptor.root, candidateSha256, datasetFingerprint: descriptor.dataset.dataFingerprint, policy: visualPolicy, sources: descriptor.sources, controls: {}, states: {}, semanticReferencePhaseCompleted: false, capture: 'foreground-owned-CopyFromScreen', limitations: ['Reference semantics are confirmed with the existing native driver. Runtime verification uses frozen visible ROIs, not hidden DOM/AX row counting.'] };
+    async function closeReferenceApp() {
+        if (!app || quitRequested) return;
+        quitRequested = true;
+        let receipt;
+        try {
+            ({ driverReport: receipt } = await app.quit());
+        } finally {
+            receipt ??= app.driverReport;
+            const identity = app.identity;
+            const normalExit = receipt?.closedNormally === true && receipt.pid === identity.pid
+                && receipt.creationFileTime === identity.creationFileTime && receipt.windowHandle === identity.windowHandle
+                && receipt.executableSha256 === candidateSha256 && typeof receipt.dataDirectory === 'string'
+                && same(receipt.dataDirectory, descriptor.dataset.dataDir);
+            exitEvidence = { normalExit, pid: identity.pid, creationFileTime: identity.creationFileTime, windowHandle: identity.windowHandle,
+                driverStatus: receipt?.status, recoveryUsed: receipt?.recoveryExitUsedInvoke === true, closeError: receipt?.closeError,
+                ownedProcessStillRunning: receipt?.ownedProcessStillRunning, inputStillPending: receipt?.inputStillPending };
+        }
+        assert.equal(exitEvidence.normalExit, true, 'The reference session did not prove exact owned normal exit.');
+        app = null;
+    }
     try {
         process.env.TEMP = env.TEMP;
         process.env.TMP = env.TMP;
@@ -301,14 +345,14 @@ async function references(descriptor) {
             ref.firstSearchPreflight = hostedFirstSearchReceipt;
         }
         const observeRows = async (op, fields, deadline = performance.now() + visualPolicy.matchTimeoutMs) => {
-            if (!hostedReferenceFrame) return referenceObservationRows(await app.call(op, fields));
+            lastRead = { op, name: fields?.name, scope: fields?.scope };
+            if (!hostedReferenceFrame && op !== 'scopeNames') return referenceObservationRows(await app.call(op, fields));
             const remaining = Math.floor(deadline - performance.now());
             assert.ok(remaining > 0, 'The owned reference observation reached its original deadline.');
-            const scoped = fields?.scope ? { referenceAllowPendingScope: true } : {};
+            const scoped = op === 'state' && fields?.scope ? { referenceAllowPendingScope: true } : {};
             return referenceObservationRows(await app.call(op, { ...fields, ...scoped, referenceReadBudgetMs: remaining }, remaining));
         };
-        async function element(name, scope, type, selected) {
-            const deadline = performance.now() + visualPolicy.matchTimeoutMs;
+        async function element(name, scope, type, selected, deadline = performance.now() + visualPolicy.matchTimeoutMs) {
             do {
                 const rows = await observeRows('state', { name, ...(scope ? { scope } : {}) }, deadline);
                 const matches = rows.filter(row => !row.offscreen && (!type || row.type === type));
@@ -321,18 +365,60 @@ async function references(descriptor) {
         }
         async function point(key, name, scope, type = 'ControlType.Button') { const box = relativeBox((await element(name, scope, type)).bounds, ref.frame); ref.controls[key] = { x: box[0] + Math.floor(box[2] / 2), y: box[1] + Math.floor(box[3] / 2), sourceName: name, sourceScope: scope, box }; return box; }
         async function tableRois() { const box = relativeBox((await element('可横向滚动的 Skill 列表')).bounds, ref.frame); const counter = [box[0], Math.max(0, box[1] - 70), Math.min(440, box[2]), 56]; assert.ok(validBox(counter, ref.frame)); return [box, counter]; }
+        async function documentPosition(deadline, previousBox) {
+            let stable;
+            do {
+                const rows = (await observeRows('state', { name: documentParagraph }, deadline)).filter(row => row.type === 'ControlType.Text');
+                assert.ok(rows.length <= 1, 'The exact native document paragraph is ambiguous.');
+                const row = rows[0];
+                if (row?.enabled) {
+                    const box = unclippedNativeBox(row.bounds, ref.frame);
+                    if ((!previousBox || box[1] < previousBox[1]) && box[2] >= 2 && box[3] >= 2) {
+                        if (stable?.bounds === row.bounds && stable.offscreen === row.offscreen) return { box, offscreen: row.offscreen };
+                        stable = row;
+                    } else stable = undefined;
+                } else stable = undefined;
+                await sleep(visualPolicy.observationGapMs);
+            } while (performance.now() < deadline);
+            throw new Error(previousBox ? 'The exact paragraph did not settle higher after one guarded wheel event.' : 'The exact native document paragraph was not observed.');
+        }
+        function paragraphVisible(paragraph, descriptionBox) {
+            return !paragraph.offscreen && validBox(paragraph.box, ref.frame) && paragraph.box[1] >= descriptionBox[1] + descriptionBox[3];
+        }
         async function docRois() {
-            const selected = await element('说明', 'Skill 详情', 'ControlType.TabItem', true);
-            assert.equal(selected.selected, true, 'The native description tab must be selected.');
             const activeDocument = await element('Perf Skill 0000', '工作区标签', 'ControlType.TabItem', true);
             assert.equal(activeDocument.selected, true, 'The exact native document workspace tab must be selected.');
-            return [relativeBox(activeDocument.bounds, ref.frame),
-                relativeBox((await element(documentParagraph, undefined, 'ControlType.Text')).bounds, ref.frame)];
+            const selected = await element('说明', 'Skill 详情', 'ControlType.TabItem', true);
+            assert.equal(selected.selected, true, 'The native description tab must be selected.');
+            const paragraph = await documentPosition(performance.now() + visualPolicy.matchTimeoutMs);
+            assert.ok(paragraphVisible(paragraph, relativeBox(selected.bounds, ref.frame)), 'The exact native document paragraph is not fully visible below the selected description tab.');
+            return [relativeBox(activeDocument.bounds, ref.frame), paragraph.box];
+        }
+        async function prepareDocumentReading() {
+            const deadline = performance.now() + visualPolicy.matchTimeoutMs;
+            await element('Perf Skill 0000', '工作区标签', 'ControlType.TabItem', true, deadline);
+            let selected = await element('说明', 'Skill 详情', 'ControlType.TabItem', true, deadline);
+            let descriptionBox = unclippedNativeBox(selected.bounds, ref.frame);
+            assert.ok(validBox(descriptionBox, ref.frame), 'The selected description tab must fit the owned frame before reading.');
+            const point = boxCenter(descriptionBox);
+            let paragraph = await documentPosition(deadline);
+            ref.documentReading = { point, descriptionBox, initialBox: paragraph.box, steps: [] };
+            while (!paragraphVisible(paragraph, descriptionBox)) {
+                assert.ok(paragraph.box[1] > descriptionBox[1] + descriptionBox[3], 'The paragraph passed the visible reading area. No corrective input was sent.');
+                assert.ok(ref.documentReading.steps.length < maximumDocumentWheelSteps && performance.now() < deadline, 'The unchanged observation budget or wheel safety limit was reached.');
+                const input = await visual.call('scrollDocument', point);
+                assert.equal(input.wheelDelta, documentWheelDelta);
+                await sleep(visualPolicy.referenceSettleMs);
+                paragraph = await documentPosition(deadline, paragraph.box);
+                ref.documentReading.steps.push({ wheelDelta: input.wheelDelta, paragraphBox: paragraph.box });
+                selected = await element('说明', 'Skill 详情', 'ControlType.TabItem', true, deadline);
+                descriptionBox = relativeBox(selected.bounds, ref.frame);
+            }
         }
         async function semanticList(index) {
             const deadline = performance.now() + visualPolicy.matchTimeoutMs;
             do {
-                const names = await observeRows('names', undefined, deadline);
+                const names = await observeRows('scopeNames', { scope: '可横向滚动的 Skill 列表' }, deadline);
                 const titles = names.filter(row => row.type === 'ControlType.Button' && /^Perf Skill \d{4}$/.test(row.name));
                 const edit = await observeRows('state', { name: '搜索 Skill' }, deadline);
                 if (edit.some(row => row.enabled && !row.offscreen) && titles.length === (index === null ? 20 : 1) &&
@@ -385,6 +471,7 @@ async function references(descriptor) {
             }
             ref.states[name] = { semanticConfirmedByNativeDriver: true, semantic, rois };
         }
+        referencePhase = 'initial-library';
         const initialSearchBounds = (await element('搜索 Skill', undefined, 'ControlType.Edit')).bounds;
         await point('search', '搜索 Skill', undefined, 'ControlType.Edit');
         await point('github', 'GitHub', '来源筛选');
@@ -392,6 +479,7 @@ async function references(descriptor) {
         await semanticList(null);
         await capture('all', await tableRois(), 'Native initial list readiness and fixed 1000-Skill fixture.');
         for (let index = 0; index < 66; index++) {
+            referencePhase = 'search-' + String(index).padStart(4, '0');
             await nativeSearch(index);
             const title = `Perf Skill ${String(index).padStart(4, '0')}`;
             const result = await element(title, '可横向滚动的 Skill 列表', 'ControlType.Button');
@@ -409,37 +497,54 @@ async function references(descriptor) {
             }
             const titleBox = relativeBox(result.bounds, ref.frame);
             await capture(`search-${String(index).padStart(4, '0')}`, [titleBox, ...await tableRois()], `Native one-row result and exact title ${title} confirmed.`);
+            referencePhase = 'clear-' + referencePhase;
             await clearSearch();
         }
+        referencePhase = 'github-empty';
         await nativeClick('github');
         await scrollLibrary(false);
         await point('allFiltered', '全部', '来源筛选');
         await capture('github', [relativeBox((await element('当前筛选无结果')).bounds, ref.frame)], 'Native GitHub filter confirmed empty result.');
+        referencePhase = 'restore-all-after-github';
         await nativeClick('allFiltered');
         await scrollLibrary(true);
         await semanticList(null);
+        referencePhase = 'search-0000-before-open';
         await nativeSearch(0);
         assert.deepEqual(relativeBox((await element('Perf Skill 0000', '可横向滚动的 Skill 列表', 'ControlType.Button')).bounds, ref.frame), ref.controls.openDocument.box);
+        referencePhase = 'verify-visible-open-document';
         await nativeClick('openDocument');
-        await docRois();
-        const names = await observeRows('names'), homeNames = [...new Set(names.filter(row => row.type === 'ControlType.TabItem' && (row.name === '工作台' || row.name.startsWith('工作台 '))).map(row => row.name))];
+        await prepareDocumentReading();
+        referencePhase = 'locate-workbench-tab';
+        const names = await observeRows('scopeNames', { scope: '工作区标签' });
+        const homeNames = names.filter(row => row.type === 'ControlType.TabItem' && (row.name === '工作台' || row.name.startsWith('工作台 '))).map(row => row.name);
         assert.equal(homeNames.length, 1);
         await point('homeTab', homeNames[0], '工作区标签', 'ControlType.TabItem');
         const documentBox = await point('documentTab', 'Perf Skill 0000', '工作区标签', 'ControlType.TabItem');
         await point('closeDocument', '关闭 Perf Skill 0000');
+        referencePhase = 'capture-document';
         await capture('document', await docRois(), 'Native document title, active description tab and fixture paragraph confirmed.');
+        referencePhase = 'capture-home-with-document';
         await nativeClick('homeTab');
         await semanticList(0);
         assert.equal((await element(homeNames[0], '工作区标签', 'ControlType.TabItem', true)).selected, true);
         await capture('homeDocument', await tableRois(), 'Native home tab returned to search 0000.');
+        referencePhase = 'capture-reactivated-document-tab';
         await nativeClick('documentTab');
         assert.equal((await element('Perf Skill 0000', '工作区标签', 'ControlType.TabItem', true)).selected, true);
-        await capture('documentTab', await docRois(), 'Native detail tab became active.');
+        const returned = await docRois();
+        const frozenParagraph = ref.states.document.rois[1];
+        ref.documentReading.returnedBox = returned[1];
+        assert.deepEqual(returned[1], frozenParagraph.box, 'The exact paragraph moved when returning to the already-open detail.');
+        assert.equal((await visual.call('match', frozenParagraph)).matched, true, 'The original paragraph pixels were not retained when returning to the detail.');
+        await capture('documentTab', returned, 'Native detail tab became active with the same document reading position and pixels.');
+        referencePhase = 'capture-closed-document';
         await nativeClick('closeDocument');
         await semanticList(0);
         assert.equal((await observeRows('state', { name: '关闭 Perf Skill 0000' })).length, 0);
         await capture('closed', [...await tableRois(), documentBox], 'Native detail tab closure and home search confirmed.');
         await clearSearch();
+        referencePhase = 'create-and-verify-review-sheets';
         ref.reviewSheets = [];
         const reviewCrops = Object.entries(ref.states).flatMap(([name, state]) => state.rois.map(roi => ({ name: `${name} ${roi.role}`, path: roi.path })));
         for (let index = 0; index < reviewCrops.length; index += 24) {
@@ -450,8 +555,7 @@ async function references(descriptor) {
         }
         await visual.finish();
         visual = null;
-        await app.quit();
-        app = null;
+        await closeReferenceApp();
         ref.semanticReferencePhaseCompleted = true;
         validateReferences(ref, descriptor);
         await writeFile(join(descriptor.root, 'visual-references.json'), json(ref), { flag: 'wx' });
@@ -466,7 +570,7 @@ async function references(descriptor) {
         if (visual)
             await visual.finish().catch(error => cleanupErrors.push(error.message));
         if (app)
-            await app.quit().catch(error => cleanupErrors.push(error.message));
+            await closeReferenceApp().catch(error => cleanupErrors.push(error.message));
         if (savedTemp === undefined)
             delete process.env.TEMP;
         else
@@ -476,7 +580,7 @@ async function references(descriptor) {
         else
             process.env.TMP = savedTmp;
         if (failure)
-            await writeFile(join(descriptor.root, 'reference-failure.json'), json({ status: 'failed-references', error: failure.message, completedStates: Object.keys(ref.states), cleanupErrors }), { flag: 'wx' });
+            await writeFile(join(descriptor.root, 'reference-failure.json'), json({ status: 'failed-references', error: failure.message, referencePhase, lastRead, documentReading: ref.documentReading, completedStates: Object.keys(ref.states), exitEvidence, cleanupErrors }), { flag: 'wx' });
     }
 }
 async function run(descriptor, pilot) {
@@ -539,10 +643,11 @@ async function run(descriptor, pilot) {
         await visual.call('prepareForeground');
         report.identity = visual.identity;
         baseline = protectedData(descriptor.dataset);
-        async function waitState(name) { const state = ref.states[name], deadline = performance.now() + visualPolicy.matchTimeoutMs; let consecutive = 0; do {
+        async function waitState(name, role) { const state = ref.states[name], deadline = performance.now() + visualPolicy.matchTimeoutMs; let consecutive = 0; do {
             const matches = [];
             for (const roi of state.rois)
-                matches.push(await visual.call('match', roi));
+                if (!role || roi.role === role) matches.push(await visual.call('match', roi));
+            assert.ok(matches.length > 0, 'The pre-scroll readiness ROI must be present in the verified reference.');
             if (matches.every(value => value.matched)) {
                 if (++consecutive === visualPolicy.stableObservations)
                     return;
@@ -569,6 +674,13 @@ async function run(descriptor, pilot) {
             }
             else if (action === 'document') {
                 await click('openDocument');
+                await waitState('document', 'active-document-tab');
+                for (const [index, step] of ref.documentReading.steps.entries()) {
+                    const result = await visual.call('scrollDocument', ref.documentReading.point);
+                    assert.equal(result.wheelDelta, step.wheelDelta);
+                    report.actions.push({ key: 'scrollDocument', step: index + 1, result });
+                    await sleep(visualPolicy.referenceSettleMs);
+                }
                 await waitState('document');
             }
             else if (action === 'tab') {

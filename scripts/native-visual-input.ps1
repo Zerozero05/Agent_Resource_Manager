@@ -181,12 +181,19 @@ public sealed class NativeVisualInput : IDisposable {
     return new{clicked=true,x=x,y=y,lastInputTick=inputTick};
   }
   public object ScrollLibrary(int x,int y,bool up) {
-    uint delta=up?1200u:unchecked((uint)-1200);
+    SendWheel(x,y,up?1200:-1200);
+    return new{scrolledUp=up,x=x,y=y,lastInputTick=inputTick};
+  }
+  void SendWheel(int x,int y,int delta) {
     Send(new[]{
       new INPUT{type=0,value=new UNION{mouse=PointMovement(x,y)}},
-      new INPUT{type=0,value=new UNION{mouse=new MOUSE{flags=0x0800u,data=delta}}}
+      new INPUT{type=0,value=new UNION{mouse=new MOUSE{flags=0x0800u,data=unchecked((uint)delta)}}}
     });
-    return new{scrolledUp=up,x=x,y=y,lastInputTick=inputTick};
+  }
+  public object ScrollDocument(int x,int y) {
+    const int delta=-120;
+    SendWheel(x,y,delta);
+    return new{wheelDelta=delta,x=x,y=y,lastInputTick=inputTick};
   }
   public object Text(string value) {
     Guard();
@@ -333,6 +340,7 @@ try {
           if($request.up -isnot [bool]) {throw 'A frozen library scroll direction is required'}
           $session.ScrollLibrary([int]$request.x,[int]$request.y,[bool]$request.up)
         }
+        'scrollDocument' {$session.ScrollDocument([int]$request.x,[int]$request.y)}
         'text' {$session.Text([string]$request.value)}
         'save' {$session.Save([string]$request.path,[int[]]$request.box)}
         'match' {$session.Match([string]$request.path,[int[]]$request.box,[string]$request.sha256)}

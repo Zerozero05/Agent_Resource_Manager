@@ -1,17 +1,25 @@
-name: Prepare hosted visual references for 2314ea8
+name: Prepare hosted visual references for 3536ca0
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44862742843'
-  CANDIDATE_SOURCE: 2314ea88080a401be1acfa150d029f1a928b99aa
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_2314ea88080a401be1acfa150d029f1a928b99aa
-  CANDIDATE_ARTIFACT_ID: '14691310680'
-  CANDIDATE_SHA256: 'b95ad24619e1d00e8d100777739afd70323fb827e272b31ef549124bd0063e97'
+  CANDIDATE_RUN_ID: '44866595695'
+  CANDIDATE_SOURCE: 3536ca0e5cf7c897b860b5ce32d8b415904b9e45
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_3536ca0e5cf7c897b860b5ce32d8b415904b9e45
+  CANDIDATE_ARTIFACT_ID: '14692802883'
+  CANDIDATE_SHA256: aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7
+  CANDIDATE_ARCHIVE_SHA256: 6b8afaf8ca811c866b1ecb46ae778bf1fc1c8c715e176b32101d5a3f0f2ab2a6
+  FIRST_SEARCH_RUN_ID: '44868600019'
+  FIRST_SEARCH_ARTIFACT_ID: '14692619560'
+  FIRST_SEARCH_SHA256: dec36d0d17abb799a05a39370b67ac5ae6f82300f20af566cfbf51d9c839707c
+  FIRST_SEARCH_ARCHIVE_SHA256: 5614ff93c44b8aba76b45e2ad6ebcb70caa27a7cc28465bb01e1054d46f4fc9e
+  FIRST_SEARCH_FIXTURE_SHA256: bd3bb8c680b1b7578d376583ab4b416c88ee47b66ae66b813bee455ca31ba3a1
+  FIRST_SEARCH_EDIT_BOUNDS: '411,294,501,52'
+  FIRST_SEARCH_RESULT_BOUNDS: '433,671,201,31'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-2314ea8-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-3536ca0-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
@@ -28,8 +36,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+          if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:CANDIDATE_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'Pin the independently verified candidate artifact ID and executable SHA256 before reference generation.'
+          }
+          if ($env:FIRST_SEARCH_RUN_ID -cnotmatch '^[0-9]+$' -or $env:FIRST_SEARCH_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or
+              $env:FIRST_SEARCH_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:FIRST_SEARCH_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:FIRST_SEARCH_FIXTURE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:FIRST_SEARCH_EDIT_BOUNDS -cnotmatch '^\d+(,\d+){3}$' -or $env:FIRST_SEARCH_RESULT_BOUNDS -cnotmatch '^\d+(,\d+){3}$') {
+            throw 'Pin the independently verified, same-candidate first-search receipt and geometry before reference generation.'
           }
           if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
               -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
@@ -41,7 +56,16 @@ jobs:
               $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
           $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
           $match = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT -and -not $_.expired })
-          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID) { throw 'The exact Windows candidate artifact is missing.' }
+          if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or $match[0].id -ne $env:CANDIDATE_ARTIFACT_ID -or
+              $match[0].digest -cne "sha256:$env:CANDIDATE_ARCHIVE_SHA256") { throw 'The exact Windows candidate artifact is missing.' }
+          $shortRun = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:FIRST_SEARCH_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $shortRun.run_attempt -ne 1 -or $shortRun.status -cne 'completed' -or
+              $shortRun.conclusion -cne 'success') { throw 'The pinned same-candidate compact verification did not complete successfully.' }
+          $shortArtifact = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:FIRST_SEARCH_ARTIFACT_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $shortArtifact.expired -or $shortArtifact.workflow_run.id -ne $env:FIRST_SEARCH_RUN_ID -or
+              $shortArtifact.digest -cne "sha256:$env:FIRST_SEARCH_ARCHIVE_SHA256") {
+            throw 'The pinned compact receipt does not match the independently verified artifact.'
+          }
           ./scripts/verify-native-uia.ps1 -CompileOnly
           & pwsh.exe -NoProfile -NonInteractive -File './scripts/native-visual-input.ps1' -CompileOnly
           if ($LASTEXITCODE -ne 0) { throw 'Visual helper did not pass its compile-only checks.' }
@@ -131,15 +155,15 @@ jobs:
             }
             if ($referenceFrame.left -ne 60 -or $referenceFrame.top -ne 60 -or
                 $referenceFrame.width -ne 960 -or $referenceFrame.height -ne 650 -or $referenceFrame.dpi -ne 96) {
-              throw 'The hosted frame does not match the verified 2314ea8 first-search geometry. No manager was launched.'
+              throw 'The hosted frame does not match the verified compact first-search geometry. No manager was launched.'
             }
             $firstSearch = [ordered]@{
-              runId = '44864093902'
-              artifactId = '14690948651'
-              sha256 = 'd461a7ce3a1bcb3ed38c4846e99fda4831a2599104712a3c3f77e9ac9bc45ccf'
-              datasetFingerprint = 'bd3bb8c680b1b7578d376583ab4b416c88ee47b66ae66b813bee455ca31ba3a1'
-              filteredSearchBounds = '411,294,501,52'
-              resultBounds = '433,671,201,31'
+              runId = $env:FIRST_SEARCH_RUN_ID
+              artifactId = $env:FIRST_SEARCH_ARTIFACT_ID
+              sha256 = $env:FIRST_SEARCH_SHA256
+              datasetFingerprint = $env:FIRST_SEARCH_FIXTURE_SHA256
+              filteredSearchBounds = $env:FIRST_SEARCH_EDIT_BOUNDS
+              resultBounds = $env:FIRST_SEARCH_RESULT_BOUNDS
             }
             $stage = 'bind-verified-inputs'
             if (Test-Path -LiteralPath $approved) { throw 'Expected a fresh synthetic visual reference root.' }
@@ -225,6 +249,52 @@ jobs:
             $output = Join-Path $env:RUNNER_TEMP 'arm-visual-reference-review'
             New-Item -ItemType Directory -Path $output | Out-Null
             foreach ($path in @($descriptorPath, $referencePath, $driverPath) + $sheetPaths) { Copy-Item -LiteralPath $path -Destination $output }
+            $stage = 'package-verified-individual-rois'
+            $referenceSha256 = (Get-FileHash -LiteralPath $referencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $roiSource = Join-Path $referenceRoot 'references'
+            $sourceDirectory = Get-Item -LiteralPath $roiSource
+            if ($sourceDirectory -isnot [IO.DirectoryInfo] -or
+                ($sourceDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw 'The frozen ROI source is not an ordinary owned directory.'
+            }
+            $roiTransport = Join-Path $env:RUNNER_TEMP 'arm-visual-reference-rois'
+            $roiDestination = Join-Path $roiTransport 'references'
+            New-Item -ItemType Directory -Path $roiTransport | Out-Null
+            New-Item -ItemType Directory -Path $roiDestination | Out-Null
+            $roiFiles = @(foreach ($state in $refs.states.PSObject.Properties) {
+              if ($state.Name -cnotmatch '^(all|github|document|homeDocument|documentTab|closed|search-[0-9]{4})$') {
+                throw 'An unexpected reference state cannot be packaged.'
+              }
+              for ($index = 0; $index -lt $state.Value.rois.Count; $index++) {
+                $roi = $state.Value.rois[$index]
+                $fileName = "$($state.Name)-$index.png"
+                $sourcePath = Join-Path $roiSource $fileName
+                if ($roi.path -ine $sourcePath) { throw 'The frozen ROI path is not its canonical owned path.' }
+                $item = Get-Item -LiteralPath $sourcePath
+                if ($item -isnot [IO.FileInfo] -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $roi.sha256) {
+                  throw 'The frozen ROI failed its ordinary-file or original digest check.'
+                }
+                $destinationPath = Join-Path $roiDestination $fileName
+                Copy-Item -LiteralPath $sourcePath -Destination $destinationPath
+                if ((Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $roi.sha256) {
+                  throw 'The transported ROI does not match its frozen original.'
+                }
+                [ordered]@{path="references/$fileName"; state=$state.Name; index=$index; role=$roi.role; box=$roi.box; sha256=$roi.sha256}
+              }
+            })
+            if ($roiFiles.Count -ne $roiCount) { throw 'The transported ROI count does not match the full frozen set.' }
+            $roiManifest = Join-Path $roiTransport 'roi-files.json'
+            [ordered]@{
+              format = 'agent-resource-manager-native-visual-roi-transport-v1'
+              syntheticOnly = $true
+              candidateSource = $env:CANDIDATE_SOURCE
+              candidateSha256 = $env:CANDIDATE_SHA256
+              fixtureSha256 = $refs.datasetFingerprint
+              referenceSha256 = $referenceSha256
+              roiCount = $roiCount
+              files = $roiFiles
+            } | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $roiManifest -Encoding utf8NoBOM
             $receipt = [ordered]@{
               status = 'references-generated-review-required'
               candidateSource = $env:CANDIDATE_SOURCE
@@ -232,11 +302,20 @@ jobs:
               candidateRunId = $env:CANDIDATE_RUN_ID
               candidateArtifactId = $env:CANDIDATE_ARTIFACT_ID
               buildInfoSha256 = $infoDigest
-              referenceSha256 = (Get-FileHash -LiteralPath $referencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+              referenceSha256 = $referenceSha256
+              roiTransportManifestSha256 = (Get-FileHash -LiteralPath $roiManifest -Algorithm SHA256).Hash.ToLowerInvariant()
               descriptorSha256 = (Get-FileHash -LiteralPath $descriptorPath -Algorithm SHA256).Hash.ToLowerInvariant()
               driverSha256 = (Get-FileHash -LiteralPath $driverPath -Algorithm SHA256).Hash.ToLowerInvariant()
               desktop = $desktop
               referenceFrame = $referenceFrame
+              hostedFirstSearchReceipt = $firstSearch
+              referenceWorkflow = [ordered]@{
+                repository=$env:GITHUB_REPOSITORY; headSha=$env:GITHUB_SHA; runId=$env:GITHUB_RUN_ID; attempt=[int]$env:GITHUB_RUN_ATTEMPT
+              }
+              hostEnvironment = [ordered]@{
+                imageOs=$env:ImageOS; imageVersion=$env:ImageVersion
+                windowsVersion=[Environment]::OSVersion.Version.ToString(); nodeVersion=(& node --version)
+              }
               referenceCount = 72
               roiCount = $roiCount
               sheets = $sheets.Count
@@ -267,6 +346,14 @@ jobs:
         with:
           name: Agent_Resource_Manager_visual_references_${{ github.run_id }}_${{ github.run_attempt }}
           path: ${{ runner.temp }}/arm-visual-reference-review/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload the individually verified synthetic reference crops and crop manifest
+        if: ${{ steps.generate.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Agent_Resource_Manager_visual_reference_rois_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-visual-reference-rois/
           if-no-files-found: error
           retention-days: 14
       - name: Upload only the synthetic preflight failure receipt

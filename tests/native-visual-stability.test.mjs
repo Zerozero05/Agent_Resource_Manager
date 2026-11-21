@@ -154,6 +154,9 @@ test('visual requests use one JSON line for the PowerShell ReadLine protocol', a
 function reference() {
     const boxes = { 'result-table': [100, 140, 600, 400], 'result-count': [100, 70, 440, 56], 'result-title': [110, 170, 160, 30], 'closed-tab-slot': [160, 15, 100, 30], 'active-document-tab': [160, 15, 100, 30] };
     return { format: 'agent-resource-manager-native-visual-stability-v1', root, datasetFingerprint: 'fixed', candidateSha256: '9436a75a4cf40316f80702e43c7b4da35067ec9e16a0ce592846599433e9b1aa', semanticReferencePhaseCompleted: true, capture: 'foreground-owned-CopyFromScreen', frame: { left: 60, top: 60, width: 1296, height: 889, dpi: 96 }, policy: visualPolicy,
+        documentReading: { point: { x: 125, y: 85 }, descriptionBox: [100, 70, 50, 30], initialBox: [100, 940, 50, 30],
+            steps: [{ wheelDelta: -120, paragraphBox: [100, 820, 50, 30] }, { wheelDelta: -120, paragraphBox: [100, 140, 50, 30] }],
+            returnedBox: [100, 140, 50, 30] },
         controls: Object.fromEntries(['search', 'clear', 'github', 'allFiltered', 'openDocument', 'homeTab', 'documentTab', 'closeDocument', 'check'].map(name => [name, { x: 30, y: 30 }])),
         states: Object.fromEntries(requiredStates.map(name => [name, { semanticConfirmedByNativeDriver: true, rois: requiredRegions(name).map(region => ({ ...region, box: [...(boxes[region.role] || [100, 140, 50, 30])], path: root + '/references/' + name + '-' + region.role + '.png', sha256: 'a'.repeat(64) })) }])) };
 }
@@ -226,7 +229,24 @@ test('document references bind the exact selected workspace title and the loaded
     assert.match(document, /element\('Perf Skill 0000', '工作区标签', 'ControlType.TabItem', true\)/);
     assert.match(document, /activeDocument\.selected, true/);
     assert.match(document, /relativeBox\(activeDocument\.bounds, ref\.frame\)/);
-    assert.match(document, /element\(documentParagraph, undefined, 'ControlType.Text'\)/);
+    assert.match(document, /documentPosition\(performance\.now\(\) \+ visualPolicy\.matchTimeoutMs\)/);
+    assert.match(document, /paragraphVisible\(paragraph,/);
+});
+test('the owned document wheel path and restored reading position must bind to both paragraph crops', () => {
+    assert.equal(validateReferences(reference(), descriptor), true);
+    for (const change of [
+        value => { delete value.documentReading; },
+        value => { value.documentReading.point.y++; },
+        value => { value.documentReading.steps[0].wheelDelta = 120; },
+        value => { value.documentReading.steps[0].paragraphBox[1] = 950; },
+        value => { value.documentReading.steps.pop(); },
+        value => { value.documentReading.returnedBox[1]++; },
+        value => { value.states.documentTab.rois[1].box[1]++; },
+    ]) {
+        const value = reference();
+        change(value);
+        assert.throws(() => validateReferences(value, descriptor));
+    }
 });
 test('image matching is exact and rejects modified policies, missing review semantics and escaped ROIs', () => {
     for (const change of [r => { r.policy = { ...visualPolicy, match: 'tolerant' }; }, r => { r.semanticReferencePhaseCompleted = false; }, r => { r.states.all.semanticConfirmedByNativeDriver = false; }, r => { r.states.all.rois[0].box = [0, 0, 2000, 100]; }, r => { r.states.all.rois[0].path = 'D:/outside.png'; }, r => { r.states.all.rois[0].sha256 = 'bad'; }, r => { r.controls.search.x = -1; }, r => { r.datasetFingerprint = 'other'; }]) {
