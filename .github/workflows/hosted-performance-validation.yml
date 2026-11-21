@@ -1,17 +1,17 @@
-name: Verify hosted Windows original stability for 65b14b9
+name: Verify hosted Windows original stability for afdcc14
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44394986153'
-  CANDIDATE_SOURCE: 65b14b96b7243e0339b3eb5f2fd4f92ae1898df6
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_65b14b96b7243e0339b3eb5f2fd4f92ae1898df6
-  CANDIDATE_ARTIFACT_ID: '14470108635'
-  CANDIDATE_SHA256: '090dc7a9e4298b0153baee53c2f2f8329a2dc1a95708b4a9cfbf840e2d46ab91'
+  CANDIDATE_RUN_ID: '44853682116'
+  CANDIDATE_SOURCE: afdcc146bce08db6ef3082be4b1fbcd59beb5d8b
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_afdcc146bce08db6ef3082be4b1fbcd59beb5d8b
+  CANDIDATE_ARTIFACT_ID: '14687451764'
+  CANDIDATE_SHA256: '2a4b27faf9b2aed958760dc30d5f4ad980b8f62a9e3be6e38d321382f8d89db3'
 jobs:
   measure:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-stability-65b14b9' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-stability-afdcc14-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 55
     defaults:
