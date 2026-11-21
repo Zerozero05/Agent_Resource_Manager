@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $false
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
     throw 'This can run only in a fresh interactive GitHub-hosted Windows VM.'
@@ -15,7 +16,8 @@ $policy = [ordered]@{ trials=3; neutralSettleMs=250; beforeMs=95; afterMs=430; m
     minimumEndpointSamples=4; minimumRgbDistance=12; minimumIntermediateColors=2 }
 $report = [ordered]@{ candidateSha256=$ExpectedSha256; syntheticOnly=$true; status='incomplete'; phase='preflight'
     policy=$policy; arms=@(); attemptedSystemChange=$false; systemRestored=$false; closedNormally=$false
-    capture='One native BitBlt into a 32-bit DIB row per sample, with GdiFlush before reading the two pixels.'
+    capture='One DXGI duplication over each trial. No-update and pointer-only polls retain the last timestamped desktop row.'
+    runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion
     scope='Native foreground hover pixels on one inactive sidebar control. No DOM or CSS readback and no display-DPI or whole-app animation claim.' }
 function Write-Report { $report | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $output -Encoding utf8NoBOM }
 Write-Report
@@ -35,163 +37,33 @@ try {
         throw 'The exact candidate executable is required.'
     }
 
+    $probe = Join-Path $env:RUNNER_TEMP 'arm-dxgi/bin/verify-hosted-dxgi-row.exe'
+    $report.probeSourceSha256 = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'verify-hosted-dxgi-row.cpp')).Hash.ToLowerInvariant()
+    $report.probeExecutableSha256 = (Get-FileHash -LiteralPath $probe).Hash.ToLowerInvariant()
+
     # Compile the existing window/pipe guard and normal-quit path without launching it.
     & (Join-Path $PSScriptRoot 'verify-native-uia.ps1') -CompileOnly | Out-Null
     Add-Type -TypeDefinition @'
 using System;
-using System.Collections.Generic;
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Threading;
 
-public sealed class HostedMotionPixels : IDisposable {
-    [StructLayout(LayoutKind.Sequential)] struct Point { public int X, Y; public Point(int x,int y){X=x;Y=y;} }
-    [StructLayout(LayoutKind.Sequential)] struct LastInput { public uint Size, Time; }
-    [StructLayout(LayoutKind.Sequential)] struct Mouse { public int X,Y; public uint Data,Flags,Time; public UIntPtr Extra; }
-    [StructLayout(LayoutKind.Sequential)] struct Input { public uint Type; public Mouse Mouse; }
-    [StructLayout(LayoutKind.Sequential)] struct BitmapInfoHeader {
-        public uint Size;
-        public int Width, Height;
-        public ushort Planes, BitsPerPixel;
-        public uint Compression, SizeImage;
-        public int XPelsPerMeter, YPelsPerMeter;
-        public uint ColorsUsed, ColorsImportant;
-    }
-    [StructLayout(LayoutKind.Sequential)] struct BitmapInfo { public BitmapInfoHeader Header; public uint Color; }
-
+public static class HostedMotionState {
     [DllImport("user32.dll", EntryPoint="SystemParametersInfoW", SetLastError=true)]
     static extern bool GetSetting(uint action, uint arg, out int value, uint flags);
     [DllImport("user32.dll", EntryPoint="SystemParametersInfoW", SetLastError=true)]
     static extern bool SetSetting(uint action, uint arg, IntPtr value, uint flags);
-    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
-    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
-    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
-    [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
-    [DllImport("user32.dll")] static extern bool GetCursorPos(out Point point);
-    [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LastInput input);
-    [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint count, Input[] input, int structSize);
-    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr window);
-    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr window, IntPtr dc);
-    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
-    [DllImport("gdi32.dll", SetLastError=true)] static extern IntPtr CreateDIBSection(IntPtr dc, ref BitmapInfo info, uint usage,
-        out IntPtr pixels, IntPtr section, uint offset);
-    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr value);
-    [DllImport("gdi32.dll", SetLastError=true)] static extern bool BitBlt(IntPtr dest, int dx, int dy, int width, int height,
-        IntPtr src, int sx, int sy, uint rasterOp);
-    [DllImport("gdi32.dll")] static extern bool GdiFlush();
-    [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
-    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr value);
 
-    readonly Process owner;
-    readonly IntPtr window;
-    readonly long creation;
-    readonly Point first, second;
-    readonly int rowWidth, secondOffset;
-    IntPtr screen, memory, bitmap, previousBitmap, pixels;
-    uint inputTick;
-    public HostedMotionPixels(int pid, long creationFileTime, long handle, int firstX, int firstY, int secondX, int secondY) {
-        if(firstY!=secondY||firstX>=secondX)throw new ArgumentException("The two visual points must share one ordered pixel row.");
-        first=new Point(firstX,firstY);
-        second=new Point(secondX,secondY);
-        rowWidth=checked(secondX-firstX+1);
-        secondOffset=checked((rowWidth-1)*4);
-        owner=Process.GetProcessById(pid);
-        window=new IntPtr(handle);
-        creation=creationFileTime;
-        try {
-            inputTick=InputTick();
-            Guard();
-            VerifyPoint(first); VerifyPoint(second);
-            screen=GetDC(IntPtr.Zero);
-            if(screen==IntPtr.Zero)throw new InvalidOperationException("The owned desktop pixels are unavailable.");
-            memory=CreateCompatibleDC(screen);
-            if(memory==IntPtr.Zero)throw new InvalidOperationException("Cannot allocate the one-row capture context.");
-            var info=new BitmapInfo { Header=new BitmapInfoHeader {
-                Size=(uint)Marshal.SizeOf<BitmapInfoHeader>(), Width=rowWidth, Height=-1, Planes=1, BitsPerPixel=32 }};
-            bitmap=CreateDIBSection(memory,ref info,0,out pixels,IntPtr.Zero,0);
-            if(bitmap==IntPtr.Zero||pixels==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
-            IntPtr selected=SelectObject(memory,bitmap);
-            if(selected==IntPtr.Zero||selected==new IntPtr(-1))throw new InvalidOperationException("Cannot select the one-row capture bitmap.");
-            previousBitmap=selected;
-        } catch { Dispose(); throw; }
-    }
     public static bool AnimationsEnabled() {
-        if(!GetSetting(0x1042,0,out int value,0))throw new Win32Exception(Marshal.GetLastWin32Error());
-        return value!=0;
+        if (!GetSetting(0x1042, 0, out int value, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return value != 0;
     }
+
     public static void SetAnimations(bool value) {
-        // SPIF_SENDCHANGE only. Do not persist a change in the user profile.
-        if(!SetSetting(0x1043,0,new IntPtr(value?1:0),2))throw new Win32Exception(Marshal.GetLastWin32Error());
-    }
-    static uint InputTick() {
-        var state=new LastInput {Size=(uint)Marshal.SizeOf<LastInput>()};
-        if(!GetLastInputInfo(ref state))throw new InvalidOperationException("Cannot check desktop input ownership.");
-        return state.Time;
-    }
-    void Guard() {
-        if(owner.HasExited||owner.StartTime.ToUniversalTime().ToFileTimeUtc()!=creation||
-           GetWindowThreadProcessId(window,out uint pid)==0||pid!=owner.Id||GetForegroundWindow()!=window||
-           InputTick()!=inputTick)throw new InvalidOperationException("Owned foreground or expected input changed; no further visual input is permitted.");
-    }
-    void VerifyPoint(Point p) {
-        if(GetAncestor(WindowFromPoint(p),2)!=window)throw new InvalidOperationException("The visual point is not on the exact owned window.");
-    }
-    void Move(Point p) {
-        Guard(); VerifyPoint(p);
-        int x=GetSystemMetrics(76), y=GetSystemMetrics(77), w=GetSystemMetrics(78),h=GetSystemMetrics(79);
-        if(w<2||h<2||p.X<x||p.X>=x+w||p.Y<y||p.Y>=y+h)throw new InvalidOperationException("Owned pointer point lies outside the virtual screen.");
-        var move=new Input { Type=0, Mouse=new Mouse {
-            X=(int)Math.Round((p.X-x)*65535.0/(w-1)), Y=(int)Math.Round((p.Y-y)*65535.0/(h-1)), Flags=0xc001 }};
-        if(SendInput(1,new[]{move},Marshal.SizeOf<Input>())!=1)throw new Win32Exception(Marshal.GetLastWin32Error());
-        inputTick=InputTick();
-        if(!GetCursorPos(out Point actual)||Math.Abs(actual.X-p.X)>2||Math.Abs(actual.Y-p.Y)>2)
-            throw new InvalidOperationException("The isolated pointer move did not arrive at its exact point.");
-    }
-    public sealed class Sample {
-        public double BeginMs {get;set;}
-        public double EndMs {get;set;}
-        public uint First {get;set;}
-        public uint Second {get;set;}
-    }
-    uint ReadColor(int offset) {
-        // Keep the same COLORREF byte order as GetPixel in the saved trace.
-        uint rgb=(uint)Marshal.ReadInt32(pixels,offset);
-        return ((rgb>>16)&0xff)|(rgb&0xff00)|((rgb&0xff)<<16);
-    }
-    public Sample[] Trace(int outX,int outY,int hoverX,int hoverY,int settleMs,int beforeMs,int afterMs) {
-        var target=new Point(hoverX,hoverY);
-        Move(new Point(outX,outY)); Thread.Sleep(settleMs);
-        var rows=new List<Sample>(); var timer=Stopwatch.StartNew();
-        void Read() {
-            double begin=timer.Elapsed.TotalMilliseconds;
-            Guard(); VerifyPoint(first); VerifyPoint(second);
-            const uint SrcCopyWithLayers=0x40cc0020;
-            if(!BitBlt(memory,0,0,rowWidth,1,screen,first.X,first.Y,SrcCopyWithLayers))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-            if(!GdiFlush())throw new InvalidOperationException("Cannot synchronize the captured pixel row.");
-            uint a=ReadColor(0),b=ReadColor(secondOffset);
-            Guard();
-            rows.Add(new Sample {BeginMs=begin,EndMs=timer.Elapsed.TotalMilliseconds,First=a,Second=b});
-            Thread.Sleep(4);
-        }
-        while(timer.Elapsed.TotalMilliseconds<beforeMs) Read();
-        double zero=timer.Elapsed.TotalMilliseconds;
-        Move(target);
-        while(timer.Elapsed.TotalMilliseconds<zero+afterMs) Read();
-        foreach(var row in rows){row.BeginMs-=zero;row.EndMs-=zero;}
-        Move(new Point(outX,outY));
-        return rows.ToArray();
-    }
-    public void Dispose() {
-        if(memory!=IntPtr.Zero){
-            if(previousBitmap!=IntPtr.Zero)SelectObject(memory,previousBitmap);
-            DeleteDC(memory); memory=IntPtr.Zero; previousBitmap=IntPtr.Zero;
-        }
-        if(bitmap!=IntPtr.Zero){DeleteObject(bitmap);bitmap=IntPtr.Zero;pixels=IntPtr.Zero;}
-        if(screen!=IntPtr.Zero){ReleaseDC(IntPtr.Zero,screen);screen=IntPtr.Zero;}
-        owner.Dispose();
+        // Broadcast the change in this isolated session, with no persistent profile change.
+        if (!SetSetting(0x1043, 0, new IntPtr(value ? 1 : 0), 2))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (AnimationsEnabled() != value) throw new InvalidOperationException("Windows did not retain the requested session motion state.");
     }
 }
 '@
@@ -283,73 +155,143 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         return $true
     }
 
+    function Read-DxgiTrace($raw, $points) {
+        $frequency = [long]$raw.qpcFrequency
+        $trigger = [long]$raw.triggerBeginQpc
+        $anchor = $raw.baseline
+        if ($frequency -le 0 -or $trigger -le 0 -or $raw.triggerEndQpc -lt $trigger -or
+            $raw.neutralArrivedQpc -le 0 -or $anchor.begin -lt $raw.neutralArrivedQpc -or
+            $raw.baselineStartedQpc -lt $anchor.end -or $raw.observationEndQpc -lt $raw.triggerEndQpc -or
+            ($anchor.begin - $raw.neutralArrivedQpc) * 1000.0 / $frequency -lt $policy.neutralSettleMs -or
+            ($trigger - $raw.baselineStartedQpc) * 1000.0 / $frequency -lt $policy.beforeMs -or
+            ($raw.observationEndQpc - $trigger) * 1000.0 / $frequency -lt $policy.afterMs -or
+            $anchor.kind -cne 'desktop' -or $anchor.begin -le 0 -or $anchor.end -lt $anchor.begin -or
+            $anchor.present -le 0 -or $anchor.present -gt $anchor.end -or $anchor.accumulated -lt 1 -or
+            ($anchor.end - $anchor.begin) * 1000.0 / $frequency -gt $policy.maxCaptureMs -or
+            $anchor.first -ne 1775639 -or $anchor.second -ne 1775639 -or
+            $raw.rowWidth -ne ($points.background[2] - $points.background[0] + 1)) {
+            throw 'The exact synthetic baseline row or raw trigger timestamps did not verify.'
+        }
+        $lastEnd = [long]$anchor.end
+        $lastPresent = [long]$anchor.present
+        $first = [uint32]$anchor.first
+        $second = [uint32]$anchor.second
+        foreach ($sample in $raw.samples) {
+            if ($sample.begin -lt $lastEnd -or $sample.end -lt $sample.begin -or
+                ($sample.end - $sample.begin) * 1000.0 / $frequency -gt $policy.maxCaptureMs) {
+                throw 'The ordered sample timestamps exceeded the capture budget.'
+            }
+            $lastEnd = [long]$sample.end
+            if ($sample.kind -ceq 'desktop') {
+                if ($sample.accumulated -ne 1 -or $sample.present -le $lastPresent -or $sample.present -gt $sample.end) {
+                    throw 'Desktop updates were lost, combined, or recorded out of order.'
+                }
+                $lastPresent = [long]$sample.present
+                $first = [uint32]$sample.first
+                $second = [uint32]$sample.second
+            } elseif ($sample.kind -cnotin @('pointer-only', 'no-update') -or $sample.present -ne 0 -or
+                $sample.accumulated -ne 0 -or $sample.first -ne 0 -or $sample.second -ne 0) {
+                throw 'A sample did not prove either a new desktop image or an unchanged desktop image.'
+            }
+            [pscustomobject]@{
+                BeginMs = ($sample.begin - $trigger) * 1000.0 / $frequency
+                EndMs = ($sample.end - $trigger) * 1000.0 / $frequency
+                PresentQpc = $lastPresent
+                Kind = $sample.kind
+                First = $first
+                Second = $second
+            }
+        }
+        if ($lastEnd -gt $raw.observationEndQpc -or
+            ($raw.observationEndQpc - $lastEnd) * 1000.0 / $frequency -gt $policy.maxGapMs) {
+            throw 'The trace did not cover the end of the observation window.'
+        }
+    }
     function Run-Arm([string]$name,[bool]$expectedEnabled,[bool]$expectTransition) {
         $report.phase = $name
         $arm = [ordered]@{ name=$name; osAnimationsEnabled=$expectedEnabled; expectTransition=$expectTransition; trials=@() }
         $report.arms += $arm
-        if ([HostedMotionPixels]::AnimationsEnabled() -ne $expectedEnabled) { throw 'Unexpected OS setting before this arm.' }
+        if ([HostedMotionState]::AnimationsEnabled() -ne $expectedEnabled) { throw 'Unexpected OS setting before this arm.' }
         if ($button.Current.IsOffscreen -or $button.Current.BoundingRectangle -ne $geometry) { throw 'The original navigation target moved or became unavailable.' }
-        # Setup changes use UIA. Create a new guarded observation only after those explicit test controls.
         $points = $report.points
-        $probe = [HostedMotionPixels]::new($session.Pid,[long]$session.CreationFileTime,$session.Handle,
-            $points.background[0],$points.background[1],$points.background[2],$points.background[3])
-        try {
-            for ($attempt=1; $attempt -le $policy.trials; $attempt++) {
-                $trace = @($probe.Trace($points.neutral[0],$points.neutral[1],$points.hover[0],$points.hover[1],
-                    $policy.neutralSettleMs,$policy.beforeMs,$policy.afterMs))
-                $early = @($trace | Where-Object { $_.EndMs -le -3 })
-                $late = @($trace | Where-Object { $_.BeginMs -ge 290 })
-                if ($early.Count -lt $policy.minimumEndpointSamples -or $late.Count -lt $policy.minimumEndpointSamples) {
-                    $arm.trials += [ordered]@{attempt=$attempt;trace=$trace;status='insufficient-timing'}
-                    throw 'The capture clock did not cover both hover endpoints.'
-                }
-                $baseColor=[uint32]$early[0].First
-                $hoverColor=[uint32]$late[-1].First
-                $badReads=@($trace | Where-Object { $_.First -ne $_.Second -or ($_.EndMs - $_.BeginMs) -gt $policy.maxCaptureMs })
-                $maxGap=0.0
-                for ($i=1; $i -lt $trace.Count; $i++) { $maxGap=[Math]::Max($maxGap,$trace[$i].BeginMs-$trace[$i-1].EndMs) }
-                $mid = @($trace | Where-Object { $_.BeginMs -ge 0 -and (Distance-Rgb $_.First $baseColor) -gt 1 -and (Distance-Rgb $_.First $hoverColor) -gt 1 })
-                $midColors = @($mid | ForEach-Object { $_.First } | Sort-Object -Unique)
-                $firstHover = $trace | Where-Object { $_.BeginMs -ge 0 -and $_.First -eq $hoverColor } | Select-Object -First 1
-                $backToNeutral = @($trace | Where-Object { $_.BeginMs -gt $firstHover.EndMs -and $_.First -eq $baseColor })
-                $unexpectedColors = @($mid | Where-Object { -not (Test-RgbPath $_.First $baseColor $hoverColor) })
-                if ($null -eq $pairedEndpoints.neutral) {
-                    $pairedEndpoints.neutral = $baseColor
-                    $pairedEndpoints.hover = $hoverColor
-                }
-                $valid = $badReads.Count -eq 0 -and $maxGap -le $policy.maxGapMs -and
-                    $backToNeutral.Count -eq 0 -and $unexpectedColors.Count -eq 0 -and
-                    $baseColor -eq $pairedEndpoints.neutral -and $hoverColor -eq $pairedEndpoints.hover -and
-                    @(($early.First | Where-Object { $_ -ne $baseColor })).Count -eq 0 -and
-                    @(($late.First | Where-Object { $_ -ne $hoverColor })).Count -eq 0 -and
-                    (Distance-Rgb $baseColor $hoverColor) -ge $policy.minimumRgbDistance
-                $arm.trials += [ordered]@{attempt=$attempt;trace=$trace;valid=$valid;maxGapMs=$maxGap
-                    neutralColor=$baseColor;hoverColor=$hoverColor;intermediateColors=$midColors.Count
-                    firstHoverSampleMs=$firstHover.EndMs;unexpectedColors=$unexpectedColors.Count }
-                Write-Report
-                if (-not $valid) { throw 'Visible pixels were noisy, discontinuous, occluded or missing an endpoint. This arm is inconclusive.' }
-                if ($expectTransition -and $midColors.Count -lt $policy.minimumIntermediateColors) { throw 'Positive hover control did not show two measurable intermediate colors.' }
-                if (-not $expectTransition) {
-                    if ($firstHover.EndMs -gt $policy.latestReducedEndpointMs) { throw 'The endpoint arrived too late to distinguish absent motion from a delayed visual read.' }
-                    if ($midColors.Count -ne 0) { throw 'Intermediate visible pixels remained in the reduced-motion observation.' }
-                }
+        for ($attempt=1; $attempt -le $policy.trials; $attempt++) {
+            $trial = [ordered]@{ attempt=$attempt; status='started' }
+            $arm.trials += $trial
+            $probeArguments = @($session.Pid, $session.CreationFileTime, $session.Handle,
+                $points.background[0], $points.background[1], $points.background[2],
+                $points.neutral[0], $points.neutral[1], $points.hover[0], $points.hover[1])
+            $raw = @(& $probe --hosted-hover @probeArguments 2>&1)
+            $trial.exitCode = $LASTEXITCODE
+            if ($trial.exitCode -ne 0 -or $raw.Count -ne 1 -or $raw[0] -isnot [string]) {
+                $trial.diagnostic = @($raw | ForEach-Object { $_.ToString() })
+                throw 'The native DXGI hover probe stopped before it could provide a valid trace.'
             }
-        } finally { $probe.Dispose() }
-        if ([HostedMotionPixels]::AnimationsEnabled() -ne $expectedEnabled) { throw 'OS setting changed during this arm.' }
+            $trial.rawDxgi = $raw[0] | ConvertFrom-Json
+            $trace = @(Read-DxgiTrace $trial.rawDxgi $points)
+            $trial.trace = $trace
+            $early = @($trace | Where-Object { $_.EndMs -le -3 })
+            $late = @($trace | Where-Object { $_.BeginMs -ge 290 })
+            if ($early.Count -lt $policy.minimumEndpointSamples -or $late.Count -lt $policy.minimumEndpointSamples) {
+                $trial.status = 'insufficient-timing'
+                throw 'The capture clock did not cover both hover endpoints.'
+            }
+            $baseColor=[uint32]$early[0].First
+            $hoverColor=[uint32]$late[-1].First
+            $badReads=@($trace | Where-Object { $_.First -ne $_.Second -or ($_.EndMs - $_.BeginMs) -gt $policy.maxCaptureMs })
+            $badTimeline = @($trace | Where-Object {
+                $_.First -ne $baseColor -and ($_.BeginMs -lt 0 -or $_.PresentQpc -lt $trial.rawDxgi.triggerBeginQpc)
+            })
+            $maxGap=0.0
+            for ($i=1; $i -lt $trace.Count; $i++) { $maxGap=[Math]::Max($maxGap,$trace[$i].BeginMs-$trace[$i-1].EndMs) }
+            $mid = @($trace | Where-Object { $_.Kind -ceq 'desktop' -and $_.PresentQpc -ge $trial.rawDxgi.triggerBeginQpc -and $_.BeginMs -ge 0 -and (Distance-Rgb $_.First $baseColor) -gt 1 -and (Distance-Rgb $_.First $hoverColor) -gt 1 })
+            $midColors = @($mid | ForEach-Object { $_.First } | Sort-Object -Unique)
+            $firstHover = $trace | Where-Object { $_.BeginMs -ge 0 -and $_.PresentQpc -ge $trial.rawDxgi.triggerBeginQpc -and $_.First -eq $hoverColor } | Select-Object -First 1
+            $backToNeutral = @($trace | Where-Object { $_.BeginMs -gt $firstHover.EndMs -and $_.First -eq $baseColor })
+            $unexpectedColors = @($mid | Where-Object { -not (Test-RgbPath $_.First $baseColor $hoverColor) })
+            if ($null -eq $pairedEndpoints.neutral) {
+                $pairedEndpoints.neutral = $baseColor
+                $pairedEndpoints.hover = $hoverColor
+            }
+            $valid = $null -ne $firstHover -and $badReads.Count -eq 0 -and $badTimeline.Count -eq 0 -and $maxGap -le $policy.maxGapMs -and
+                $baseColor -eq 1775639 -and $hoverColor -eq 3879984 -and
+                $backToNeutral.Count -eq 0 -and $unexpectedColors.Count -eq 0 -and
+                $baseColor -eq $pairedEndpoints.neutral -and $hoverColor -eq $pairedEndpoints.hover -and
+                @(($early.First | Where-Object { $_ -ne $baseColor })).Count -eq 0 -and
+                @(($late.First | Where-Object { $_ -ne $hoverColor })).Count -eq 0 -and
+                (Distance-Rgb $baseColor $hoverColor) -ge $policy.minimumRgbDistance
+            $trial.valid = $valid
+            $trial.maxGapMs = $maxGap
+            $trial.neutralColor = $baseColor
+            $trial.hoverColor = $hoverColor
+            $trial.intermediateColors = $midColors.Count
+            $trial.firstHoverSampleMs = $firstHover.EndMs
+            $trial.unexpectedColors = $unexpectedColors.Count
+            $trial.unexpectedTimelineSamples = $badTimeline.Count
+            $trial.status = 'scored'
+            Write-Report
+            if (-not $valid) { throw 'Visible pixels were noisy, discontinuous, occluded or missing an endpoint. This arm is inconclusive.' }
+            if ($expectTransition -and $midColors.Count -lt $policy.minimumIntermediateColors) { throw 'Positive hover control did not show two measurable intermediate colors.' }
+            if (-not $expectTransition) {
+                if ($firstHover.EndMs -gt $policy.latestReducedEndpointMs) { throw 'The endpoint arrived too late to distinguish absent motion from a delayed visual read.' }
+                if ($midColors.Count -ne 0) { throw 'Intermediate visible pixels remained in the reduced-motion observation.' }
+            }
+        }
+
+        if ([HostedMotionState]::AnimationsEnabled() -ne $expectedEnabled) { throw 'OS setting changed during this arm.' }
         $arm.pairedObservationPassed = $true
     }
 
-    $original = [HostedMotionPixels]::AnimationsEnabled()
+    $original = [HostedMotionState]::AnimationsEnabled()
     $report.originalAnimationsEnabled = $original
     Select-Motion '轻动效'
     Run-Arm 'explicit-light-preflight' $original $true
 
     Select-Motion '跟随系统（默认）'
     $report.attemptedSystemChange = $true
-    [HostedMotionPixels]::SetAnimations($true)
+    [HostedMotionState]::SetAnimations($true)
     Start-Sleep -Milliseconds 550
     Run-Arm 'system-animations-enabled' $true $true
-    [HostedMotionPixels]::SetAnimations($false)
+    [HostedMotionState]::SetAnimations($false)
     Start-Sleep -Milliseconds 550
     Run-Arm 'system-animations-disabled' $false $false
     Select-Motion '轻动效'
@@ -360,8 +302,8 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
 } finally {
     if ($report.attemptedSystemChange) {
         try {
-            if ([HostedMotionPixels]::AnimationsEnabled() -ne $original) { [HostedMotionPixels]::SetAnimations($original) }
-            $report.restoredAnimationsEnabled = [HostedMotionPixels]::AnimationsEnabled()
+            if ([HostedMotionState]::AnimationsEnabled() -ne $original) { [HostedMotionState]::SetAnimations($original) }
+            $report.restoredAnimationsEnabled = [HostedMotionState]::AnimationsEnabled()
             $report.systemRestored = $report.restoredAnimationsEnabled -eq $original
         } catch { $report.restoreError = $_.Exception.GetBaseException().Message }
     }

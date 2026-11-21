@@ -1,4 +1,4 @@
-// Capability probe for the synthetic hosted motion harness. It never sends input.
+// DXGI row capture for the synthetic hosted motion harness.
 // Compile with the existing x64 Windows SDK: cl /std:c++17 /EHsc /W4 verify-hosted-dxgi-row.cpp
 // The local --synthetic mode touches only two in-memory textures on a WARP device.
 #define WIN32_LEAN_AND_MEAN
@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <iterator>
 #include <cstdio>
@@ -16,6 +17,7 @@
 #include <cwchar>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -88,6 +90,8 @@ struct OwnedWindow {
     POINT second;
     DWORD inputTick;
     HANDLE process = nullptr;
+    bool trackCursor = false;
+    POINT expectedCursor{};
 
     OwnedWindow(HWND handle, DWORD ownerPid, uint64_t ownerCreation, POINT a, POINT b)
         : window(handle), pid(ownerPid), creation(ownerCreation), first(a), second(b),
@@ -112,6 +116,38 @@ struct OwnedWindow {
             GetAncestor(WindowFromPoint(second), GA_ROOT) != window) {
             throw std::runtime_error("the exact foreground test window or its input ownership changed");
         }
+        if (trackCursor) {
+            POINT actual{};
+            if (!GetCursorPos(&actual) || std::abs(actual.x - expectedCursor.x) > 2 ||
+                std::abs(actual.y - expectedCursor.y) > 2) {
+                throw std::runtime_error("the owned cursor left the expected point");
+            }
+        }
+    }
+
+    void VerifyPoint(POINT point) const {
+        if (GetAncestor(WindowFromPoint(point), GA_ROOT) != window)
+            throw std::runtime_error("the pointer target is outside the exact owned window");
+    }
+
+    void MovePointer(POINT point) {
+        Verify();
+        VerifyPoint(point);
+        const int x = GetSystemMetrics(SM_XVIRTUALSCREEN), y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN), height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (width < 2 || height < 2 || point.x < x || point.x >= x + width ||
+            point.y < y || point.y >= y + height)
+            throw std::runtime_error("the pointer target is outside the virtual screen");
+        INPUT input{};
+        input.type = INPUT_MOUSE;
+        input.mi.dx = std::lround((point.x - x) * 65535.0 / (width - 1));
+        input.mi.dy = std::lround((point.y - y) * 65535.0 / (height - 1));
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE;
+        if (SendInput(1, &input, sizeof(input)) != 1) throw std::runtime_error("owned mouse move failed");
+        inputTick = LastInputTick();
+        expectedCursor = point;
+        trackCursor = true;
+        Verify();
     }
 };
 
@@ -224,59 +260,104 @@ struct Frame {
     }
 };
 
-int RunHosted(OwnedWindow& target) {
+enum class SampleKind { Desktop, Unchanged, PointerOnly };
+const char* Name(SampleKind kind) {
+    if (kind == SampleKind::Desktop) return "desktop";
+    return kind == SampleKind::Unchanged ? "no-update" : "pointer-only";
+}
+
+struct Sample {
+    SampleKind kind{};
+    int64_t begin{}, end{}, present{};
+    UINT accumulated{};
+    Pixels pixels{};
+};
+
+Output FindOwnedOutput(const OwnedWindow& target) {
     target.Verify();
     const auto monitor = MonitorFromPoint(target.first, MONITOR_DEFAULTTONULL);
-    const auto width64 = static_cast<int64_t>(target.second.x) - target.first.x + 1;
-    if (!monitor || target.first.y != target.second.y || width64 < 2 || width64 > 512 ||
-        MonitorFromPoint(target.second, MONITOR_DEFAULTTONULL) != monitor)
+    if (!monitor || target.first.y != target.second.y || MonitorFromPoint(target.second, MONITOR_DEFAULTTONULL) != monitor)
         throw std::runtime_error("test points must share one clipped row on one output");
-    const auto width = static_cast<UINT>(width64);
-    const auto output = FindOutput(monitor);
+    auto output = FindOutput(monitor);
     if (!PtInRect(&output.bounds, target.first) || !PtInRect(&output.bounds, target.second))
         throw std::runtime_error("test points are outside the DXGI output bounds");
-    const auto x = static_cast<UINT>(static_cast<int64_t>(target.first.x) - output.bounds.left);
-    const auto y = static_cast<UINT>(static_cast<int64_t>(target.first.y) - output.bounds.top);
-    Device device(output.adapter.Get());
-    ComPtr<IDXGIOutputDuplication> duplication;
-    Check(output.output->DuplicateOutput(device.device.Get(), &duplication), "DuplicateOutput");
-    DXGI_OUTDUPL_DESC description{};
-    duplication->GetDesc(&description);
-    if (description.Rotation != DXGI_MODE_ROTATION_IDENTITY ||
-        description.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
-        description.ModeDesc.Width < width || x > description.ModeDesc.Width - width ||
-        y >= description.ModeDesc.Height)
-        throw std::runtime_error("unsupported or changed output geometry");
+    return output;
+}
 
+UINT RowWidth(const OwnedWindow& target) {
+    const auto width = static_cast<int64_t>(target.second.x) - target.first.x + 1;
+    if (width < 2 || width > 512) throw std::runtime_error("unsupported clipped row width");
+    return static_cast<UINT>(width);
+}
+
+class Capture {
+    OwnedWindow& target;
+    Output output;
+    UINT x, y;
+    Device device;
+    ComPtr<IDXGIOutputDuplication> duplication;
+    DXGI_OUTDUPL_DESC description{};
     ComPtr<ID3D11Texture2D> staging;
-    if (!description.DesktopImageInSystemMemory) {
-        const auto row = RowDescription(width, D3D11_USAGE_STAGING);
-        Check(device.device->CreateTexture2D(&row, nullptr, &staging), "CreateTexture2D(staging)");
+
+public:
+    const UINT width;
+    const int64_t frequency;
+
+    explicit Capture(OwnedWindow& owned): target(owned), output(FindOwnedOutput(owned)),
+        x(static_cast<UINT>(static_cast<int64_t>(owned.first.x) - output.bounds.left)),
+        y(static_cast<UINT>(static_cast<int64_t>(owned.first.y) - output.bounds.top)),
+        device(output.adapter.Get()), width(RowWidth(owned)), frequency(Frequency()) {
+        Check(output.output->DuplicateOutput(device.device.Get(), &duplication), "DuplicateOutput");
+        duplication->GetDesc(&description);
+        if (description.Rotation != DXGI_MODE_ROTATION_IDENTITY ||
+            description.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
+            description.ModeDesc.Width < width || x > description.ModeDesc.Width - width ||
+            y >= description.ModeDesc.Height)
+            throw std::runtime_error("unsupported or changed output geometry");
+        if (!systemMemory()) {
+            const auto row = RowDescription(width, D3D11_USAGE_STAGING);
+            Check(device.device->CreateTexture2D(&row, nullptr, &staging), "CreateTexture2D(staging)");
+        }
     }
-    const auto frequency = Frequency();
-    const auto pollStarted = Counter();
-    unsigned unchanged = 0, pointerOnly = 0;
-    DXGI_OUTDUPL_FRAME_INFO info{};
-    while (DeltaMs(pollStarted, Counter(), frequency) < 250) {
-        const auto begin = Counter();
+
+    bool systemMemory() const { return description.DesktopImageInSystemMemory != FALSE; }
+
+    Sample Poll() {
+        Sample sample{};
+        sample.begin = Counter();
         target.Verify();
+        DXGI_OUTDUPL_FRAME_INFO info{};
         ComPtr<IDXGIResource> resource;
         const auto result = duplication->AcquireNextFrame(0, &info, &resource);
         if (result == DXGI_ERROR_WAIT_TIMEOUT) {
-            ++unchanged;
-            Sleep(1);
-            continue;
-        }
-        Check(result, "AcquireNextFrame(0)");
-        Frame frame{duplication.Get()};
-        if (!info.LastPresentTime.QuadPart) {
-            ++pointerOnly;
+            sample.kind = SampleKind::Unchanged;
+        } else {
+            Check(result, "AcquireNextFrame(0)");
+            Frame frame{duplication.Get()};
+            sample.present = info.LastPresentTime.QuadPart;
+            sample.accumulated = info.AccumulatedFrames;
+            if (!sample.present) {
+                sample.kind = SampleKind::PointerOnly;
+                if (sample.accumulated || !info.LastMouseUpdateTime.QuadPart)
+                    throw std::runtime_error("invalid pointer-only metadata");
+            } else {
+                if (info.ProtectedContentMaskedOut) throw std::runtime_error("masked desktop capture");
+                sample.pixels = ReadRow(resource.Get(), sample.begin);
+            }
             frame.Close();
-            continue;
         }
-        if (info.ProtectedContentMaskedOut) throw std::runtime_error("masked desktop capture");
+        target.Verify();
+        sample.end = Counter();
+        if (sample.kind == SampleKind::Desktop &&
+            (sample.present < 0 || sample.present > sample.end || !sample.accumulated))
+            throw std::runtime_error("invalid compositor present metadata");
+        return sample;
+    }
+
+private:
+    Pixels ReadRow(IDXGIResource* resource, int64_t begin) {
         Pixels pixels{};
-        if (description.DesktopImageInSystemMemory) {
+        if (systemMemory()) {
             DXGI_MAPPED_RECT mapped{};
             Check(duplication->MapDesktopSurface(&mapped), "MapDesktopSurface");
             try {
@@ -288,7 +369,7 @@ int RunHosted(OwnedWindow& target) {
             Check(duplication->UnMapDesktopSurface(), "UnMapDesktopSurface");
         } else {
             ComPtr<ID3D11Texture2D> texture;
-            Check(resource.As(&texture), "QueryInterface(ID3D11Texture2D)");
+            Check(resource->QueryInterface(IID_PPV_ARGS(&texture)), "QueryInterface(ID3D11Texture2D)");
             const D3D11_BOX source{x, y, 0, x + width, y + 1, 1};
             device.context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture.Get(), 0, &source);
             device.context->Flush();
@@ -298,33 +379,108 @@ int RunHosted(OwnedWindow& target) {
                 SwitchToThread();
             }
         }
-        frame.Close();
-        target.Verify();
-        const auto end = Counter();
-        if (info.LastPresentTime.QuadPart < 0 || info.LastPresentTime.QuadPart > end ||
-            !info.AccumulatedFrames)
-            throw std::runtime_error("invalid compositor present metadata");
-        const double elapsed = DeltaMs(begin, end, frequency);
+        return pixels;
+    }
+};
+
+int RunHosted(OwnedWindow& target) {
+    Capture capture(target);
+    const auto pollStarted = Counter();
+    unsigned unchanged = 0, pointerOnly = 0;
+    while (DeltaMs(pollStarted, Counter(), capture.frequency) < 250) {
+        const auto sample = capture.Poll();
+        if (sample.kind == SampleKind::Unchanged) {
+            ++unchanged;
+            Sleep(1);
+            continue;
+        }
+        if (sample.kind == SampleKind::PointerOnly) {
+            ++pointerOnly;
+            continue;
+        }
+        const double elapsed = DeltaMs(sample.begin, sample.end, capture.frequency);
         std::printf("{\"status\":\"%s\",\"presentQpc\":%lld,\"sampleBeginQpc\":%lld,"
                     "\"sampleEndQpc\":%lld,\"qpcFrequency\":%lld,\"sampleMs\":%.6f,"
                     "\"accumulatedFrames\":%u,\"noUpdatePolls\":%u,\"pointerOnlyFrames\":%u,"
                     "\"rowWidth\":%u,\"first\":%lu,\"second\":%lu,\"systemMemory\":%s}\n",
             elapsed <= CaptureLimitMs ? "one-compositor-row-within-budget" : "one-compositor-row-over-budget",
-            info.LastPresentTime.QuadPart, begin, end, frequency, elapsed, info.AccumulatedFrames,
-            unchanged, pointerOnly, width, pixels.first, pixels.second,
-            description.DesktopImageInSystemMemory ? "true" : "false");
+            sample.present, sample.begin, sample.end, capture.frequency, elapsed, sample.accumulated,
+            unchanged, pointerOnly, capture.width, sample.pixels.first, sample.pixels.second,
+            capture.systemMemory() ? "true" : "false");
         return elapsed <= CaptureLimitMs ? 0 : 3;
     }
     std::printf("{\"status\":\"no-compositor-row\",\"noUpdatePolls\":%u,\"pointerOnlyFrames\":%u}\n",
         unchanged, pointerOnly);
     return 2;
 }
+
+int RunHover(OwnedWindow& target, POINT neutral, POINT hover) {
+    target.Verify();
+    target.VerifyPoint(neutral);
+    target.VerifyPoint(hover);
+    if (neutral.x == hover.x && neutral.y == hover.y)
+        throw std::runtime_error("hover and neutral points must differ");
+
+    target.MovePointer(neutral);
+    const auto neutralArrived = Counter();
+    const auto frequency = Frequency();
+    while (DeltaMs(neutralArrived, Counter(), frequency) < 250) Sleep(4);
+    Capture capture(target);
+    const auto primeStarted = Counter();
+    Sample anchor{};
+    do {
+        anchor = capture.Poll();
+        if (anchor.kind == SampleKind::Desktop) break;
+        Sleep(1);
+    } while (DeltaMs(primeStarted, Counter(), capture.frequency) < 250);
+    if (anchor.kind != SampleKind::Desktop || DeltaMs(anchor.begin, anchor.end, capture.frequency) > CaptureLimitMs)
+        throw std::runtime_error("no timestamped baseline row within capture budget");
+
+    std::vector<Sample> trace;
+    trace.reserve(136);
+    const auto baselineStarted = Counter();
+    while (DeltaMs(baselineStarted, Counter(), capture.frequency) < 95) {
+        trace.push_back(capture.Poll());
+        Sleep(4);
+    }
+    const auto triggerBegin = Counter();
+    target.MovePointer(hover);
+    const auto triggerEnd = Counter();
+    while (DeltaMs(triggerBegin, Counter(), capture.frequency) < 430) {
+        trace.push_back(capture.Poll());
+        Sleep(4);
+    }
+    const auto observationEnd = Counter();
+    target.MovePointer(neutral);
+
+    std::printf("{\"qpcFrequency\":%lld,\"neutralArrivedQpc\":%lld,\"baselineStartedQpc\":%lld,"
+                "\"triggerBeginQpc\":%lld,\"triggerEndQpc\":%lld,\"observationEndQpc\":%lld,"
+                "\"rowWidth\":%u,\"systemMemory\":%s,\"baseline\":",
+        capture.frequency, neutralArrived, baselineStarted, triggerBegin, triggerEnd, observationEnd,
+        capture.width, capture.systemMemory() ? "true" : "false");
+    const auto printSample = [](const Sample& value) {
+        std::printf("{\"kind\":\"%s\",\"begin\":%lld,\"end\":%lld,\"present\":%lld,"
+                    "\"accumulated\":%u,\"first\":%lu,\"second\":%lu}",
+            Name(value.kind), value.begin, value.end, value.present, value.accumulated,
+            value.pixels.first, value.pixels.second);
+    };
+    printSample(anchor);
+    std::printf(",\"samples\":[");
+    for (size_t i = 0; i < trace.size(); ++i) {
+        if (i) std::putchar(',');
+        printSample(trace[i]);
+    }
+    std::puts("]}");
+    return 0;
+}
 }
 
 int wmain(int argc, wchar_t** argv) {
     try {
         if (argc == 2 && std::wcscmp(argv[1], L"--synthetic") == 0) return RunSynthetic();
-        if (argc != 8 || std::wcscmp(argv[1], L"--hosted") != 0 ||
+        const bool row = argc == 8 && std::wcscmp(argv[1], L"--hosted") == 0;
+        const bool hover = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover") == 0;
+        if ((!row && !hover) ||
             !EnvEquals(L"GITHUB_ACTIONS", L"true") || !EnvEquals(L"RUNNER_ENVIRONMENT", L"github-hosted") ||
             !EnvEquals(L"RUNNER_OS", L"Windows")) {
             throw std::runtime_error("desktop access is limited to the exact foreground synthetic GitHub-hosted window");
@@ -338,7 +494,9 @@ int wmain(int argc, wchar_t** argv) {
         const auto y = ParseCoordinate(argv[6]);
         OwnedWindow target(reinterpret_cast<HWND>(window), static_cast<DWORD>(pid),
             ParseUnsigned(argv[3]), {ParseCoordinate(argv[5]), y}, {ParseCoordinate(argv[7]), y});
-        return RunHosted(target);
+        if (row) return RunHosted(target);
+        return RunHover(target, {ParseCoordinate(argv[8]), ParseCoordinate(argv[9])},
+            {ParseCoordinate(argv[10]), ParseCoordinate(argv[11])});
     } catch (const Error& error) {
         std::fprintf(stderr, "%s failed (HRESULT 0x%08lx)\n", error.operation,
             static_cast<unsigned long>(error.result));
