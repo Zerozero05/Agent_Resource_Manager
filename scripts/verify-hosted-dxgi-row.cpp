@@ -574,7 +574,8 @@ int wmain(int argc, wchar_t** argv) {
         if (argc == 2 && std::wcscmp(argv[1], L"--synthetic") == 0) return RunSynthetic();
         const bool hover = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover") == 0;
 #ifdef ARM_WGC_MOTION
-        const bool allowed = hover && EnvEquals(L"GITHUB_REF_NAME", L"codex/hosted-wgc-motion-r2-3536ca0-20261121") &&
+        const bool allowed = hover && (EnvEquals(L"GITHUB_REF_NAME", L"codex/hosted-wgc-motion-r2-3536ca0-20261121") ||
+            EnvEquals(L"GITHUB_REF_NAME", L"codex/hosted-wgc-clock-diagnostic-3536ca0-20261121")) &&
             EnvEquals(L"GITHUB_REPOSITORY", L"Zerozero05/Agent_Resource_Manager") &&
             EnvEquals(L"ImageOS", L"win25-vs2026") && EnvEquals(L"ImageVersion", L"20261116.315.1");
 #else

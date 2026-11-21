@@ -192,8 +192,18 @@ public:
             sample.compositor100ns = time.Duration;
             sample.present = static_cast<int64_t>(
                 static_cast<double>(time.Duration) * static_cast<double>(frequency) / 10000000.0);
-            if (sample.present <= 0 || sample.present > sample.acquireReturned)
+            if (sample.present <= 0 || sample.present > sample.acquireReturned) {
+                const auto inspected = Counter();
+                std::fprintf(stderr,
+                    "ARM-WGC-CLOCK {\"reason\":\"%s\",\"frequency\":%lld,\"compositor100ns\":%lld,"
+                    "\"projectedQpc\":%lld,\"pollBeginQpc\":%lld,\"acquireReturnedQpc\":%lld,"
+                    "\"timestampInspectedQpc\":%lld,\"updateInterval100ns\":%lld}\n",
+                    sample.present <= 0 ? "non-positive-projection" : "projection-after-acquisition",
+                    frequency, sample.compositor100ns, sample.present, sample.begin, sample.acquireReturned,
+                    inspected, updateInterval.Duration);
+                std::fflush(stderr);
                 throw std::runtime_error("WGC frame does not share the native QPC clock");
+            }
             sample.pixels = ReadRow(frame.Get(), sample.begin);
             sample.rowRead = Counter();
             if (DeltaMs(sample.present, sample.rowRead, frequency) > Wgc::FrameToCpuLimitMs)

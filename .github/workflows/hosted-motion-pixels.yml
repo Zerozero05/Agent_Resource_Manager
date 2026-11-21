@@ -1,4 +1,4 @@
-name: Verify Windows reduced motion on an owned window
+name: Diagnose the WGC timestamp boundary on an owned window
 on: create
 permissions:
   contents: read
@@ -12,7 +12,7 @@ env:
   CANDIDATE_SHA256: 'aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7'
 jobs:
   motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-wgc-motion-r2-3536ca0-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-wgc-clock-diagnostic-3536ca0-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:
@@ -78,16 +78,16 @@ jobs:
               $info.sourceCommit -cne $env:CANDIDATE_SOURCE -or $info.workflowRunId -ne $env:CANDIDATE_RUN_ID -or
               $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
               $info.version -cne '0.3.0-dev.1') { throw 'Build information does not bind to the pinned executable.' }
-      - name: Observe the four original motion conditions on the owned synthetic window
+      - name: Measure one clock probe on the exact owned synthetic window
         timeout-minutes: 5
         run: |
           $candidate = Join-Path $env:RUNNER_TEMP 'arm-wgc-candidate/agent-resource-manager.exe'
-          ./scripts/verify-hosted-motion-pixels.ps1 -Candidate $candidate -ExpectedSha256 $env:CANDIDATE_SHA256
-      - name: Preserve only the native motion report
+          ./scripts/verify-hosted-motion-pixels.ps1 -Candidate $candidate -ExpectedSha256 $env:CANDIDATE_SHA256 -ClockDiagnosticOnly
+      - name: Preserve only the native clock report
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_wgc_motion_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arm-motion-pixels-evidence/motion-pixels.json
+          name: Agent_Resource_Manager_wgc_clock_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-motion-pixels-evidence/wgc-clock.json
           if-no-files-found: warn
           retention-days: 14

@@ -1,13 +1,16 @@
 param(
     [Parameter(Mandatory)][string]$Candidate,
-    [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{64}$')][string]$ExpectedSha256
+    [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{64}$')][string]$ExpectedSha256,
+    [switch]$ClockDiagnosticOnly
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+$expectedBranch = if ($ClockDiagnosticOnly) { 'codex/hosted-wgc-clock-diagnostic-3536ca0-20261121' }
+    else { 'codex/hosted-wgc-motion-r2-3536ca0-20261121' }
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:GITHUB_REPOSITORY -cne 'Zerozero05/Agent_Resource_Manager' -or
-    $env:GITHUB_REF_NAME -cne 'codex/hosted-wgc-motion-r2-3536ca0-20261121' -or
+    $env:GITHUB_REF_NAME -cne $expectedBranch -or
     $env:ImageOS -cne 'win25-vs2026' -or $env:ImageVersion -cne '20261116.315.1' -or
     $env:CANDIDATE_SOURCE -cne '3536ca0e5cf7c897b860b5ce32d8b415904b9e45' -or
     $ExpectedSha256 -cne 'aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7' -or
@@ -16,12 +19,14 @@ if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hos
 }
 
 $evidence = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-motion-pixels-evidence')
-$output = Join-Path $evidence.FullName 'motion-pixels.json'
+$output = Join-Path $evidence.FullName $(if ($ClockDiagnosticOnly) { 'wgc-clock.json' } else { 'motion-pixels.json' })
 $policy = [ordered]@{ trials=3; neutralSettleMs=250; beforeMs=95; afterMs=430; maxCaptureMs=15; maxGapMs=32;
     maxCompositorToCpuMs=32; latestReducedEndpointMs=105;
     minimumEndpointSamples=4; minimumRgbDistance=12; minimumIntermediateColors=2 }
 $report = [ordered]@{ candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$ExpectedSha256; syntheticOnly=$true; status='incomplete'; phase='preflight'
     policy=$policy; arms=@(); attemptedSystemChange=$false; systemRestored=$false; closedNormally=$false
+    clockDiagnosticOnly=$ClockDiagnosticOnly.IsPresent; previousClockRejectionRun='44875010565'
+    fourCaseAcceptance=$false
     previousRun=[ordered]@{id='44854495440'; status='inconclusive'; reason='A two-update DXGI batch interrupted the first positive control under that run''s policy.'}
     previousR2=[ordered]@{id='44855333628'; status='incomplete'; passedArms=2; totalArms=4}
     previousR3=[ordered]@{id='44857754039'; status='incomplete'; qualifiedTrialsPerArm=@(1,1,3,0); reason='Coalesced updates and over-budget compositor gaps in seven positive trials.'}
@@ -33,6 +38,9 @@ $report = [ordered]@{ candidateSource=$env:CANDIDATE_SOURCE; candidateSha256=$Ex
     capture='One Windows Graphics Capture session per trial on the exact owned root HWND, with the default capture border and a verified minimum update interval of 1 ms. No-update polls retain the last row. Raw times retain both WGC 100-ns compositor time and QPC acquisition, read and release. FrameArrived and reads must agree. WGC does not expose an independent count of frames dropped before delivery.'
     runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion
     scope='Native foreground hover pixels on one inactive sidebar control. No DOM or CSS readback and no display-DPI or whole-app animation claim.' }
+if ($ClockDiagnosticOnly) {
+    $report.scope = 'One owned-window explicit-light hover to inspect the WGC timestamp boundary.'
+}
 function Write-Report { $report | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $output -Encoding utf8NoBOM }
 Write-Report
 
@@ -329,6 +337,26 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         }
     }
 
+    function Read-ClockValues([long]$frequency,[long]$compositor100ns,[long]$present,[long]$begin,[long]$acquired,
+        [Nullable[long]]$inspected) {
+        if ($frequency -le 0 -or $begin -le 0 -or $acquired -lt $begin -or
+            ($null -ne $inspected -and $inspected -lt $acquired)) {
+            throw 'The raw QPC observations are invalid or out of order.'
+        }
+        $exactProjection = [decimal]$compositor100ns * $frequency / 10000000
+        $signedDifference = [decimal]$present - $acquired
+        $direction = if ($present -le 0) { 'non-positive-projection' }
+            elseif ($signedDifference -gt 0) { 'projection-after-acquisition' } else { 'projection-at-or-before-acquisition' }
+        [ordered]@{
+            qpcFrequency=$frequency; compositor100ns=$compositor100ns; projectedQpc=$present
+            pollBeginQpc=$begin; acquireReturnedQpc=$acquired; timestampInspectedQpc=$inspected
+            direction=$direction; projectedMinusAcquiredTicks=$signedDifference
+            exactProjectionMinusAcquiredMs=($exactProjection - $acquired) * 1000 / $frequency
+            projectionMinusExactTruncatedTicks=[decimal]$present - [Math]::Truncate($exactProjection)
+            projectedMinusInspectedTicks=if ($null -ne $inspected) { [decimal]$present - $inspected }
+        }
+    }
+
     function Run-Arm([string]$name,[bool]$expectedEnabled,[bool]$expectTransition) {
         $report.phase = $name
         $arm = [ordered]@{ name=$name; osAnimationsEnabled=$expectedEnabled; expectTransition=$expectTransition; trials=@() }
@@ -340,7 +368,8 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         }
         $arm.osNotification = $verified.number
         $points = $report.points
-        for ($attempt=1; $attempt -le $policy.trials; $attempt++) {
+        $trialCount = if ($ClockDiagnosticOnly) { 1 } else { $policy.trials }
+        for ($attempt=1; $attempt -le $trialCount; $attempt++) {
             if ($button.Current.IsOffscreen -or $button.Current.BoundingRectangle -ne $geometry) {
                 throw 'The original navigation target moved or became unavailable.'
             }
@@ -352,11 +381,34 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
             $raw = @(& $probe --hosted-hover @probeArguments 2>&1)
             $trial.exitCode = $LASTEXITCODE
             $traceOutput = @()
+            $clockRejection = $null
             foreach ($line in $raw) {
                 if ($line.ToString() -cmatch '\AARM-WGC-PHASE (?<stage>[a-z-]{1,32})\z') {
                     $trial.nativePhases += $Matches.stage
+                } elseif ($line.ToString() -cmatch '\AARM-WGC-CLOCK (?<receipt>\{[^\r\n]+\})\z') {
+                    if ($null -ne $clockRejection) { throw 'The native probe reported more than one clock rejection.' }
+                    $clockRejection = $Matches.receipt | ConvertFrom-Json
                 } else {
                     $traceOutput += $line
+                }
+            }
+            if ($null -ne $clockRejection) {
+                if ($trial.exitCode -ne 1 -or $clockRejection.updateInterval100ns -ne 10000 -or
+                    $null -eq $clockRejection.timestampInspectedQpc -or
+                    -not @($traceOutput | Where-Object { $_.ToString() -ceq 'WGC frame does not share the native QPC clock' }).Count) {
+                    throw 'The native clock-rejection receipt does not match the guarded failure.'
+                }
+                $reading = Read-ClockValues $clockRejection.frequency $clockRejection.compositor100ns `
+                    $clockRejection.projectedQpc $clockRejection.pollBeginQpc $clockRejection.acquireReturnedQpc `
+                    $clockRejection.timestampInspectedQpc
+                if ($clockRejection.reason -cne $reading.direction -or $reading.direction -ceq 'projection-at-or-before-acquisition') {
+                    throw 'The reported native rejection contradicts its raw timestamp values.'
+                }
+                $reading.updateInterval100ns = $clockRejection.updateInterval100ns
+                $trial.clockRejection = $reading
+                if ($ClockDiagnosticOnly) {
+                    $trial.status = 'diagnostic-clock-rejected'
+                    return
                 }
             }
             if ($trial.exitCode -ne 0 -or $traceOutput.Count -ne 1 -or $traceOutput[0] -isnot [string] -or
@@ -364,7 +416,28 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
                 $trial.diagnostic = @($traceOutput | Where-Object { $_ -isnot [string] } | ForEach-Object { $_.ToString() })
                 throw 'The native WGC hover probe stopped before it could provide a valid trace.'
             }
-            $trial.rawWgc = $traceOutput[0] | ConvertFrom-Json
+            $capture = $traceOutput[0] | ConvertFrom-Json
+            if ($ClockDiagnosticOnly) {
+                $samples = @($capture.baseline) + @($capture.samples | Where-Object kind -CEQ 'window')
+                if ($capture.method -cne 'WGC.CreateForWindow' -or $capture.defaultCaptureBorder -ne $true -or
+                    $capture.updateInterval100ns -ne 10000 -or $capture.qpcFrequency -le 0 -or
+                    $capture.baseline.kind -cne 'window' -or $samples.Count -ne $capture.framesRead) {
+                    throw 'The completed probe did not produce a valid owned-window clock trace.'
+                }
+                $trial.updateInterval100ns = $capture.updateInterval100ns
+                $trial.framesOffered = $capture.framesOffered
+                $trial.framesRead = $capture.framesRead
+                $trial.triggerBeginQpc = $capture.triggerBeginQpc
+                $trial.clockSamples = @($samples | ForEach-Object {
+                    Read-ClockValues $capture.qpcFrequency $_.compositor100ns $_.present $_.begin $_.acquireReturned $null
+                })
+                if (@($trial.clockSamples | Where-Object direction -CNE 'projection-at-or-before-acquisition').Count) {
+                    throw 'An apparent clock rejection was missing from the native diagnostics.'
+                }
+                $trial.status = 'diagnostic-clock-rejection-not-reproduced'
+                return
+            }
+            $trial.rawWgc = $capture
             try {
                 Score-WgcTrial $trial $points $expectTransition
                 $trial.status = 'observed'
@@ -392,20 +465,29 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
     Start-Sleep -Milliseconds 550
     Run-Arm 'explicit-light-preflight' $true $true
 
-    $report.phase = 'system-enabled-notification'
-    Select-Motion '跟随系统（默认）'
-    Start-Sleep -Milliseconds 550
-    Run-Arm 'system-animations-enabled' $true $true
-    $report.phase = 'system-disabled-notification'
-    Set-ObservedMotion $false 'system-disabled'
-    Start-Sleep -Milliseconds 550
-    Run-Arm 'system-animations-disabled' $false $false
-    Select-Motion '轻动效'
-    Run-Arm 'explicit-light-with-os-disabled' $false $true
-    if ($report.arms.Count -eq 4 -and @($report.arms | Where-Object { -not $_.pairedObservationPassed }).Count -eq 0) {
-        $report.status = 'observed-visible-system-motion'
+    if ($ClockDiagnosticOnly) {
+        if ($report.arms.Count -ne 1 -or $report.arms[0].trials.Count -ne 1 -or
+            $report.arms[0].trials[0].status -cnotin @('diagnostic-clock-rejected','diagnostic-clock-rejection-not-reproduced')) {
+            throw 'The diagnostic requires exactly one owned-window clock outcome.'
+        }
+        $report.status = $report.arms[0].trials[0].status
     } else {
-        $report.error = 'At least one of the four conditions lacked three qualifying trials.'
+        $report.phase = 'system-enabled-notification'
+        Select-Motion '跟随系统（默认）'
+        Start-Sleep -Milliseconds 550
+        Run-Arm 'system-animations-enabled' $true $true
+        $report.phase = 'system-disabled-notification'
+        Set-ObservedMotion $false 'system-disabled'
+        Start-Sleep -Milliseconds 550
+        Run-Arm 'system-animations-disabled' $false $false
+        Select-Motion '轻动效'
+        Run-Arm 'explicit-light-with-os-disabled' $false $true
+        if ($report.arms.Count -eq 4 -and @($report.arms | Where-Object { -not $_.pairedObservationPassed }).Count -eq 0) {
+            $report.status = 'observed-visible-system-motion'
+            $report.fourCaseAcceptance = $true
+        } else {
+            $report.error = 'At least one of the four conditions lacked three qualifying trials.'
+        }
     }
 } catch {
     $report.error = $_.Exception.GetBaseException().Message
@@ -435,16 +517,23 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         finally { $session.Dispose() }
     }
     if (-not $report.systemRestored -or -not $report.closedNormally -or $report.restoreError -or
-        $report.notificationCloseError) { $report.status = 'incomplete' }
+        $report.notificationCloseError) { $report.status = 'incomplete'; $report.fourCaseAcceptance = $false }
     $report.finishedAt = [DateTime]::UtcNow.ToString('o')
     Write-Report
 }
 $outcomes = @($report.arms | ForEach-Object {
     [ordered]@{ name=$_.name; passed=$_.pairedObservationPassed
-        trials=@($_.trials | ForEach-Object { [ordered]@{status=$_.status; error=$_.error; exitCode=$_.exitCode
-            lastNativePhase=$_.nativePhases[-1]; framesOffered=$_.framesOffered; framesRead=$_.framesRead} }) }
+        trials=@($_.trials | ForEach-Object {
+            $trialResult = [ordered]@{status=$_.status; error=$_.error; exitCode=$_.exitCode
+                lastNativePhase=$_.nativePhases[-1]; framesOffered=$_.framesOffered; framesRead=$_.framesRead}
+            if ($ClockDiagnosticOnly -and $_.clockRejection) { $trialResult.clockRejection = $_.clockRejection }
+            $trialResult
+        }) }
 })
 [ordered]@{status=$report.status; phase=$report.phase; systemRestored=$report.systemRestored; closedNormally=$report.closedNormally; arms=$outcomes;
-    setterFlags=$report.setterFlags; motionChanges=$report.motionChanges; candidateSha256=$ExpectedSha256; error=$report.error} |
+    setterFlags=$report.setterFlags; motionChanges=$report.motionChanges; candidateSha256=$ExpectedSha256;
+    clockDiagnosticOnly=$report.clockDiagnosticOnly; fourCaseAcceptance=$report.fourCaseAcceptance; error=$report.error} |
     ConvertTo-Json -Depth 8 -Compress
-if ($report.status -cne 'observed-visible-system-motion') { exit 1 }
+if ($ClockDiagnosticOnly) {
+    if ($report.status -cnotin @('diagnostic-clock-rejected','diagnostic-clock-rejection-not-reproduced')) { exit 1 }
+} elseif ($report.status -cne 'observed-visible-system-motion') { exit 1 }
