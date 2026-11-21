@@ -23,7 +23,7 @@ const transportSha256 = 'f9dfe387f6900925808cdd16b9785f29b96e90c40b554b828b17557
 const hostedReferenceFrame = null;
 const hostedFirstSearchReceipt = null;
 const hostedRetentionReference = null;
-const shortRetentionPolicy = Object.freeze({ cycles: 12, intervalMs: 12000, cooldownMs: 20000 });
+const shortRetentionPolicy = Object.freeze({ cycles: 12, intervalMs: 16500, checkObservationOffsetMs: 1500, sampleOffsetMs: 11000, cooldownMs: 20000 });
 const helper = fileURLToPath(new URL('native-visual-input.ps1', import.meta.url));
 const sourceFiles = ['verify-native-visual-stability.mjs', 'native-visual-input.ps1', 'performance-policy.mjs', 'performance-fixture.mjs', 'diagnose-native-idle-memory.mjs', 'native-uia-client.mjs', 'verify-native-uia.ps1'].map(name => fileURLToPath(new URL(name, import.meta.url)));
 const format = 'agent-resource-manager-native-visual-stability-v1';
@@ -637,6 +637,9 @@ async function references(descriptor) {
 function retainedCheckHistory(dataset, checks) {
     const db = new DatabaseSync(dataset.dbPath, { readOnly: true });
     try {
+        const { count } = db.prepare("SELECT COUNT(*) AS count FROM task_history WHERE json_extract(payload, '$.action') = 'check_now'").get();
+        assert.equal(count, checks.length, 'The independent fixture contains an unexpected global check.');
+        if (!checks.length) return { jobs: 0, keysPerJob: 0, normalizedKeySha256: null };
         const get = db.prepare('SELECT payload FROM task_history WHERE id = ?');
         const keys = checks.map(({ taskId }) => {
             const row = JSON.parse(get.get(taskId)?.payload ?? 'null');
@@ -668,7 +671,7 @@ async function run(descriptor, pilot, shortRetention = false) {
     if (shortRetention) {
         assert.equal(process.env.GITHUB_ACTIONS, 'true');
         assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
-        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-short-history-pair-r2-930ec22-20261121');
+        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-global-check-control-0ac5e79-20261121');
         assert.ok(hostedRetentionReference);
         assert.equal(hash(refBytes), hostedRetentionReference.sha256);
     }
@@ -796,35 +799,50 @@ async function run(descriptor, pilot, shortRetention = false) {
                 throw new Error('The check task was not observed. The click was not replayed.');
             await sleep(30);
         } }
-        async function sample(elapsedMs) { const deadline = performance.now() + 60000; for (;;) {
+        async function sample(elapsedMs, matchedSlot = false) { const deadline = performance.now() + 60000; for (;;) {
             const value = await observe(descriptor, identity, env, 'tasks');
             if (!value.tasks.some(task => ['running', 'queued'].includes(task.status)))
                 break;
-            assert.ok(performance.now() < deadline, 'Active tasks prevent an idle sample.');
+            assert.ok(!matchedSlot && performance.now() < deadline, 'Active tasks prevent the requested idle sample.');
             await sleep(50);
         } const raw = await observe(descriptor, identity, env, 'sample'), current = await visual.call('identity'); assert.equal(raw.inputTickBefore, current.lastInputTick); assert.equal(raw.lastInputTick, current.lastInputTick); return { ...idleObservation(raw, identity, cpus().length), elapsedMs, observedAt: new Date().toISOString() }; }
         await waitState('all');
         if (shortRetention) {
             report.shortRetentionPolicy = shortRetentionPolicy;
             report.limitations.push('Short same-host diagnostic only. No result from this mode can pass or replace the 61-point convergence gate.');
+            const arm = process.env.ARM_SHORT_GLOBAL_CHECK_ARM;
+            assert.ok(['control', 'treatment'].includes(arm), 'The same-executable diagnostic requires an explicit arm.');
+            const enabled = arm === 'treatment';
+            report.globalCheckArm = arm;
+            async function intervention(phaseStart) {
+                const known = new Set((await observe(descriptor, identity, env, 'tasks')).tasks.map(task => task.id));
+                if (enabled) await click('check');
+                await sleep(phaseStart + shortRetentionPolicy.checkObservationOffsetMs - performance.now());
+                const added = (await observe(descriptor, identity, env, 'tasks')).tasks.filter(task => !known.has(task.id) && task.action === 'check_now');
+                assert.equal(added.length, Number(enabled), 'The matched check slot did not produce the required one-or-zero actual global tasks.');
+                if (enabled) report.checks.push({ taskId: added[0].id, action: added[0].action, initialStatus: added[0].status, observedAt: new Date().toISOString() });
+            }
             await cycle(0);
             const start = performance.now();
-            report.samples.push(await sample(0));
+            report.samples.push(await sample(0, true));
             for (let index = 1; index <= shortRetentionPolicy.cycles; index++) {
-                await sleep(start + index * shortRetentionPolicy.intervalMs - performance.now());
-                await check();
+                const phaseStart = start + index * shortRetentionPolicy.intervalMs;
+                await sleep(phaseStart - performance.now());
+                await intervention(phaseStart);
                 await cycle(index);
-                const value = await sample(0);
+                const sampleTime = phaseStart + shortRetentionPolicy.sampleOffsetMs;
+                await sleep(sampleTime - performance.now());
+                const value = await sample(0, true);
                 value.elapsedMs = performance.now() - start;
                 report.samples.push(value);
                 await save();
                 console.log(json({ phase: 'retention-short', sample: index, of: shortRetentionPolicy.cycles }).trim());
             }
             await sleep(shortRetentionPolicy.cooldownMs);
-            const tail = await sample(0);
+            const tail = await sample(0, true);
             tail.elapsedMs = performance.now() - start;
             report.samples.push(tail);
-            assert.equal(new Set(report.checks.map(check => check.taskId)).size, shortRetentionPolicy.cycles);
+            assert.equal(new Set(report.checks.map(check => check.taskId)).size, enabled ? shortRetentionPolicy.cycles : 0);
             report.history = retainedCheckHistory(descriptor.dataset, report.checks);
             report.status = 'short-operations-completed';
         }

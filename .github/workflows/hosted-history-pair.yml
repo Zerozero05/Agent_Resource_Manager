@@ -1,21 +1,15 @@
-name: Compare short native task history retention
+name: Compare short native memory with or without global checks
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  BEFORE_SOURCE: 'fef68f9b86e4d233fa4df8f14719434ddc94e008'
-  BEFORE_RUN_ID: '44874817264'
-  BEFORE_ARTIFACT_ID: '14695203923'
-  BEFORE_ARCHIVE_SHA256: '6582fb85b203738881241afeb6c09c1fed9ba1503769a67cff3bf59632b76745'
-  BEFORE_EXE_SHA256: '25b722cabf03dad906bbdfa3eb3f040c4085d78d5b18f1ea6b380cf85517e4ff'
-  BEFORE_BUILD_INFO_SHA256: '0b2e745f967d61d315b71ec595450f3cf3262292018e6ca30121d91338755ae6'
-  AFTER_SOURCE: '0ac5e79b7a3d1184e7602f241793f240b0609d44'
-  AFTER_RUN_ID: '44880393531'
-  AFTER_ARTIFACT_ID: '14698411078'
-  AFTER_ARCHIVE_SHA256: '5ea596eb7d95de7df46bc1929c8694e56c8c5b72f7ded2915987aefa83ce152e'
-  AFTER_EXE_SHA256: 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24'
-  AFTER_BUILD_INFO_SHA256: '4d574ba7fe6a154a6819ae9e64ab264ff98261bd272f182a6a1ffff4ceb85d2c'
+  CANDIDATE_SOURCE: '0ac5e79b7a3d1184e7602f241793f240b0609d44'
+  CANDIDATE_RUN_ID: '44880393531'
+  CANDIDATE_ARTIFACT_ID: '14698411078'
+  CANDIDATE_ARCHIVE_SHA256: '5ea596eb7d95de7df46bc1929c8694e56c8c5b72f7ded2915987aefa83ce152e'
+  CANDIDATE_EXE_SHA256: 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24'
+  CANDIDATE_BUILD_INFO_SHA256: '4d574ba7fe6a154a6819ae9e64ab264ff98261bd272f182a6a1ffff4ceb85d2c'
   REFERENCE_BRANCH: 'codex/hosted-visual-references-r3-3536ca0-20261121'
   REFERENCE_RUN_ID: '44872971103'
   REFERENCE_COMMIT: 'f65523fd5560cd4dcae1936e99aad647c9922e93'
@@ -26,8 +20,8 @@ env:
   REFERENCE_RECEIPT_SHA256: '0f71346dbe30fc00347f4866610f3bc86393c01a041e18a0057cd81b25f5cfda'
   APPROVAL_SHA256: '4e9493b679f7be75f0137900f9963fafa71c67de0d94ab99746fa88d79eda33a'
 jobs:
-  short-history-pair:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-short-history-pair-r2-930ec22-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+  short-global-check-control:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-global-check-control-0ac5e79-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 22
     defaults:
@@ -36,18 +30,14 @@ jobs:
     steps:
       - name: Require pins and an isolated interactive runner
         run: |
-          $ids = @($env:BEFORE_RUN_ID, $env:BEFORE_ARTIFACT_ID, $env:AFTER_RUN_ID, $env:AFTER_ARTIFACT_ID,
-              $env:REFERENCE_RUN_ID, $env:REFERENCE_REVIEW_ARTIFACT_ID, $env:REFERENCE_ROI_ARTIFACT_ID)
-          $commits = @($env:BEFORE_SOURCE, $env:AFTER_SOURCE, $env:REFERENCE_COMMIT)
-          $digests = @($env:BEFORE_ARCHIVE_SHA256, $env:BEFORE_EXE_SHA256, $env:BEFORE_BUILD_INFO_SHA256,
-              $env:AFTER_ARCHIVE_SHA256, $env:AFTER_EXE_SHA256, $env:AFTER_BUILD_INFO_SHA256,
+          $ids = @($env:CANDIDATE_RUN_ID, $env:CANDIDATE_ARTIFACT_ID, $env:REFERENCE_RUN_ID, $env:REFERENCE_REVIEW_ARTIFACT_ID, $env:REFERENCE_ROI_ARTIFACT_ID)
+          $commits = @($env:CANDIDATE_SOURCE, $env:REFERENCE_COMMIT)
+          $digests = @($env:CANDIDATE_ARCHIVE_SHA256, $env:CANDIDATE_EXE_SHA256, $env:CANDIDATE_BUILD_INFO_SHA256,
               $env:REFERENCE_REVIEW_ARCHIVE_SHA256, $env:REFERENCE_ROI_ARCHIVE_SHA256, $env:REFERENCE_RECEIPT_SHA256, $env:APPROVAL_SHA256)
           if (@($ids | Where-Object { $_ -cnotmatch '^[0-9]+$' }).Count -or
               @($commits | Where-Object { $_ -cnotmatch '^[0-9a-f]{40}$' }).Count -or
-              @($digests | Where-Object { $_ -cnotmatch '^[0-9a-f]{64}$' }).Count -or
-              $env:BEFORE_SOURCE -ceq $env:AFTER_SOURCE -or $env:BEFORE_RUN_ID -eq $env:AFTER_RUN_ID -or
-              $env:BEFORE_ARTIFACT_ID -eq $env:AFTER_ARTIFACT_ID -or $env:BEFORE_EXE_SHA256 -ceq $env:AFTER_EXE_SHA256) {
-              throw 'Both independent candidate archive, executable, and build-info digests and provenance pins are mandatory.'
+              @($digests | Where-Object { $_ -cnotmatch '^[0-9a-f]{64}$' }).Count) {
+              throw 'The exact candidate archive, executable, and build-info digests and provenance pins are mandatory.'
           }
           if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
               -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
@@ -61,7 +51,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - name: Verify the source pair and retrieve exact upstream artifacts
+      - name: Verify the executable source and retrieve exact upstream artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -94,22 +84,18 @@ jobs:
               }
               Expand-Archive -LiteralPath $archive -DestinationPath $destination
           }
-          $sourcePair = Read-GitHub "compare/$($env:BEFORE_SOURCE)...$($env:AFTER_SOURCE)"
-          $expectedChanges = @('CHANGELOG.md','README.md','src-tauri/src/model.rs','src-tauri/src/tasks.rs') | Sort-Object
-          $expectedCommits = @('dcdb23387b6cfb234801b31f1febf11c6852f394','930ec22649db3685ef59fc74b71d607658f844f9',$env:AFTER_SOURCE)
-          if ($sourcePair.status -cne 'ahead' -or $sourcePair.ahead_by -ne $expectedCommits.Count -or
-              ($sourcePair.commits.sha -join '|') -cne ($expectedCommits -join '|') -or
-              $sourcePair.merge_base_commit.sha -cne $env:BEFORE_SOURCE -or
-              (($sourcePair.files.filename | Sort-Object) -join '|') -cne ($expectedChanges -join '|')) {
-              throw 'The paired source commits are not the intended isolated task history change.'
-          }
-          $null = Read-Run $env:BEFORE_RUN_ID $env:BEFORE_SOURCE 'check.yml' 'push'
-          $null = Read-Run $env:AFTER_RUN_ID $env:AFTER_SOURCE 'check.yml' 'push'
+
+          $null = Read-Run $env:CANDIDATE_RUN_ID $env:CANDIDATE_SOURCE 'check.yml' 'push'
           $reference = Read-Run $env:REFERENCE_RUN_ID $env:REFERENCE_COMMIT 'hosted-visual-references.yml' 'create'
           if ($reference.head_branch -cne $env:REFERENCE_BRANCH) { throw 'Unexpected visual reference branch.' }
           $namePrefix = 'Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate'
-          Get-Artifact $env:BEFORE_RUN_ID $env:BEFORE_ARTIFACT_ID "${namePrefix}_$($env:BEFORE_SOURCE)" $env:BEFORE_ARCHIVE_SHA256 (Join-Path $env:RUNNER_TEMP 'arm-retention-before')
-          Get-Artifact $env:AFTER_RUN_ID $env:AFTER_ARTIFACT_ID "${namePrefix}_$($env:AFTER_SOURCE)" $env:AFTER_ARCHIVE_SHA256 (Join-Path $env:RUNNER_TEMP 'arm-retention-after')
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-retention-before'
+          Get-Artifact $env:CANDIDATE_RUN_ID $env:CANDIDATE_ARTIFACT_ID "${namePrefix}_$($env:CANDIDATE_SOURCE)" $env:CANDIDATE_ARCHIVE_SHA256 $candidate
+          $secondCandidate = Join-Path $env:RUNNER_TEMP 'arm-retention-after'
+          New-Item -ItemType Directory -Path $secondCandidate | Out-Null
+          foreach ($name in 'agent-resource-manager.exe','BUILD_INFO.json') {
+              Copy-Item -LiteralPath (Join-Path $candidate $name) -Destination (Join-Path $secondCandidate $name)
+          }
           Get-Artifact $env:REFERENCE_RUN_ID $env:REFERENCE_REVIEW_ARTIFACT_ID "Agent_Resource_Manager_visual_references_$($env:REFERENCE_RUN_ID)_1" $env:REFERENCE_REVIEW_ARCHIVE_SHA256 (Join-Path $env:RUNNER_TEMP 'arm-visual-approved-review')
           Get-Artifact $env:REFERENCE_RUN_ID $env:REFERENCE_ROI_ARTIFACT_ID "Agent_Resource_Manager_visual_reference_rois_$($env:REFERENCE_RUN_ID)_1" $env:REFERENCE_ROI_ARCHIVE_SHA256 (Join-Path $env:RUNNER_TEMP 'arm-visual-approved-rois')
       - name: Run both owned processes with the same short physical workload
@@ -129,7 +115,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Agent_Resource_Manager_short_history_pair_${{ github.run_id }}_${{ github.run_attempt }}
+          name: Agent_Resource_Manager_short_global_check_control_${{ github.run_id }}_${{ github.run_attempt }}
           path: ${{ runner.temp }}/arm-retention-result/
           if-no-files-found: warn
           retention-days: 14
