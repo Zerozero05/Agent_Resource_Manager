@@ -4,22 +4,22 @@ permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '44866595695'
-  CANDIDATE_SOURCE: 3536ca0e5cf7c897b860b5ce32d8b415904b9e45
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_3536ca0e5cf7c897b860b5ce32d8b415904b9e45
-  CANDIDATE_ARTIFACT_ID: '14692802883'
-  CANDIDATE_SHA256: aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7
-  CANDIDATE_ARCHIVE_SHA256: 6b8afaf8ca811c866b1ecb46ae778bf1fc1c8c715e176b32101d5a3f0f2ab2a6
-  FIRST_SEARCH_RUN_ID: '44868600019'
-  FIRST_SEARCH_ARTIFACT_ID: '14692619560'
-  FIRST_SEARCH_SHA256: dec36d0d17abb799a05a39370b67ac5ae6f82300f20af566cfbf51d9c839707c
-  FIRST_SEARCH_ARCHIVE_SHA256: 5614ff93c44b8aba76b45e2ad6ebcb70caa27a7cc28465bb01e1054d46f4fc9e
-  FIRST_SEARCH_FIXTURE_SHA256: bd3bb8c680b1b7578d376583ab4b416c88ee47b66ae66b813bee455ca31ba3a1
+  CANDIDATE_RUN_ID: '44880393531'
+  CANDIDATE_SOURCE: 0ac5e79b7a3d1184e7602f241793f240b0609d44
+  CANDIDATE_ARTIFACT: 'Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_0ac5e79b7a3d1184e7602f241793f240b0609d44'
+  CANDIDATE_ARTIFACT_ID: '14698411078'
+  CANDIDATE_SHA256: 'ff646e533f23749f96f09f6d79b7fad650bd035931b851b2710315eda64fdd24'
+  CANDIDATE_ARCHIVE_SHA256: '5ea596eb7d95de7df46bc1929c8694e56c8c5b72f7ded2915987aefa83ce152e'
+  FIRST_SEARCH_RUN_ID: '44881951895'
+  FIRST_SEARCH_ARTIFACT_ID: '14698575874'
+  FIRST_SEARCH_SHA256: 'ca3151febebdfbf839daa5374ea79a62fba3e37f3cc6cb19586e2a7a76d732db'
+  FIRST_SEARCH_ARCHIVE_SHA256: '93cefed53acdf4a06ff84899fcf0bd3d37fe80d305cf448ead016b6a4acfc237'
+  FIRST_SEARCH_FIXTURE_SHA256: 'bd3bb8c680b1b7578d376583ab4b416c88ee47b66ae66b813bee455ca31ba3a1'
   FIRST_SEARCH_EDIT_BOUNDS: '411,294,501,52'
   FIRST_SEARCH_RESULT_BOUNDS: '433,671,201,31'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-r3-3536ca0-20261121' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-0ac5e79-20261121' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
@@ -36,7 +36,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ($env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+          $expectedCandidateName = "Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_$env:CANDIDATE_SOURCE"
+          if ($env:CANDIDATE_ARTIFACT -cne $expectedCandidateName -or
+              $env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
               $env:CANDIDATE_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'Pin the independently verified candidate artifact ID and executable SHA256 before reference generation.'
           }
