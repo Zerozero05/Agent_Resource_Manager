@@ -171,16 +171,20 @@ public sealed class NativeVisualInput : IDisposable {
   public object Identity(){CheckProcess();return new{pid=process.Id,creationFileTime=created,windowHandle=window.ToInt64(),left=rectangle.l,top=rectangle.t,width=rectangle.r-rectangle.l,height=rectangle.b-rectangle.t,dpi=dpi,captureBounds=new[]{captureRectangle.l-rectangle.l,captureRectangle.t-rectangle.t,captureRectangle.r-captureRectangle.l,captureRectangle.b-captureRectangle.t},lastInputTick=inputTick,foreground=GetAncestor(GetForegroundWindow(),2)==window};}
   public object Observe(){Guard();return Identity();}
   void Paint(){if(DwmFlush()!=0||DwmFlush()!=0)throw new InvalidOperationException("Desktop composition failed.");}
-  void Send(INPUT[] values) {
+  (long start, long end) Send(INPUT[] values, bool waitForPaint=true) {
     Guard();
     foreach(int key in new[]{16,17,18,91,92})
       if((GetAsyncKeyState(key)&0x8000)!=0)
         throw new InvalidOperationException("A modifier key is already pressed. No input was sent.");
-    if(SendInput((uint)values.Length,values,Marshal.SizeOf(typeof(INPUT)))!=(uint)values.Length)
-      throw new InvalidOperationException("Native input did not complete.");
+    int inputSize=Marshal.SizeOf(typeof(INPUT));
+    long start=waitForPaint?0:Stopwatch.GetTimestamp();
+    uint sent=SendInput((uint)values.Length,values,inputSize);
+    long end=waitForPaint?0:Stopwatch.GetTimestamp();
+    if(sent!=(uint)values.Length)throw new InvalidOperationException("Native input did not complete.");
     inputTick=ReadInputTick();
-    Paint();
+    if(waitForPaint)Paint();
     Guard();
+    return(start,end);
   }
   static INPUT Key(ushort vk,bool up=false){return new INPUT{type=1,value=new UNION{key=new KEY{vk=vk,flags=up?2u:0u}}};}
   MOUSE PointMovement(int x,int y) {
@@ -218,20 +222,29 @@ public sealed class NativeVisualInput : IDisposable {
     SendWheel(x,y,delta);
     return new{wheelDelta=delta,x=x,y=y,lastInputTick=inputTick};
   }
-  public object Text(string value) {
-    Guard();
+  static void ValidateSearch(string value) {
     if(value==null||value.Length!=15||!value.StartsWith("perf-skill-",StringComparison.Ordinal)||
        !Int32.TryParse(value.Substring(11),out int index)||index<0||index>65||value!="perf-skill-"+index.ToString("0000"))
       throw new InvalidOperationException("Only the frozen synthetic search values are allowed.");
+  }
+  void GuardSearchFocus() {
     var info=new GUI{size=(uint)Marshal.SizeOf(typeof(GUI))};
     if(!GetGUIThreadInfo(0,ref info)||info.focus==IntPtr.Zero||GetAncestor(info.focus,2)!=window)
       throw new InvalidOperationException("Actual keyboard focus is outside the owned window.");
+  }
+  static INPUT[] SearchKeys(string value) {
     var keys=new System.Collections.Generic.List<INPUT>{Key(17),Key(65),Key(65,true),Key(17,true)};
     foreach(char character in value) {
       keys.Add(new INPUT{type=1,value=new UNION{key=new KEY{scan=character,flags=4}}});
       keys.Add(new INPUT{type=1,value=new UNION{key=new KEY{scan=character,flags=6}}});
     }
-    Send(keys.ToArray());
+    return keys.ToArray();
+  }
+  public object Text(string value) {
+    Guard();
+    ValidateSearch(value);
+    GuardSearchFocus();
+    Send(SearchKeys(value));
     return new{typed=value,method="SendInput-Unicode-synthetic-search-only",imeEvidence=false,lastInputTick=inputTick};
   }
   void Box(int[] box){if(box==null||box.Length!=4||box[0]<0||box[1]<0||box[2]<2||box[3]<2||box[0]+box[2]>rectangle.r-rectangle.l||box[1]+box[3]>rectangle.b-rectangle.t||(long)box[2]*box[3]>2000000)throw new InvalidOperationException("Reference ROI is outside the fixed owned frame.");}
@@ -277,14 +290,16 @@ public sealed class NativeVisualInput : IDisposable {
       return bitmap;
     } catch {bitmap.Dispose();throw;}
   }
-  static byte[] Pixels(Bitmap bitmap) {
+  static byte[] Pixels(Bitmap bitmap,byte[] bytes=null) {
     var area=new Rectangle(0,0,bitmap.Width,bitmap.Height);
     var data=bitmap.LockBits(area,ImageLockMode.ReadOnly,PixelFormat.Format32bppArgb);
     try {
-      var bytes=new byte[bitmap.Width*bitmap.Height*4];
+      bool normalizeAlpha=bytes==null;
+      bytes=bytes??new byte[bitmap.Width*bitmap.Height*4];
       for(int row=0;row<bitmap.Height;row++)
         Marshal.Copy(IntPtr.Add(data.Scan0,row*data.Stride),bytes,row*bitmap.Width*4,bitmap.Width*4);
-      for(int index=3;index<bytes.Length;index+=4)bytes[index]=255;
+      if(normalizeAlpha)
+        for(int index=3;index<bytes.Length;index+=4)bytes[index]=255;
       return bytes;
     } finally {bitmap.UnlockBits(data);}
   }
@@ -311,6 +326,149 @@ public sealed class NativeVisualInput : IDisposable {
         return new{matched=differences==0,differingBytes=differences,pixelSha256=Convert.ToHexString(SHA256.HashData(right)).ToLowerInvariant(),lastInputTick=inputTick};
       }
     }
+  }
+  public sealed class SearchRoi {
+    internal readonly string role,path,sha256;
+    internal readonly int[] box;
+    public SearchRoi(string role,string path,int[] box,string sha256) {
+      this.role=role;this.path=path;this.box=box;this.sha256=sha256;
+    }
+  }
+  sealed class SearchAnchor {
+    internal readonly int[] box;
+    internal readonly byte[] pixels;
+    internal SearchAnchor(int[] box,byte[] pixels) {this.box=box;this.pixels=pixels;}
+  }
+  sealed class SearchFrame {
+    internal readonly long start,end;
+    internal SearchFrame(long start,long end) {this.start=start;this.end=end;}
+    internal object Receipt(){return new{startQpc=start.ToString(),endQpc=end.ToString()};}
+  }
+  SearchAnchor[] ReadSearchAnchors(SearchRoi[] rois) {
+    string[] roles={"result-title","result-table","result-count"};
+    if(rois==null||rois.Length!=roles.Length)
+      throw new InvalidOperationException("Exactly three frozen search ROIs are required.");
+    var anchors=new SearchAnchor[roles.Length];
+    for(int index=0;index<roles.Length;index++) {
+      SearchRoi roi=rois[index];
+      if(roi==null||roi.role!=roles[index])throw new InvalidOperationException("Frozen search ROI roles or order changed.");
+      Box(roi.box);
+      if((long)roi.box[0]+roi.box[2]>rectangle.r-rectangle.l||
+         (long)roi.box[1]+roi.box[3]>rectangle.b-rectangle.t)
+        throw new InvalidOperationException("Frozen search ROI is outside the owned frame.");
+      using(var stream=new FileStream(FilePath(roi.path),FileMode.Open,FileAccess.Read,FileShare.Read)) {
+        if(Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant()!=roi.sha256)
+          throw new InvalidOperationException("Frozen search reference bytes changed.");
+        stream.Position=0;
+        using(var image=new Bitmap(stream)) {
+          if(image.Width!=roi.box[2]||image.Height!=roi.box[3])
+            throw new InvalidOperationException("Frozen search reference dimensions changed.");
+          anchors[index]=new SearchAnchor(roi.box,Pixels(image));
+        }
+      }
+    }
+    return anchors;
+  }
+  static int[] SearchBounds(SearchAnchor[] previous,SearchAnchor[] target) {
+    int left=int.MaxValue,top=int.MaxValue,right=0,bottom=0;
+    foreach(SearchAnchor[] group in new[]{previous,target})
+      foreach(SearchAnchor anchor in group) {
+        int[] box=anchor.box;
+        left=Math.Min(left,box[0]);top=Math.Min(top,box[1]);
+        right=Math.Max(right,box[0]+box[2]);bottom=Math.Max(bottom,box[1]+box[3]);
+      }
+    return new[]{left,top,right-left,bottom-top};
+  }
+  // Compare visible RGB of every anchor in one copied rectangle.
+  static bool SearchMatches(byte[] frame,int[] bounds,SearchAnchor[] anchors) {
+    foreach(SearchAnchor anchor in anchors) {
+      int[] box=anchor.box;
+      int stride=box[2]*4;
+      for(int row=0;row<box[3];row++) {
+        int offset=((box[1]-bounds[1]+row)*bounds[2]+box[0]-bounds[0])*4;
+        for(int channel=0;channel<stride;channel++)
+          if(channel%4!=3&&frame[offset+channel]!=anchor.pixels[row*stride+channel])return false;
+      }
+    }
+    return true;
+  }
+  SearchFrame CaptureSearchFrame(int[] bounds,Bitmap bitmap,Graphics graphics,byte[] pixels) {
+    Unobscured(bounds);
+    // Observe after a compositor boundary without the normal action's double flush.
+    if(DwmFlush()!=0)throw new InvalidOperationException("Desktop composition failed.");
+    Unobscured(bounds);
+    long start=Stopwatch.GetTimestamp();
+    graphics.CopyFromScreen(rectangle.l+bounds[0],rectangle.t+bounds[1],0,0,bitmap.Size);
+    long end=Stopwatch.GetTimestamp();
+    Unobscured(bounds);
+    Pixels(bitmap,pixels);
+    return new SearchFrame(start,end);
+  }
+  public object SearchPaint(string value,SearchRoi[] previousRois,SearchRoi[] targetRois) {
+    Guard();
+    ValidateSearch(value);
+    SearchAnchor[] previous=ReadSearchAnchors(previousRois),target=ReadSearchAnchors(targetRois);
+    int[] bounds=SearchBounds(previous,target);
+    Unobscured(bounds);
+    INPUT[] input=SearchKeys(value);
+    var pixels=new byte[bounds[2]*bounds[3]*4];
+    using(var bitmap=new Bitmap(bounds[2],bounds[3],PixelFormat.Format32bppArgb))
+    using(var graphics=Graphics.FromImage(bitmap)) {
+      SearchFrame initial=CaptureSearchFrame(bounds,bitmap,graphics,pixels);
+      if(!SearchMatches(pixels,bounds,previous)||SearchMatches(pixels,bounds,target))
+        throw new InvalidOperationException("The previous search must be visible and the target absent before any input.");
+      GuardSearchFocus();
+      var dispatch=Send(input,false);
+      const int timeoutMs=4000;
+      const int maxObservations=160;
+      long deadline=dispatch.start+Stopwatch.Frequency*timeoutMs/1000;
+      SearchFrame lastMiss=null,firstHit=null;
+      for(int count=1;count<=maxObservations&&Stopwatch.GetTimestamp()<deadline;count++) {
+        SearchFrame frame=CaptureSearchFrame(bounds,bitmap,graphics,pixels);
+        if(frame.end>deadline)break;
+        bool matches=SearchMatches(pixels,bounds,target);
+        if(firstHit!=null) {
+          if(!matches)throw new InvalidOperationException("The first visible search result failed the independent confirmation.");
+          Guard();
+          long lower=lastMiss==null?dispatch.start:Math.Max(dispatch.start,lastMiss.start);
+          return new{typed=value,qpcFrequency=Stopwatch.Frequency.ToString(),inputStartedQpc=dispatch.start.ToString(),
+            inputReturnedQpc=dispatch.end.ToString(),initial=initial.Receipt(),lastMiss=lastMiss?.Receipt(),
+            firstHit=firstHit.Receipt(),confirmation=frame.Receipt(),observations=count,
+            lowerBoundMs=(lower-dispatch.start)*1000.0/Stopwatch.Frequency,
+            upperBoundMs=(firstHit.end-dispatch.start)*1000.0/Stopwatch.Frequency,foreground=true,lastInputTick=inputTick};
+        }
+        if(matches)firstHit=frame;
+        else lastMiss=frame;
+      }
+    }
+    throw new TimeoutException("The frozen search result and its independent confirmation were not observed within the native bound.");
+  }
+  public static int CheckSearchPaintComparator() {
+    var bounds=new[]{4,8,4,3};
+    var pixels=new byte[4*3*4];
+    var target=new[]{new SearchAnchor(new[]{4,8,2,1},new byte[8]),
+      new SearchAnchor(new[]{6,9,2,1},new byte[8]),new SearchAnchor(new[]{5,10,2,1},new byte[8])};
+    if(!SearchMatches(pixels,bounds,target))throw new InvalidOperationException("Identical composed RGB must match.");
+    pixels[3]=255;
+    if(!SearchMatches(pixels,bounds,target))throw new InvalidOperationException("Alpha does not describe visible RGB.");
+    foreach(int rgb in new[]{0,24,36}) {
+      pixels[rgb]=1;
+      if(SearchMatches(pixels,bounds,target))throw new InvalidOperationException("Every ROI must match in the same rectangle.");
+      pixels[rgb]=0;
+    }
+    pixels[8]=1;
+    if(!SearchMatches(pixels,bounds,target))throw new InvalidOperationException("Pixels outside the frozen ROIs must be ignored.");
+    int[] union=SearchBounds(new[]{new SearchAnchor(new[]{1,9,2,2},new byte[16])},target);
+    if(union[0]!=1||union[1]!=8||union[2]!=7||union[3]!=3)
+      throw new InvalidOperationException("The copied rectangle must cover both sets of exact search ROIs.");
+    using(var bitmap=new Bitmap(4,3,PixelFormat.Format32bppArgb))
+    using(var graphics=Graphics.FromImage(bitmap)) {
+      graphics.Clear(Color.Black);
+      byte[] reused=Pixels(bitmap,pixels);
+      if(!Object.ReferenceEquals(reused,pixels)||!SearchMatches(reused,bounds,target))
+        throw new InvalidOperationException("Sampled bitmap decoding must reuse the buffer and preserve visible RGB.");
+    }
+    return 8;
   }
   public object Sheet(string path,string[] names,string[] paths) {
     Guard();path=FilePath(path);
@@ -347,8 +505,20 @@ if ($CompileOnly) {
   try { [void][NativeVisualInput]::DifferingPixelBytes([byte[]]@(1,2,3),[byte[]]@(1,2,3)) }
   catch { $rejected=$true }
   if (-not $rejected) { throw 'The comparator accepted an incomplete pixel buffer.' }
-  @{compiled=$true;pixelComparatorCases=3;windowOperationsPerformed=$false;temporary=[IO.Path]::GetTempPath()}|ConvertTo-Json -Compress
+  $searchPaintComparatorCases=[NativeVisualInput]::CheckSearchPaintComparator()
+  @{compiled=$true;pixelComparatorCases=3;searchPaintComparatorCases=$searchPaintComparatorCases;windowOperationsPerformed=$false;temporary=[IO.Path]::GetTempPath()}|ConvertTo-Json -Compress
   exit 0
+}
+function Read-SearchRois($Rois) {
+  if($Rois -isnot [array] -or $Rois.Count -ne 3) {throw 'Exactly three frozen search ROIs are required'}
+  foreach($roi in $Rois) {
+    if($roi.role -isnot [string] -or $roi.path -isnot [string] -or
+       $roi.sha256 -cnotmatch '^[0-9a-f]{64}$' -or $roi.box -isnot [array] -or $roi.box.Count -ne 4 -or
+       @($roi.box | Where-Object { $_ -isnot [long] -or $_ -lt 0 -or $_ -gt [int]::MaxValue }).Count -ne 0) {
+      throw 'Each search ROI requires a role, fixture PNG path, exact integer box and SHA-256'
+    }
+    [NativeVisualInput+SearchRoi]::new($roi.role,$roi.path,[int[]]$roi.box,[string]$roi.sha256)
+  }
 }
 $session=$null
 try {
@@ -369,6 +539,12 @@ try {
         }
         'scrollDocument' {$session.ScrollDocument([int]$request.x,[int]$request.y)}
         'text' {$session.Text([string]$request.value)}
+        'searchPaint' {
+          if($request.value -isnot [string]) {throw 'A frozen search value is required'}
+          $previousRois=[NativeVisualInput+SearchRoi[]]@(Read-SearchRois $request.previousRois)
+          $targetRois=[NativeVisualInput+SearchRoi[]]@(Read-SearchRois $request.targetRois)
+          $session.SearchPaint($request.value,$previousRois,$targetRois)
+        }
         'save' {$session.Save([string]$request.path,[int[]]$request.box)}
         'match' {$session.Match([string]$request.path,[int[]]$request.box,[string]$request.sha256)}
         'sheet' {$session.Sheet([string]$request.path,[string[]]$request.names,[string[]]$request.paths)}

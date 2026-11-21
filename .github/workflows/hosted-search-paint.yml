@@ -1,0 +1,138 @@
+name: Measure visible native search response during a real global check
+on: create
+permissions:
+  contents: read
+  actions: read
+env:
+  REFERENCE_BRANCH: 'codex/hosted-visual-references-37f83f1-20261121'
+  REFERENCE_RUN_ID: '44891823197'
+  REFERENCE_COMMIT: 'f7447a0152edc42d131ec866e14c76023e10fdeb'
+  REFERENCE_REVIEW_ARTIFACT_ID: '14702596823'
+  REFERENCE_ROI_ARTIFACT_ID: '14702078337'
+  REFERENCE_RECEIPT_SHA256: 'dbbecddebfe33291ab1c99b874befabf67455ebc540fd9e9b0b03306cdc525aa'
+  CANDIDATE_ARTIFACT_ID: '14702350758'
+  CANDIDATE_SHA256: '79544e0b78cd0cb157d2601f48e0812158a428569f5b34d07556f478494f133e'
+  CANDIDATE_ARCHIVE_SHA256: '73e82438bd659c83329c76adddbfe2adb4e25b9c18243657aea8bcc7988f72e5'
+  CANDIDATE_BUILD_INFO_SHA256: 'c1468047a7ec2ea7557e274c516f88b25aafaaf36f3d0fb9b28529abc3b15536'
+  REFERENCE_REVIEW_ARCHIVE_SHA256: 'f705bbd553009f47b3b8321ff18810be42b4aaab8c06831ca7461f66167dd4fb'
+  REFERENCE_ROI_ARCHIVE_SHA256: 'c41735998b75561e0c94c4e599357c8cafdd33f0ba4da33d1582b5da4e8ebb24'
+  APPROVAL_SHA256: 'e0716ff3da002c34bf7b39f42a088a9cc154d69f75ca9b51b9a30c53b57dc5fb'
+jobs:
+  search-paint:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-search-paint-f7447a0-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require frozen references and the recorded visual review
+        run: |
+          if ($env:REFERENCE_BRANCH -cnotmatch '^codex/hosted-visual-references-37f83f1-20261121$' -or
+              $env:REFERENCE_RUN_ID -cnotmatch '^[0-9]+$' -or
+              $env:REFERENCE_COMMIT -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:REFERENCE_REVIEW_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or
+              $env:REFERENCE_ROI_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or
+              $env:REFERENCE_RECEIPT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or
+              $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:CANDIDATE_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:CANDIDATE_BUILD_INFO_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:REFERENCE_REVIEW_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:REFERENCE_ROI_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:APPROVAL_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Pin candidate and reference provenance and complete a review of the rendered screenshots before any retrieval.'
+          }
+          $approvalPath = 'outputs/v1-validation/hosted-visual-approval-37f83f1.json'
+          if (-not (Test-Path -LiteralPath $approvalPath -PathType Leaf)) { throw 'The exact visual review file is required.' }
+          $approval = Get-Item -LiteralPath $approvalPath
+          if ($approval.PSIsContainer -or ($approval.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+              (Get-FileHash -LiteralPath $approval.FullName -Algorithm SHA256).Hash -ine $env:APPROVAL_SHA256) {
+            throw 'The visual review digest does not match this workflow.'
+          }
+          $review = Get-Content -Raw -LiteralPath $approval.FullName | ConvertFrom-Json
+          if ($review.reviewedBy -cne 'root' -or $review.visualReviewConfirmed -ne $true -or
+              $review.referenceSha256 -cnotmatch '^[a-f0-9]{64}$' -or @($review.reviewedStates).Count -ne 72) {
+            throw 'Review authority, scope, or reference binding is absent.'
+          }
+          if ((git rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'The exact diagnostic checkout is required.' }
+          $wrapper = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-search-paint-wrapper')
+          $diagnostic = 'scripts/verify-native-search-paint.mjs'
+          $native = 'scripts/native-visual-input.ps1'
+          Copy-Item -LiteralPath 'scripts/run-hosted-search-paint.ps1','scripts/quit-physical-memory-session.ps1',$diagnostic,$native -Destination $wrapper.FullName
+          [ordered]@{
+            workflowCommit=$env:GITHUB_SHA
+            driverSha256=(Get-FileHash -LiteralPath $diagnostic -Algorithm SHA256).Hash.ToLowerInvariant()
+            nativeSha256=(Get-FileHash -LiteralPath $native -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $wrapper.FullName 'diagnostic-inputs.json') -Encoding utf8NoBOM
+          Copy-Item -LiteralPath $approval.FullName -Destination (Join-Path $wrapper.FullName 'visual-approval.json')
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.REFERENCE_COMMIT }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify and retrieve only the pinned reference and candidate artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $candidateRun = '44889635017'
+          $candidateCommit = '37f83f135f9fd8facd90255fa33f58d534f8364d'
+          $candidateSha = $env:CANDIDATE_SHA256
+          $candidateArchiveSha = $env:CANDIDATE_ARCHIVE_SHA256
+          function Read-Run([string]$id, [string]$commit, [string]$workflow, [string]$event) {
+            $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$id" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $run.conclusion -cne 'success' -or $run.status -cne 'completed' -or
+                $run.head_sha -cne $commit -or $run.path -cne ".github/workflows/$workflow" -or $run.event -cne $event -or $run.run_attempt -ne 1) {
+              throw 'The upstream job does not match the exact successful attempt.'
+            }
+            return $run
+          }
+          function Get-Artifact([string]$run, [string]$id, [string]$name, [string]$target, [string]$archiveSha = '') {
+            $response = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$run/artifacts" | ConvertFrom-Json
+            $match = @($response.artifacts | Where-Object { $_.name -ceq $name -and $_.id -eq $id -and -not $_.expired })
+            if ($LASTEXITCODE -ne 0 -or $match.Count -ne 1 -or (Test-Path -LiteralPath $target) -or
+                ($archiveSha -and $match[0].digest -cne "sha256:$archiveSha")) { throw 'A pinned upstream artifact is unavailable.' }
+            gh run download $run --repo $env:GITHUB_REPOSITORY --name $name --dir $target
+            if ($LASTEXITCODE -ne 0) { throw 'A pinned upstream artifact could not be read.' }
+          }
+          $refs = Read-Run $env:REFERENCE_RUN_ID $env:REFERENCE_COMMIT 'hosted-visual-references.yml' 'create'
+          if ($refs.head_branch -cne $env:REFERENCE_BRANCH) { throw 'Unexpected reference source branch.' }
+          $null = Read-Run $candidateRun $candidateCommit 'check.yml' 'push'
+          $review = Join-Path $env:RUNNER_TEMP 'arm-visual-approved-review'
+          Get-Artifact $env:REFERENCE_RUN_ID $env:REFERENCE_REVIEW_ARTIFACT_ID "Agent_Resource_Manager_visual_references_$($env:REFERENCE_RUN_ID)_1" $review $env:REFERENCE_REVIEW_ARCHIVE_SHA256
+          $rois = Join-Path $env:RUNNER_TEMP 'arm-visual-approved-rois'
+          Get-Artifact $env:REFERENCE_RUN_ID $env:REFERENCE_ROI_ARTIFACT_ID "Agent_Resource_Manager_visual_reference_rois_$($env:REFERENCE_RUN_ID)_1" $rois $env:REFERENCE_ROI_ARCHIVE_SHA256
+          $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
+          Get-Artifact $candidateRun $env:CANDIDATE_ARTIFACT_ID "Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_$candidateCommit" $candidate $candidateArchiveSha
+          $source = Join-Path $candidate 'BUILD_INFO.json'
+          $originalBuildInfoSha256 = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($originalBuildInfoSha256 -cne $env:CANDIDATE_BUILD_INFO_SHA256) { throw 'The original BUILD_INFO.json does not match the independently verified digest.' }
+          $info = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+          $digest = (Get-FileHash -LiteralPath (Join-Path $candidate 'agent-resource-manager.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $candidateSha -or $info.executableSha256 -cne $digest -or $info.sourceCommit -cne $candidateCommit -or
+              $info.workflowRunId -ne $candidateRun -or $info.workflowRunAttempt -ne 1 -or $info.repository -cne $env:GITHUB_REPOSITORY -or
+              $info.version -cne '0.3.0-dev.1') { throw 'The candidate artifact identity changed.' }
+          $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue $originalBuildInfoSha256
+          $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+      - name: Rehydrate the frozen fixture and collect bounded visible-search samples
+        timeout-minutes: 10
+        run: |
+          $wrapper = Join-Path $env:RUNNER_TEMP 'arm-search-paint-wrapper'
+          & (Join-Path $wrapper 'run-hosted-search-paint.ps1') -ReviewBundle (Join-Path $env:RUNNER_TEMP 'arm-visual-approved-review') `
+            -RoiBundle (Join-Path $env:RUNNER_TEMP 'arm-visual-approved-rois') -ApprovalFile (Join-Path $wrapper 'visual-approval.json') `
+            -ApprovalSha256 $env:APPROVAL_SHA256 -ReferenceReceiptSha256 $env:REFERENCE_RECEIPT_SHA256 -ReferenceCommit $env:REFERENCE_COMMIT `
+            -ReferenceRunId $env:REFERENCE_RUN_ID
+      - name: Preserve only the synthetic diagnostic and verified exit evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Agent_Resource_Manager_search_paint_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-search-paint-result/
+          if-no-files-found: warn
+          retention-days: 14
