@@ -1,5 +1,5 @@
 //! Background operations share one durable state writer, never a long I/O lock.
-use crate::model::{now, Manager, ManagerRuntime, State, TaskHistoryRow};
+use crate::model::{now, Manager, ManagerRuntime, State, TaskHistoryRow, TaskHistoryWrite};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
@@ -198,6 +198,7 @@ impl Task {
 
 struct Job {
     task: Task,
+    history_revision: u64,
     cancel: Arc<AtomicBool>,
     completion: Completion,
     visible: bool,
@@ -298,7 +299,7 @@ fn retention_action(action: &str) -> &'static str {
         _ => "other",
     }
 }
-fn history_records(jobs: &BTreeMap<String, Job>) -> Vec<TaskHistoryRow> {
+fn history_jobs(jobs: &BTreeMap<String, Job>) -> Vec<&Job> {
     let mut terminal: Vec<_> = jobs
         .values()
         .filter(|job| job.visible && job.task.terminal())
@@ -310,13 +311,24 @@ fn history_records(jobs: &BTreeMap<String, Job>) -> Vec<TaskHistoryRow> {
             .cmp(&a.task.finished_at.as_deref())
     });
     terminal.truncate(HISTORY_LIMIT);
-    let mut records: Vec<_> = terminal.iter().map(|job| job.task.history_row()).collect();
-    records.extend(
+    terminal.extend(
         jobs.values()
-            .filter(|job| job.visible && !job.task.terminal())
-            .map(|job| job.task.history_row()),
+            .filter(|job| job.visible && !job.task.terminal()),
     );
-    records
+    terminal
+}
+
+fn history_records(jobs: &BTreeMap<String, Job>) -> Vec<TaskHistoryRow> {
+    history_jobs(jobs)
+        .into_iter()
+        .map(|job| job.task.history_row())
+        .collect()
+}
+
+#[derive(Default)]
+struct CommittedHistory {
+    data_version: Option<i64>,
+    terminal_revisions: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -344,7 +356,7 @@ pub(crate) struct TaskSystem {
     events: Mutex<Option<EventSink>>,
     closing: AtomicBool,
     resource_automation_running: AtomicBool,
-    history_lock: Mutex<()>,
+    history_lock: Mutex<CommittedHistory>,
 }
 
 impl TaskSystem {
@@ -377,6 +389,7 @@ impl TaskSystem {
                 task.id.clone(),
                 Job {
                     task,
+                    history_revision: 0,
                     cancel: Arc::new(AtomicBool::new(false)),
                     completion: Arc::new((Mutex::new(None), Condvar::new())),
                     visible: true,
@@ -396,7 +409,7 @@ impl TaskSystem {
             events: Mutex::new(None),
             closing: AtomicBool::new(false),
             resource_automation_running: AtomicBool::new(false),
-            history_lock: Mutex::new(()),
+            history_lock: Mutex::new(CommittedHistory::default()),
         });
         {
             let manager = service
@@ -534,7 +547,7 @@ impl TaskSystem {
         pane_id: &str,
         window_label: &str,
     ) -> Result<(), String> {
-        let _history = self
+        let mut history = self
             .history_lock
             .lock()
             .map_err(|_| "Task history lock failed")?;
@@ -560,6 +573,7 @@ impl TaskSystem {
             }
             return Err(error);
         }
+        *history = CommittedHistory::default();
         Ok(())
     }
     pub(crate) fn background(
@@ -956,6 +970,7 @@ impl TaskSystem {
                 id.clone(),
                 Job {
                     task,
+                    history_revision: 0,
                     cancel: cancel.clone(),
                     completion: Arc::new((Mutex::new(None), Condvar::new())),
                     visible,
@@ -1514,6 +1529,9 @@ impl TaskSystem {
     fn change(&self, id: &str, change: impl FnOnce(&mut Task)) {
         if let Some(job) = self.jobs.lock().expect("task registry lock").get_mut(id) {
             change(&mut job.task);
+            if job.task.terminal() {
+                job.history_revision += 1;
+            }
         }
         self.emit(id);
     }
@@ -1530,18 +1548,59 @@ impl TaskSystem {
         }
     }
     fn persist_history(&self) -> Result<(), String> {
-        let _history = self
+        let mut history = self
             .history_lock
             .lock()
             .map_err(|_| "Task history lock failed")?;
-        let records = {
+        let data_version = history.data_version;
+        if self.persist_history_snapshot(&mut history, data_version)? {
+            return Ok(());
+        }
+        // A changed database or a missing archived row needs a full snapshot.
+        if self.persist_history_snapshot(&mut history, None)? {
+            return Ok(());
+        }
+        Err("Unable to reconcile task history".into())
+    }
+    fn persist_history_snapshot(
+        &self,
+        history: &mut CommittedHistory,
+        data_version: Option<i64>,
+    ) -> Result<bool, String> {
+        let (retained, records, terminal_revisions) = {
             let jobs = self.jobs.lock().map_err(|_| "Task registry lock failed")?;
-            history_records(&jobs)
+            let mut retained = BTreeSet::new();
+            let mut records = vec![];
+            let mut terminal_revisions = BTreeMap::new();
+            for job in history_jobs(&jobs) {
+                let id = &job.task.id;
+                retained.insert(id.clone());
+                if job.task.terminal() {
+                    terminal_revisions.insert(id.clone(), job.history_revision);
+                    if data_version.is_some()
+                        && history.terminal_revisions.get(id) == Some(&job.history_revision)
+                    {
+                        continue;
+                    }
+                }
+                // Keep the latest progress of every visible active job.
+                records.push(job.task.history_row());
+            }
+            (retained, records, terminal_revisions)
         };
-        self.manager
+        let saved = self
+            .manager
             .lock()
             .map_err(|_| "Manager state lock failed")?
-            .store_task_history_rows(&records)
+            .store_task_history_rows(&retained, &records, data_version)?;
+        let TaskHistoryWrite::Saved(data_version) = saved else {
+            return Ok(false);
+        };
+        *history = CommittedHistory {
+            data_version,
+            terminal_revisions,
+        };
+        Ok(true)
     }
     fn persist_visible(&self, id: &str) -> Result<(), String> {
         let visible = self
@@ -3515,6 +3574,7 @@ mod tests {
         task.resources = resources.into();
         Job {
             task,
+            history_revision: 0,
             cancel: Arc::new(AtomicBool::new(false)),
             completion: Arc::new((Mutex::new(Some(Ok(result))), Condvar::new())),
             visible: true,
@@ -6351,6 +6411,85 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
+    }
+
+    #[test]
+    fn durable_history_delta_retries_changes_and_repairs_external_rows() {
+        let (dir, service) = fixture();
+        let db = rusqlite::Connection::open(dir.path().join("manager.sqlite3")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE history_insert_attempts (id TEXT NOT NULL);
+             CREATE TRIGGER record_history_insert BEFORE INSERT ON task_history
+                 BEGIN INSERT INTO history_insert_attempts VALUES (NEW.id); END;
+             CREATE TRIGGER reject_history_insert BEFORE INSERT ON task_history
+                 WHEN NEW.id='zz-break-write'
+                 BEGIN SELECT RAISE(ABORT,'synthetic history failure'); END;",
+        )
+        .unwrap();
+        let payload = Arc::new(TaskResult::new(&json!(null)));
+        let resources: Vec<_> = (0..2002)
+            .map(|index| format!("skill:fixture-{index}"))
+            .collect();
+        {
+            let mut jobs = service.jobs.lock().unwrap();
+            for id in ["archived-changed", "archived-stable"] {
+                jobs.insert(
+                    id.into(),
+                    retention_job(id, "check_now", payload.clone(), resources.clone()),
+                );
+            }
+            for id in ["active-a", "active-b"] {
+                let mut job = retention_job(id, "get_files", payload.clone(), vec![]);
+                job.task.status = "running".into();
+                jobs.insert(id.into(), job);
+            }
+        }
+        service.persist_history().unwrap();
+        let before = history_payloads(&db);
+        service.change("archived-changed", |task| {
+            task.error = Some("重试后保存".into())
+        });
+        for (id, completed) in [("active-a", 3), ("active-b", 7)] {
+            service.change(id, |task| task.progress = json!({"completed":completed}));
+        }
+        service.jobs.lock().unwrap().insert(
+            "zz-break-write".into(),
+            retention_job("zz-break-write", "check_now", payload, vec![]),
+        );
+        assert!(service
+            .persist_history()
+            .unwrap_err()
+            .contains("synthetic history failure"));
+        assert_eq!(history_payloads(&db), before);
+        service.jobs.lock().unwrap().remove("zz-break-write");
+        service.persist_history().unwrap();
+        let saved = history_payloads(&db);
+        assert_eq!(saved["archived-stable"], before["archived-stable"]);
+        let attempts: i64 = db
+            .query_row(
+                "SELECT count(*) FROM history_insert_attempts WHERE id='archived-stable'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            attempts, 1,
+            "an unchanged archived row did not reach the UPSERT"
+        );
+        let changed: Value = serde_json::from_str(&saved["archived-changed"]).unwrap();
+        assert_eq!(changed["error"], "重试后保存");
+        assert_eq!(changed["resources"].as_array().unwrap().len(), 2002);
+        for (id, completed) in [("active-a", 3), ("active-b", 7)] {
+            let record: Value = serde_json::from_str(&saved[id]).unwrap();
+            assert_eq!(record["progress"]["completed"], completed);
+        }
+        db.execute_batch(
+            "UPDATE task_history SET payload='invalid' WHERE id='archived-changed';
+             DELETE FROM task_history WHERE id='archived-stable';",
+        )
+        .unwrap();
+        service.persist_history().unwrap();
+        assert_eq!(history_payloads(&db), saved);
     }
 
     #[test]

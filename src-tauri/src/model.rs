@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -35,6 +35,11 @@ fn automatic_checks() -> String {
 pub(crate) struct TaskHistoryRow {
     pub(crate) id: String,
     pub(crate) payload: String,
+}
+
+pub(crate) enum TaskHistoryWrite {
+    Saved(Option<i64>),
+    NeedsFullSnapshot,
 }
 
 pub struct Manager {
@@ -1068,57 +1073,82 @@ impl Manager {
                 })
             })
             .collect::<Result<Vec<_>, &str>>()?;
-        self.store_task_history_rows(&rows)
+        let retained = rows.iter().map(|row| row.id.clone()).collect();
+        self.store_task_history_rows(&retained, &rows, None)
+            .map(|_| ())
     }
 
-    pub(crate) fn store_task_history_rows(&self, records: &[TaskHistoryRow]) -> Result<(), String> {
+    pub(crate) fn store_task_history_rows(
+        &self,
+        retained: &BTreeSet<String>,
+        records: &[TaskHistoryRow],
+        expected_data_version: Option<i64>,
+    ) -> Result<TaskHistoryWrite, String> {
         if self.basic_mode {
-            return Ok(());
+            return Ok(TaskHistoryWrite::Saved(None));
         }
         let db = self
             .db
             .as_ref()
             .ok_or("Task worker has no history database")?;
-        db.execute_batch("CREATE TABLE IF NOT EXISTS task_history (id TEXT PRIMARY KEY, payload TEXT NOT NULL); BEGIN IMMEDIATE").map_err(|e|e.to_string())?;
-        let result = (|| {
-            let mut retained = BTreeSet::new();
-            for record in records {
-                if !retained.insert(record.id.as_str()) {
-                    return Err("Duplicate task history ID".into());
-                }
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS task_history (id TEXT PRIMARY KEY, payload TEXT NOT NULL)",
+        )
+        .map_err(|e| e.to_string())?;
+        let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let data_version = tx
+            .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+        // A different connection may have changed a row that this snapshot skips.
+        if expected_data_version.is_some_and(|version| version != data_version) {
+            tx.rollback().map_err(|e| e.to_string())?;
+            return Ok(TaskHistoryWrite::NeedsFullSnapshot);
+        }
+        let mut changed = BTreeSet::new();
+        for record in records {
+            if !changed.insert(record.id.as_str()) {
+                return Err("Duplicate task history ID".into());
             }
-            let existing = {
-                let mut statement = db
-                    .prepare("SELECT id FROM task_history")
-                    .map_err(|e| e.to_string())?;
-                let ids = statement
-                    .query_map([], |row| row.get::<_, String>(0))
-                    .map_err(|e| e.to_string())?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| e.to_string())?;
-                ids
-            };
-            let mut remove = db
+            if !retained.contains(&record.id) {
+                return Err("Task history write is outside the retained snapshot".into());
+            }
+        }
+        let existing = {
+            let mut statement = tx
+                .prepare("SELECT id FROM task_history")
+                .map_err(|e| e.to_string())?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<BTreeSet<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            ids
+        };
+        if retained
+            .difference(&existing)
+            .any(|id| !changed.contains(id.as_str()))
+        {
+            tx.rollback().map_err(|e| e.to_string())?;
+            return Ok(TaskHistoryWrite::NeedsFullSnapshot);
+        }
+        {
+            let mut remove = tx
                 .prepare("DELETE FROM task_history WHERE id=?1")
                 .map_err(|e| e.to_string())?;
-            for id in existing {
-                if !retained.contains(id.as_str()) {
-                    remove.execute([id]).map_err(|e| e.to_string())?;
-                }
+            for id in existing.difference(retained) {
+                remove.execute([id]).map_err(|e| e.to_string())?;
             }
-            let mut save = db
+            let mut save = tx
                 .prepare("INSERT INTO task_history(id,payload) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload WHERE task_history.payload <> excluded.payload")
                 .map_err(|e| e.to_string())?;
             for record in records {
                 save.execute(params![record.id, record.payload])
                     .map_err(|e| e.to_string())?;
             }
-            db.execute_batch("COMMIT").map_err(|e| e.to_string())
-        })();
-        if result.is_err() {
-            let _ = db.execute_batch("ROLLBACK");
         }
-        result
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(TaskHistoryWrite::Saved(Some(data_version)))
     }
     pub fn skill(&self, id: &str) -> Result<Value, String> {
         self.skill_entry(id).cloned()
