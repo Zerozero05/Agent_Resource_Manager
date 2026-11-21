@@ -1,0 +1,83 @@
+name: Probe Windows Graphics Capture on one owned synthetic window
+on: create
+permissions:
+  contents: read
+jobs:
+  capability:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-wgc-capability-20261121' }}
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build with the existing SDK and capture two compositor frames of the owned window
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Join-Path $env:RUNNER_TEMP 'wgc-window-capability.json'
+          $stage = 'verify-hosted-session'
+          try {
+            if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+                -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
+              throw 'Expected an isolated interactive Windows Actions runner.'
+            }
+            $stage = 'existing-sdk'
+            $locator = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+            if (!(Test-Path -LiteralPath $locator -PathType Leaf)) { throw 'The installed Visual Studio locator is unavailable.' }
+            $install = & $locator -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($LASTEXITCODE -ne 0 -or !$install) { throw 'The installed x64 MSVC tools are unavailable.' }
+            Import-Module (Join-Path $install 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+            Enter-VsDevShell -VsInstallPath $install -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+            if (!$env:WindowsSdkDir -or !$env:WindowsSDKVersion) { throw 'An existing Windows SDK is required.' }
+            $include = Join-Path (Join-Path $env:WindowsSdkDir 'Include') ($env:WindowsSDKVersion.TrimEnd('\','/'))
+            foreach ($file in @('winrt/windows.graphics.capture.h','um/windows.graphics.capture.interop.h',
+                'um/windows.graphics.directx.direct3d11.interop.h','winrt/wrl/client.h','winrt/wrl/event.h')) {
+              if (!(Test-Path -LiteralPath (Join-Path $include $file) -PathType Leaf)) { throw "The installed Windows SDK lacks $file." }
+            }
+            $native = Join-Path $env:RUNNER_TEMP 'arm-wgc-fixture.exe'
+            $object = Join-Path $env:RUNNER_TEMP 'arm-wgc-fixture.obj'
+            $stage = 'compile-existing-sdk'
+            & cl.exe /nologo /std:c++17 /EHsc /W4 /WX "/Fo$object" "/Fe$native" 'scripts/verify-hosted-wgc-window.cpp'
+            if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $native -PathType Leaf)) { throw 'The installed MSVC/SDK build and link failed.' }
+            $stage = 'capture-owned-only'
+            $lines = @(& $native --capture-owned-fixture)
+            $nativeExit = $LASTEXITCODE
+            $result = ($lines -join "`n") | ConvertFrom-Json
+            $result | Add-Member exitCode $nativeExit
+            $result | Add-Member executableSha256 ((Get-FileHash -LiteralPath $native -Algorithm SHA256).Hash.ToLowerInvariant())
+            $result | Add-Member sdkVersion $env:WindowsSDKVersion
+            $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $report -Encoding utf8NoBOM
+            $stage = 'verify-receipt'
+            if ($nativeExit -ne 0 -or $result.status -cne 'wgc-owned-window-capability' -or $result.syntheticOnly -ne $true -or
+                $result.defaultCaptureBorder -ne $true -or $result.samples.Count -ne 2 -or
+                $result.readBudgetMs -ne 15 -or $result.frameToCpuBudgetMs -ne 32 -or
+                $result.samples[0].systemRelativeTime100ns -le 0 -or
+                $result.samples[1].systemRelativeTime100ns -le $result.samples[0].systemRelativeTime100ns) {
+              throw 'Capture receipt did not establish two ordered compositor frames and normal exit.'
+            }
+            $expected = @('218,43,95,38,161,71', '25,106,224,238,166,29')
+            for ($i = 0; $i -lt 2; $i++) {
+              $sample = $result.samples[$i]
+              $rgb = @($sample.pixels | ForEach-Object { $_ -join ',' }) -join ','
+              if ($rgb -cne $expected[$i] -or $sample.readMs -lt 0 -or $sample.readMs -gt 15 -or
+                  $sample.frameToCpuMs -lt 0 -or $sample.frameToCpuMs -gt 32) {
+                throw 'One of the two expected pairs or timing budgets failed.'
+              }
+            }
+          } catch {
+            if (!(Test-Path -LiteralPath $report -PathType Leaf)) {
+              @{status='wgc-unavailable-or-failed'; stage=$stage; reason=$_.Exception.Message} |
+                ConvertTo-Json -Compress | Set-Content -LiteralPath $report -Encoding utf8NoBOM
+            }
+            throw
+          }
+      - name: Upload the synthetic numeric receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Agent_Resource_Manager_wgc_window_capability_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/wgc-window-capability.json
+          if-no-files-found: error
+          retention-days: 14
