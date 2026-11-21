@@ -1,38 +1,61 @@
-name: Prepare Windows release assets
-on:
-  workflow_dispatch:
-    inputs:
-      candidate_run_id:
-        description: Successful Windows candidate run
-        required: true
-      candidate_artifact:
-        description: Exact verified candidate artifact name
-        required: true
-      executable_sha256:
-        description: Independently verified candidate executable SHA256
-        required: true
-      verify_installation:
-        description: Test install, upgrade, and uninstall without uploading packages
-        type: boolean
-        default: false
+name: Verify 2d19488 Windows review packages and installer lifecycle
+on: create
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: prepare-release-${{ github.ref }}
+  group: verify-installer-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   package:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-delivery-2d19488-20261121' }}
     runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      # The validation ref consumes the existing finalized candidate.
+      CANDIDATE_RUN_ID: '44898573141'
+      CANDIDATE_SOURCE: 2d194880f48bbef0fe9613f3d2a5afffc3b2ce15
+      CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_2d194880f48bbef0fe9613f3d2a5afffc3b2ce15
+      CANDIDATE_ARTIFACT_ID: '14705483396'
+      EXPECTED_ARTIFACT_SHA256: '75e6a6d6d198e3f7af41a27bc5014a84f5173778f62b1d81ef7a876ee5aba3a5'
+      EXPECTED_EXECUTABLE_SHA256: '3476141dfca5894b9d9c07254a3de5b7dcf682e65108e6d064b1c48fb866c2f0'
     defaults:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify the candidate run and independent executable pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows') {
+            throw 'Delivery validation requires a fresh GitHub-hosted Windows VM.'
+          }
+          if ($env:CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or
+              $env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or
+              $env:EXPECTED_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:EXPECTED_EXECUTABLE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Independently verified candidate artifact ID, archive SHA256 and executable SHA256 are required.'
+          }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or
+              $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.head_branch -cne 'codex/global-check-completion-20261121' -or
+              $run.run_attempt -ne 1 -or $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push') {
+            throw 'The exact successful candidate run is not available.'
+          }
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID/artifacts" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify candidate artifact metadata.' }
+          $candidateArtifact = @($artifacts.artifacts | Where-Object { $_.name -ceq $env:CANDIDATE_ARTIFACT })
+          if ($candidateArtifact.Count -ne 1 -or
+              [string]$candidateArtifact[0].id -cne $env:CANDIDATE_ARTIFACT_ID -or $candidateArtifact[0].expired -ne $false -or
+              $candidateArtifact[0].digest -cne "sha256:$env:EXPECTED_ARTIFACT_SHA256") {
+            throw 'The candidate artifact ID or independently verified archive SHA256 differs from the pinned build.'
+          }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
         with:
+          ref: ${{ env.CANDIDATE_SOURCE }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0, Node 24
         with:
           node-version: 24
       - name: Install locked packaging tools
@@ -41,20 +64,31 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Package manager installation failed' }
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { throw 'Locked packaging tool installation failed' }
-      - name: Download and verify candidate, then prepare seven release assets
+      - name: Verify candidate and prepare seven files inside the runner
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          CANDIDATE_ARTIFACT: ${{ inputs.candidate_artifact }}
-          EXPECTED_EXECUTABLE_SHA256: ${{ inputs.executable_sha256 }}
-        run: ./scripts/prepare-release.ps1 -CandidateRunId $env:CANDIDATE_RUN_ID -CandidateArtifact $env:CANDIDATE_ARTIFACT -ExpectedExecutableSha256 $env:EXPECTED_EXECUTABLE_SHA256
+        run: |
+          $workflowCommit = $env:GITHUB_SHA
+          $productCommit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $productCommit -cne $env:CANDIDATE_SOURCE -or $workflowCommit -notmatch '^[0-9a-f]{40}$') {
+            throw 'The checked-out source does not match the pinned candidate commit.'
+          }
+          $changes = @(git diff --name-only $productCommit $workflowCommit --)
+          if ($LASTEXITCODE -ne 0 -or $changes.Count -ne 1 -or $changes[0] -cne '.github/workflows/package-release.yml') {
+            throw 'The workflow commit contains unexpected source differences.'
+          }
+          Write-Output "Workflow commit $workflowCommit preparing exact source tree $productCommit"
+          try {
+            $env:GITHUB_SHA = $productCommit
+            ./scripts/prepare-release.ps1 -CandidateRunId $env:CANDIDATE_RUN_ID -CandidateArtifact $env:CANDIDATE_ARTIFACT -ExpectedExecutableSha256 $env:EXPECTED_EXECUTABLE_SHA256
+          } finally {
+            $env:GITHUB_SHA = $workflowCommit
+          }
       - name: Verify the installed upgrade on a hosted Windows runner
-        if: ${{ inputs.verify_installation }}
         env:
           GH_TOKEN: ${{ github.token }}
           VERIFIED_VERSION: ${{ steps.release.outputs.version }}
-          VERIFIED_EXECUTABLE_SHA256: ${{ inputs.executable_sha256 }}
         run: |
           if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows') {
             throw 'The installer lifecycle must run in a fresh GitHub-hosted Windows VM'
@@ -69,42 +103,54 @@ jobs:
           }
           $name = "Agent_Resource_Manager_v$($env:VERIFIED_VERSION)_windows_x64_setup.exe"
           $assetDirectory = Join-Path $env:GITHUB_WORKSPACE 'outputs/release-assets'
-          $setupLine = @(Get-Content -LiteralPath (Join-Path $assetDirectory 'SHA256SUMS.txt') |
-            Where-Object { $_ -cmatch ('^[0-9a-f]{64}  ' + [regex]::Escape($name) + '$') })
-          if ($setupLine.Count -ne 1) { throw 'Expected exactly one packaged setup checksum' }
+          $checksums = @(Get-Content -LiteralPath (Join-Path $assetDirectory 'SHA256SUMS.txt'))
+          $packageFiles = @(Get-ChildItem -LiteralPath $assetDirectory -Force)
+          if ($checksums.Count -ne 6 -or $packageFiles.Count -ne 7 -or @($packageFiles | Where-Object { $_.PSIsContainer }).Count) {
+            throw 'Expected six checked review files and one checksum manifest.'
+          }
+          $seen = @{}
+          foreach ($line in $checksums) {
+            if ($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9_.-]+)$') { throw 'Malformed review file checksum.' }
+            $hash, $fileName = $Matches[1], $Matches[2]
+            if ($seen.ContainsKey($fileName) -or $fileName -in @('.', '..', 'SHA256SUMS.txt') -or
+                (Get-FileHash -LiteralPath (Join-Path $assetDirectory $fileName) -Algorithm SHA256).Hash -ine $hash) {
+              throw 'Duplicate or changed review file.'
+            }
+            $seen[$fileName] = $hash
+          }
+          $manifest = Get-Content -LiteralPath (Join-Path $assetDirectory 'SOURCE_MANIFEST.json') -Raw | ConvertFrom-Json
+          if (-not $seen.ContainsKey($name) -or $manifest.sourceCommit -cne $env:CANDIDATE_SOURCE -or
+              $manifest.candidateBuildCommit -cne $env:CANDIDATE_SOURCE -or
+              $manifest.installerExecutableSha256 -cne $env:EXPECTED_EXECUTABLE_SHA256 -or
+              $manifest.portableExecutableSha256 -cne $env:EXPECTED_EXECUTABLE_SHA256) {
+            throw 'Review manifest does not match the exact source and both packaged executables.'
+          }
           $parameters = @{
             OldSetup = (Join-Path $legacy.FullName $legacyName)
             OldSetupSha256 = 'd1a439fe476d05736c21bb6ee8c59e0ae0bbdaae54943106b5ec3a0b5dbf76aa'
             OldExecutableSha256 = '1ca90747eca2ac3229762928d05036724229e910463c28be40925e9b2fb2092f'
             OldVersion = '0.2.11'
             CurrentSetup = (Join-Path $assetDirectory $name)
-            CurrentSetupSha256 = $setupLine[0].Substring(0, 64)
-            CurrentExecutableSha256 = $env:VERIFIED_EXECUTABLE_SHA256
+            CurrentSetupSha256 = $seen[$name]
+            CurrentExecutableSha256 = $env:EXPECTED_EXECUTABLE_SHA256
             CurrentVersion = $env:VERIFIED_VERSION
             TestRoot = (Join-Path $env:RUNNER_TEMP 'arm-installed-upgrade')
           }
           ./scripts/verify-installed-upgrade.ps1 @parameters
-      - name: Upload installer lifecycle verification
-        if: ${{ always() && inputs.verify_installation }}
+          $result = Get-Content -LiteralPath (Join-Path $parameters.TestRoot 'installed-upgrade-report.json') -Raw | ConvertFrom-Json
+          if ($result.status -cne 'real-silent-install-upgrade-uninstall-passed' -or $result.upgradeVerified -ne $true -or
+              $result.currentSetupSha256 -cne $seen[$name] -or $result.currentExecutableSha256 -cne $env:EXPECTED_EXECUTABLE_SHA256) {
+            throw 'Installer lifecycle did not verify the exact reviewed installer.'
+          }
+      - name: Upload only package and lifecycle audit evidence
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_installed_upgrade_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arm-installed-upgrade/installed-upgrade-report.json
+          name: Agent_Resource_Manager_delivery_audit_${{ github.run_id }}_${{ github.run_attempt }}
+          path: |
+            outputs/release-verification/BUILD_INFO.json
+            outputs/release-verification/source-comparison.json
+            outputs/release-assets/SHA256SUMS.txt
+            ${{ runner.temp }}/arm-installed-upgrade/installed-upgrade-report.json
           if-no-files-found: warn
-          retention-days: 14
-      - name: Upload reviewable release assets
-        if: ${{ !inputs.verify_installation }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
-        with:
-          name: Agent_Resource_Manager_v${{ steps.release.outputs.version }}_release_assets_${{ github.sha }}
-          path: outputs/release-assets/
-          if-no-files-found: error
-          retention-days: 14
-      - name: Upload packaging verification
-        if: ${{ !inputs.verify_installation }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
-        with:
-          name: Agent_Resource_Manager_release_verification_${{ github.sha }}
-          path: outputs/release-verification/
-          if-no-files-found: error
           retention-days: 14
