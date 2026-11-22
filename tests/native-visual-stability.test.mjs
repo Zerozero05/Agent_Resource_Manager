@@ -236,7 +236,10 @@ test('document references bind the exact selected workspace title and the loaded
     const document = source.slice(source.indexOf('async function docRois()'), source.indexOf('async function semanticList('));
     assert.match(document, /element\('Perf Skill 0000', '工作区标签', 'ControlType.TabItem', true\)/);
     assert.match(document, /activeDocument\.selected, true/);
-    assert.match(document, /relativeBox\(activeDocument\.bounds, ref\.frame\)/);
+    assert.match(document, /completeCaptureBox\(activeDocument\.bounds, ref\.frame, 'The active document tab'\)/);
+    const completeBox = source.slice(source.indexOf('function completeCaptureBox('), source.indexOf('async function waitForEmptyFilterToChange('));
+    assert.match(completeBox, /unclippedNativeBox\(bounds, frame\)/);
+    assert.match(completeBox, /assert\.ok\(fitsCapture\(box, frame\)/);
     assert.match(document, /documentPosition\(performance\.now\(\) \+ visualPolicy\.matchTimeoutMs\)/);
     assert.match(document, /paragraphVisible\(paragraph,/);
 });
