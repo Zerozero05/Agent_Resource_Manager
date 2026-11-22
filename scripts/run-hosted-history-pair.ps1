@@ -10,10 +10,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$referenceSource = '37f83f135f9fd8facd90255fa33f58d534f8364d'
-$referenceCandidateRun = '44889635017'
-$referenceCandidateArtifact = '14702350758'
-$referenceCandidateSha256 = '79544e0b78cd0cb157d2601f48e0812158a428569f5b34d07556f478494f133e'
+$referenceSource = '5480977711719efadcb79c322931b7d2066a6f84'
+$referenceCandidateRun = '44907287993'
+$referenceCandidateArtifact = '14708534135'
+$referenceCandidateSha256 = '09ab04ca510043aa38bba4fa398790b3212172699751a0920390190e4ba83274'
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:GITHUB_REPOSITORY -ine 'Zerozero05/Agent_Resource_Manager' -or -not [Environment]::UserInteractive -or
     [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
@@ -35,7 +35,7 @@ function Save-Json([string]$path, $value) {
 
 $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).ProviderPath
 Set-Location -LiteralPath $workspace
-if ($env:GITHUB_REF_NAME -cne 'codex/hosted-check-only-pair-2d19488-20261121' -or
+if ($env:GITHUB_REF_NAME -cne 'codex/hosted-check-only-pair-44d2f65-20261122' -or
     (git rev-parse HEAD) -cne $env:GITHUB_SHA -or $LASTEXITCODE -ne 0) {
     throw 'The exact paired diagnostic checkout is required.'
 }
@@ -333,7 +333,7 @@ $sampleSkew = for ($index = 0; $index -lt $before.samples.Count; $index++) {
 }
 Save-Json (Join-Path $measurements 'comparison.json') ([ordered]@{
     status='paired-short-check-only-diagnostic-completed'; scope='check-only'
-    interpretation='Same-host c2aed09 then 2d19488, fixed order and fresh data. Twelve physical check clicks with the library held on All. Private-byte differences are observations.'
+    interpretation='Same-host 5480977 then 44d2f65, fixed order and fresh data. Twelve physical check clicks with the library held on All. Private-byte differences are observations.'
     compactTransportObserved=$false
     navigationGateEvaluated=$false; latencyGateEvaluated=$false
     convergenceGateEvaluated=$false; previousFailureReplaced=$false
