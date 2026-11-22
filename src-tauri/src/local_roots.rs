@@ -547,9 +547,7 @@ pub(crate) fn handle(manager: &mut Manager, request: &Value) -> Result<Option<Va
                 manager.state.check_summary = json!(summary);
             }
             persist(manager, previous)?;
-            let mut value = manager.snapshot();
-            value["checkSummary"] = json!(summary);
-            return Ok(Some(value));
+            return manager.check_result(json!(summary)).map(Some);
         }
         _ => unreachable!(),
     }

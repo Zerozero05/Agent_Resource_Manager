@@ -77,6 +77,7 @@ fn periodic_maintenance_reads_the_live_writer_after_detaching() {
         cancellable: true,
         commit_started: AtomicBool::new(false),
         internal_resource_automation: true,
+        check_summary: None,
     });
     let mut worker = service.manager.lock().unwrap().detached(hook, false);
     let run = |worker: &mut Manager| {

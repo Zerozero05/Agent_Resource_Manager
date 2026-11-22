@@ -2,6 +2,8 @@
 use crate::model::{now, Manager, ManagerRuntime, State, TaskHistoryRow, TaskHistoryWrite};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -391,6 +393,8 @@ pub(crate) struct TaskSystem {
     closing: AtomicBool,
     resource_automation_running: AtomicBool,
     history_lock: Mutex<CommittedHistory>,
+    #[cfg(test)]
+    snapshot_reads: AtomicU64,
 }
 
 impl TaskSystem {
@@ -445,6 +449,8 @@ impl TaskSystem {
             closing: AtomicBool::new(false),
             resource_automation_running: AtomicBool::new(false),
             history_lock: Mutex::new(CommittedHistory::default()),
+            #[cfg(test)]
+            snapshot_reads: AtomicU64::new(0),
         });
         {
             let manager = service
@@ -628,6 +634,8 @@ impl TaskSystem {
     }
 
     pub(crate) fn snapshot(&self) -> Result<Value, String> {
+        #[cfg(test)]
+        self.snapshot_reads.fetch_add(1, Ordering::Relaxed);
         Ok(self
             .manager
             .lock()
@@ -1081,8 +1089,10 @@ impl TaskSystem {
         );
         // The local dispatcher reads documentation without saving state or
         // touching approvals. Other dispatchers retain their merge semantics.
-        let local_document_read = request["action"] == "get_document"
-            && std::ptr::fn_addr_eq(dispatch, crate::dispatch_local as Dispatch);
+        let local_dispatch = std::ptr::fn_addr_eq(dispatch, crate::dispatch_local as Dispatch);
+        let local_document_read = request["action"] == "get_document" && local_dispatch;
+        let defer_check_snapshot = request["action"] == "check_now"
+            && (local_dispatch || std::ptr::fn_addr_eq(dispatch, crate::dispatch as Dispatch));
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Value, String> {
                 let _resources = self.acquire(&id, resources, foreground, &cancel)?;
@@ -1167,6 +1177,7 @@ impl TaskSystem {
                         cancellable,
                         commit_started: AtomicBool::new(false),
                         internal_resource_automation,
+                        check_summary: defer_check_snapshot.then(|| Mutex::new(None)),
                     });
                     let local_skill = if local_document_read && request["automatic"] != true {
                         crate::remote::local_document_skill(&manager, &request)
@@ -1252,7 +1263,17 @@ impl TaskSystem {
                     }
                     return Err(CANCELLED.into());
                 }
-                rebase_result(&mut value, || self.snapshot())?;
+                if let Some(summary) = hook.take_check_summary()? {
+                    value = self.snapshot()?;
+                    for field in ["sceneRevision", "activeSceneId", "sceneError"] {
+                        if value.get(field).is_none() {
+                            value[field] = Value::Null;
+                        }
+                    }
+                    value["checkSummary"] = summary;
+                } else {
+                    rebase_result(&mut value, || self.snapshot())?;
+                }
                 crate::resource_lifecycle::scrub_public_receipts(&mut value);
                 Ok(value)
             }))
@@ -1828,9 +1849,21 @@ struct WorkerHook {
     cancellable: bool,
     commit_started: AtomicBool,
     internal_resource_automation: bool,
+    // Only the built-in check dispatcher can hand its summary to finalization.
+    check_summary: Option<Mutex<Option<Value>>>,
 }
 
 impl WorkerHook {
+    fn take_check_summary(&self) -> Result<Option<Value>, String> {
+        let Some(summary) = &self.check_summary else {
+            return Ok(None);
+        };
+        Ok(summary
+            .lock()
+            .map_err(|_| "Check summary lock failed")?
+            .take())
+    }
+
     fn resource_spawn_with(
         &self,
         request: crate::resource_runtime::PreparedInvocation,
@@ -1871,6 +1904,15 @@ impl WorkerHook {
 }
 
 impl ManagerRuntime for WorkerHook {
+    fn defer_check_snapshot(&self, summary: &mut Value) -> Result<bool, String> {
+        let Some(check_summary) = &self.check_summary else {
+            return Ok(false);
+        };
+        *check_summary
+            .lock()
+            .map_err(|_| "Check summary lock failed")? = Some(summary.take());
+        Ok(true)
+    }
     fn ensure_live_maintenance_allowed(&self, basic_mode_error: &str) -> Result<(), String> {
         let service = self
             .service
@@ -3670,6 +3712,76 @@ fn result_progress(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn built_in_check_tasks_read_one_catalog_snapshot_and_keep_the_full_result() {
+        fn custom_dispatch(manager: &mut Manager, request: &Value) -> Result<Value, String> {
+            let mut result = crate::dispatch(manager, request)?;
+            assert!(result["skills"].is_array());
+            result["customField"] = json!("preserved");
+            Ok(result)
+        }
+
+        for (dispatch, expected_reads) in [
+            (crate::dispatch as Dispatch, 1),
+            (crate::dispatch_local as Dispatch, 1),
+            (custom_dispatch as Dispatch, 2),
+        ] {
+            let (_dir, service) = fixture();
+            let request = json!({"action":"check_now","localOnly":true,"skipLocalDiscovery":true});
+            let before = service.snapshot_reads.load(Ordering::Relaxed);
+            let pending = service
+                .execute(
+                    json!({"action":"start_task","statusOnly":true,"request":request}),
+                    dispatch,
+                )
+                .unwrap();
+            let id = pending["task"]["id"].as_str().unwrap();
+            let result = service.wait(id).unwrap();
+            assert_eq!(
+                service.snapshot_reads.load(Ordering::Relaxed) - before,
+                expected_reads
+            );
+
+            let latest = service.snapshot().unwrap();
+            for field in [
+                "skills",
+                "sources",
+                "settings",
+                "sceneRevision",
+                "activeSceneId",
+                "sceneError",
+                "stateRevision",
+            ] {
+                assert_eq!(result[field], latest[field], "{field}");
+                assert!(result.get(field).is_some(), "{field}");
+            }
+            assert!(result["checkSummary"]["errors"].is_number());
+            assert!(result["checkSummary"]["rootErrors"].is_array());
+            if expected_reads == 2 {
+                assert_eq!(result["customField"], "preserved");
+            }
+            let full = service
+                .execute(json!({"action":"get_task","taskId":id}), dispatch)
+                .unwrap();
+            assert_eq!(full["task"]["result"], result);
+            let status = service
+                .execute(
+                    json!({"action":"get_task","taskId":id,"statusOnly":true}),
+                    dispatch,
+                )
+                .unwrap();
+            assert_eq!(status["task"]["status"], "succeeded");
+            assert_eq!(
+                status["task"]["completionStamp"]["stateRevision"],
+                result["stateRevision"]
+            );
+            assert_eq!(
+                status["task"]["completionStamp"]["readGeneration"],
+                result["readGeneration"]
+            );
+        }
+    }
 
     #[test]
     fn lightweight_check_status_reports_the_rebased_stamp_without_loading_results() {
@@ -8428,6 +8540,7 @@ mod tests {
                 cancellable: true,
                 commit_started: AtomicBool::new(false),
                 internal_resource_automation: false,
+                check_summary: None,
             };
             let (gate_id, gate) = new_latch();
             let _release = ReleaseOnDrop(gate.clone());

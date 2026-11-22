@@ -65,6 +65,9 @@ pub(crate) trait ManagerRuntime: Send + Sync {
     fn save(&self, manager: &Manager) -> Result<(), String>;
     fn begin_automatic_commit(&self) -> Result<(), String>;
     fn snapshot(&self) -> Value;
+    fn defer_check_snapshot(&self, _summary: &mut Value) -> Result<bool, String> {
+        Ok(false)
+    }
     fn ensure_live_maintenance_allowed(&self, basic_mode_error: &str) -> Result<(), String>;
     fn resource_store(&self, request: crate::resources::StoreRequest) -> Result<Value, String>;
     fn resource_check_store(
@@ -249,6 +252,17 @@ impl Manager {
             state_events: None,
         })
     }
+    pub(crate) fn check_result(&self, mut summary: Value) -> Result<Value, String> {
+        if let Some(runtime) = &self.runtime {
+            if runtime.defer_check_snapshot(&mut summary)? {
+                return Ok(Value::Null);
+            }
+        }
+        let mut value = self.snapshot();
+        value["checkSummary"] = summary;
+        Ok(value)
+    }
+
     pub fn snapshot(&self) -> Value {
         if let Some(runtime) = &self.runtime {
             return runtime.snapshot();
