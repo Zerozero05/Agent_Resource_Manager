@@ -519,6 +519,7 @@ mod tests {
 
     #[test]
     fn no_op_and_failed_cas_preserve_revisions_and_emit_only_committed_changes() {
+        let _network = crate::network::test_configuration_guard();
         let dir = fixture();
         let mut m = manager(dir.path());
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -564,6 +565,7 @@ mod tests {
 
     #[test]
     fn failed_transaction_rolls_back_records_and_revision_before_emitting_events() {
+        let _network = crate::network::test_configuration_guard();
         let dir = fixture();
         let mut m = manager(dir.path());
         let saved = invoke(&m, annotation(0, "preserved", "original"));
@@ -649,6 +651,7 @@ mod tests {
 
     #[test]
     fn strict_schema_rejects_executable_fields_invalid_enums_and_oversized_content() {
+        let _network = crate::network::test_configuration_guard();
         let dir = fixture();
         let m = manager(dir.path());
         let mut bad = vec![

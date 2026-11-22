@@ -910,10 +910,21 @@ impl Manager {
         if let Some(runtime) = &self.runtime {
             return runtime.save(self);
         }
+        #[derive(Serialize)]
+        struct SavedState<'a> {
+            #[serde(flatten)]
+            state: &'a State,
+            #[serde(rename = "stateRevision")]
+            revision: u64,
+        }
+
         let revision = self.revision.load(Ordering::Relaxed) + 1;
-        let mut payload = serde_json::to_value(&self.state).map_err(|e| e.to_string())?;
-        payload["stateRevision"] = json!(revision);
-        self.db.as_ref().ok_or("Task worker cannot write a database")?.execute("INSERT INTO app_state(id,schema_version,payload) VALUES(1,1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", params![payload.to_string()]).map_err(|e| e.to_string())?;
+        let payload = serde_json::to_string(&SavedState {
+            state: &self.state,
+            revision,
+        })
+        .map_err(|e| e.to_string())?;
+        self.db.as_ref().ok_or("Task worker cannot write a database")?.execute("INSERT INTO app_state(id,schema_version,payload) VALUES(1,1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", params![payload]).map_err(|e| e.to_string())?;
         self.revision.store(revision, Ordering::Relaxed);
         if let Some(events) = &self.state_events {
             events(revision);
@@ -1201,5 +1212,59 @@ impl Manager {
     }
     pub fn id(&self) -> String {
         uuid::Uuid::new_v4().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_state_save_keeps_legacy_schema_and_exact_revision_after_reopen() {
+        let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("work/model-tests");
+        std::fs::create_dir_all(&parent).unwrap();
+        let fixture = tempfile::tempdir_in(parent).unwrap();
+        let data_dir = fixture.path().to_path_buf();
+        let database = Connection::open(data_dir.join("manager.sqlite3")).unwrap();
+        database.execute_batch("CREATE TABLE app_state(id INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL, payload TEXT NOT NULL)").unwrap();
+        let old_revision = (1u64 << 53) + 7;
+        let legacy = json!({
+            "skills": [{"id":"local","name":"示例 Skill","version":null}],
+            "sources": [{"repo":"sample/fixtures"}],
+            "connections": [{"id":"entry","skillId":"local"}],
+            "settings": {"nested":[null,true,{"stateRevision":"custom","title":"说明"}]},
+            "stateRevision": old_revision,
+        });
+        database
+            .execute("INSERT INTO app_state VALUES(1,1,?1)", [legacy.to_string()])
+            .unwrap();
+        let mut manager = Manager::new(data_dir.clone()).unwrap();
+        assert_eq!(manager.snapshot()["stateRevision"], old_revision);
+        assert_eq!(manager.state.check_mode, "auto");
+        assert!(manager.state.local_roots.is_empty());
+        manager
+            .state
+            .ignored_local_paths
+            .push("D:\\fixtures\\omit".into());
+        manager.state.check_generation = 5;
+        manager.state.check_summary = json!({"newLocal":0,"changed":true});
+        let mut expected = serde_json::to_value(&manager.state).unwrap();
+        expected["stateRevision"] = json!(old_revision + 1);
+        manager.save().unwrap();
+        let (version, payload): (u64, String) = database
+            .query_row(
+                "SELECT schema_version,payload FROM app_state WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(version, 1);
+        assert_eq!(serde_json::from_str::<Value>(&payload).unwrap(), expected);
+        let reopened = Manager::new(data_dir).unwrap();
+        assert!(reopened.state == manager.state);
+        assert_eq!(reopened.snapshot()["stateRevision"], old_revision + 1);
     }
 }
