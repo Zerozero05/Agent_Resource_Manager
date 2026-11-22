@@ -1,7 +1,7 @@
 {
   "reviewedBy": "root",
   "visualReviewConfirmed": true,
-  "referenceSha256": "9063e2bfc7a83d0d3fe774a61901bfe18032207f6f3fa532ce56bf1eb744b95b",
+  "referenceSha256": "009cf13d1c301a4144f4520fa3842df8d44fd6f432c4231fa07a647c780d366c",
   "reviewedStates": [
     "search-0000",
     "search-0001",
@@ -76,6 +76,6 @@
     "documentTab",
     "closed"
   ],
-  "reviewScope": "Same candidate 5480977, 72 fixed synthetic states, nine rendered review sheets, all 210 digests and crop bounds independently verified.",
-  "notes": "Visually inspected the full nine-sheet set: search 0000–0065 title/table/count, empty GitHub filter, restored results, visible scroll-positioned description, selected document tab, and removed tab slot. All-results table crop samples the fixed viewport edge; result count is 1000. Original latent-response and long-run measures stay separate."
+  "reviewScope": "Same 5480977 build. Verified all 210 crop digests and full-client containment. All nine rendered montages are byte-identical to the previously reviewed complete set.",
+  "notes": "Independently observed check_now before the first search and the frozen GitHub box [530,253,151,36]. All 210 image bytes match the prior review. Only the fixed GitHub crop moved from y252 to y253. The original exact pixel matcher, visual deadline, pilot, and 61-sample stability procedure remain unchanged."
 }
