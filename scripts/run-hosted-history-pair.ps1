@@ -10,10 +10,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$candidateSource = '3536ca0e5cf7c897b860b5ce32d8b415904b9e45'
-$candidateRun = '44866595695'
-$candidateArtifact = '14692802883'
-$candidateSha256 = 'aa4ddbf7317b1b5b559153841f8a5fb72c3589af7f267b74efae6211f1a87ed7'
+$candidateSource = '5480977711719efadcb79c322931b7d2066a6f84'
+$candidateRun = '44907287993'
+$candidateArtifact = '14708534135'
+$candidateSha256 = '09ab04ca510043aa38bba4fa398790b3212172699751a0920390190e4ba83274'
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:GITHUB_REPOSITORY -ine 'Zerozero05/Agent_Resource_Manager' -or -not [Environment]::UserInteractive -or
     [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
@@ -35,7 +35,7 @@ function Save-Json([string]$path, $value) {
 
 $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).ProviderPath
 Set-Location -LiteralPath $workspace
-if ($env:GITHUB_REF_NAME -cne 'codex/hosted-global-check-control-0ac5e79-20261121' -or
+if ($env:GITHUB_REF_NAME -cne 'codex/hosted-global-check-control-5480977-20261122' -or
     (git rev-parse HEAD) -cne $env:GITHUB_SHA -or $LASTEXITCODE -ne 0) {
     throw 'The exact paired diagnostic checkout is required.'
 }

@@ -671,7 +671,7 @@ async function run(descriptor, pilot, shortRetention = false) {
     if (shortRetention) {
         assert.equal(process.env.GITHUB_ACTIONS, 'true');
         assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
-        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-global-check-control-0ac5e79-20261121');
+        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-global-check-control-5480977-20261122');
         assert.ok(hostedRetentionReference);
         assert.equal(hash(refBytes), hostedRetentionReference.sha256);
     }

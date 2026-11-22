@@ -1,7 +1,7 @@
 {
   "reviewedBy": "root",
   "visualReviewConfirmed": true,
-  "referenceSha256": "eaf15103c321c965b179132d9e32baad1fef6a448920c5755c3531bec28894cf",
+  "referenceSha256": "009cf13d1c301a4144f4520fa3842df8d44fd6f432c4231fa07a647c780d366c",
   "reviewedStates": [
     "search-0000",
     "search-0001",
@@ -76,10 +76,6 @@
     "documentTab",
     "closed"
   ],
-  "reviewScope": "Reviewed all nine rendered contact sheets and verified the file digests, PNG dimensions and visible-client bounds of all 210 crops.",
-  "notes": [
-    "All 66 single-result states have legible titles and one-result counts. The GitHub empty state, opened detail, workbench return, preserved reading position and tab closure are visible.",
-    "For the unfiltered narrow state, use the visible table border and the 1000-result count. The table rows are below the initially visible client region. The original native reference driver separately confirmed 20 rendered result entries.",
-    "A previous set containing off-window desktop pixels was rejected. This review covers only the revised visible-client crop set."
-  ]
+  "reviewScope": "Same 5480977 build. Verified all 210 crop digests and full-client containment. All nine rendered montages are byte-identical to the previously reviewed complete set.",
+  "notes": "Independently observed check_now before the first search and the frozen GitHub box [530,253,151,36]. All 210 image bytes match the prior review. Only the fixed GitHub crop moved from y252 to y253. The original exact pixel matcher, visual deadline, pilot, and 61-sample stability procedure remain unchanged."
 }
