@@ -15,7 +15,7 @@ async function moduleURL(url: URL): Promise<string> {
     const replacements = new Map<string, string>();
     for (const match of code.matchAll(/from\s+(['"])([^'"]+)\1/g)) {
       const name = match[2];
-      if (!replacements.has(name)) replacements.set(name, name.startsWith('.') ? await moduleURL(new URL(`${name}.ts`, url)) : import.meta.resolve(name));
+      if (!replacements.has(name)) replacements.set(name, name.startsWith('.') ? await moduleURL(new URL(name.endsWith('.ts') ? name : `${name}.ts`, url)) : import.meta.resolve(name));
     }
     code = code.replace(/from\s+(['"])([^'"]+)\1/g, (_match, _quote, name) => `from ${JSON.stringify(replacements.get(name))}`);
     return `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`;

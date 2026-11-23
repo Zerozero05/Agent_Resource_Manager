@@ -1,5 +1,21 @@
 # Sources and dependencies
 
+
+<a id="desktop-design-refresh-20261124"></a>
+
+## 桌面管理界面参考 — 2026-11-24
+
+公开仓库在 2026-11-24（上海时间）在线核对，下列使用范围为人工阅读后的设计方法。项目继续使用自身 React、TypeScript、CSS、Lucide、Tauri 与 Rust。未安装插件、引入外部代码、运行参考仓库工具，或增加程序依赖。
+
+| 来源 | 固定版本、维护与许可 | 阅读及实际采用 |
+| --- | --- | --- |
+| Taste Skill · 120,586 Stars | `6c0b5c7`，11 月 23 日主分支提交为赞助信息。11 月 7 日的 `b900a80` 更新 Skill 与系统规范。MIT，未归档。 | 完整审阅 [SKILL.md](https://github.com/Leonxlnx/taste-skill/blob/6c0b5c78f5d31776e2210305abaa210cdc0030bf/skills/taste-skill/SKILL.md) 及 system、layout-v4、copy、copy-voice、sections、motion、perf 引用。采用紧凑分层、边缘对齐、克制色彩、可见焦点和清晰状态。其营销页面规则与 Node 22+ / Chromium 检查器未用于桌面产品。 |
+| The Architect · 591 Stars | `cfa739a`，10 月 25 日；已有项目改造入口 10 月 17 日修订，同日发布 v2.6.0。MIT，未归档。 | 读完 [Architect](https://github.com/Hainrixz/the-architect/blob/cfa739a24ee0ea8bbb36a73e404ed9d59236b4ec/skills/architect/SKILL.md)、[已有项目](https://github.com/Hainrixz/the-architect/blob/cfa739a24ee0ea8bbb36a73e404ed9d59236b4ec/commands/architect-brownfield.md)、桌面应用及前端架构、状态、测试与可访问性说明。采用从实际耦合处收拢职责，单份设置元数据，维持现有持久信息和窗口行为。未运行其 Claude Code 插件。 |
+| shadcn/ui · 128,855 Stars | `055aa6b`，11 月 23 日；相关表格代码 8 月 7 日有实质修改。MIT，未归档。 | 阅读 React / Next.js / Tailwind 的 [总览页](https://github.com/shadcn-ui/ui/blob/055aa6b7837b1808456a24beb4c97a677864aa82/apps/v4/registry/new-york-v4/blocks/dashboard-01/page.tsx) 和 [统计组件](https://github.com/shadcn-ui/ui/blob/055aa6b7837b1808456a24beb4c97a677864aa82/apps/v4/registry/new-york-v4/blocks/dashboard-01/components/section-cards.tsx)。采用按内容区宽度调整列数，数字保持等宽，摘要通往已有功能入口。 |
+| Primer React · 3,941 Stars | `2128032`，11 月 20 日；NavList 9 月 17 日更新。MIT，未归档。 | 阅读 [NavList 源文件](https://github.com/primer/react/blob/2128032dca65a1bd565fe382c2e91c638c6473a4/packages/react/src/NavList/NavList.tsx) 及 [ActionList 指南](https://primer.style/product/components/action-list/guidelines/)。采用具名分组、一个当前位置、可换行标签和清晰的键盘导航。 |
+
+另比较 [Senior Architect](https://github.com/alirezarezvani/claude-skills/blob/ea7b5ab8da93bbba8880152d9ccb8c9979f12252/engineering-team/skills/senior-architect/SKILL.md)，固定 `ea7b5ab`，30,347 Stars、MIT、未归档，11 月 23 日发布 v2.14.16。阅读其主 Skill，运维选型和 Python 分析器超出本轮范围，因此保持现有 Tauri 设计。
+
 ### GitHub Actions 运行环境 — 2026-11-19
 
 Windows 检查与发行材料准备固定使用 Node.js 24 版本的官方检出和 Node 安装组件。版本分别为 checkout v7.0.1（`3d3c42e`）和 setup-node v7.1.0（`949feb2`）。两者仅用于托管工作流。 [checkout 固定清单](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/action.yml) · [setup-node 固定清单](https://github.com/actions/setup-node/blob/949feb2413d6458794dcd2491c4babbbce0c15c1/action.yml)

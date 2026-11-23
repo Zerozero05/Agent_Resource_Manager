@@ -126,3 +126,13 @@ test('empty-state registration observes read-only and pending-operation protecti
   await act(async () => add.click());
   assert.deepEqual(clicks, []);
 });
+
+test('overview uses one reading order at every width and keeps the source management entry', async () => {
+  await render(props());
+  const sections = [...host.querySelectorAll('.dashboard-columns > section')];
+  assert.deepEqual(sections.map(section => section.getAttribute('aria-label')), [
+    '需要处理', '收藏资源', '任务进度', 'GitHub 来源状态', '近期操作', 'Skill 分类分布',
+  ]);
+  await click(sections[3].querySelector('header button'));
+  assert.deepEqual(clicks, ['sources']);
+});

@@ -1,18 +1,25 @@
 import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { act, createElement, useState } from 'react';
+import { act, createElement, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { JSDOM } from 'jsdom';
 import ts from 'typescript';
+import { outlineId } from '../src/workspace.ts';
+import type { SettingsSectionKey } from '../src/settings-sections.ts';
 
 const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', { url: 'http://localhost', pretendToBeVisual: true });
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, HTMLDetailsElement: dom.window.HTMLDetailsElement, Element: dom.window.Element, Node: dom.window.Node, requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window), cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window), IS_REACT_ACT_ENVIRONMENT: true });
 dom.window.HTMLElement.prototype.scrollIntoView = () => {};
 const { createRoot } = await import('react-dom/client');
-let code = ts.transpileModule(await readFile(new URL('../src/WorkspaceShell.tsx', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, jsx: ts.JsxEmit.ReactJSX } }).outputText.replace(/import\s+['"][^'"]+\.css['"];?/g, '');
-code = code.replace(/from\s+(['"])([^'"]+)\1/g, (_match, _quote, name: string) => `from ${JSON.stringify(name.startsWith('.') ? new URL(`${name}.ts`, new URL('../src/WorkspaceShell.tsx', import.meta.url)).href : import.meta.resolve(name))}`);
-const { WorkspaceShell } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
+async function loadTsx(path: string) {
+  const file = new URL(path, import.meta.url);
+  const code = ts.transpileModule(await readFile(file, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, jsx: ts.JsxEmit.ReactJSX } }).outputText
+    .replace(/import\s+['"][^'"]+\.css['"];?/g, '')
+    .replace(/from\s+(['"])([^'"]+)\1/g, (_match, _quote, name: string) => `from ${JSON.stringify(name.startsWith('.') ? new URL(name.endsWith('.ts') ? name : `${name}.ts`, file).href : import.meta.resolve(name))}`);
+  return import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
+}
+const { WorkspaceShell } = await loadTsx('../src/WorkspaceShell.tsx');
 const host = document.getElementById('root')!;
 let unmount = () => {};
 afterEach(async () => { await act(async () => unmount()); unmount = () => {}; });
@@ -66,4 +73,62 @@ test('one real portal sidebar stays outside hidden Home and does not activate Ho
   await act(async () => view.render(createElement(Harness, { split: true })));
   await act(async () => { action.dispatchEvent(new dom.window.MouseEvent('pointerdown', { bubbles: true })); action.focus(); });
   assert.deepEqual(activations, []); assert.equal(host.querySelector('aside'), side); assert(side.textContent?.includes('保留侧栏状态 1')); assert.equal(host.querySelectorAll('.workspace-page:not([hidden])').length, 2); assert(renders < 8, 'stable host must not repeatedly register and rerender');
+});
+
+test('grouped settings keep legacy anchors, mount panels on demand and restore narrow navigation focus', async t => {
+  const { SettingsLayout, SettingsSection } = await loadTsx('../src/SettingsLayout.tsx');
+  t.mock.method(dom.window.HTMLElement.prototype, 'clientWidth', function (this: HTMLElement) {
+    return this.classList.contains('settings-shell') ? 620 : 0;
+  }, { getter: true });
+  const mocks = {
+    ResizeObserver: class { observe() {} disconnect() {} },
+    MutationObserver: dom.window.MutationObserver,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+  };
+  const previous = Object.fromEntries(Object.keys(mocks).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  Object.assign(globalThis, mocks);
+  t.after(() => {
+    for (const [key, descriptor] of Object.entries(previous)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  });
+  function Harness() {
+    const scopeRef = useRef<HTMLDivElement>(null);
+    const [show, setShow] = useState(false), [expanded, setExpanded] = useState(true);
+    const [active, setActive] = useState<SettingsSectionKey>('general');
+    return createElement('div', { ref: scopeRef, 'data-pane-scroll': '' },
+      !show ? createElement('button', { onClick: () => setShow(true) }, '打开设置') :
+        createElement(SettingsLayout, { paneId: 'home', scopeRef, expanded, onExpandedChange: setExpanded, activeSection: active, onActiveSectionChange: setActive },
+          createElement(SettingsSection, { sectionKey: 'general' }, createElement('h2', null, '常规设置'), createElement('input')),
+          createElement(SettingsSection, { sectionKey: 'github' }, createElement('h2', null, 'GitHub 访问凭据'), createElement('h2', { 'data-outline-key': 'settings:github-sources', 'data-outline-label': '仓库来源' }, 'GitHub 来源')),
+        ));
+  }
+  const view = createRoot(host); unmount = () => view.unmount();
+  await act(async () => view.render(createElement(Harness)));
+  await click(host.querySelector('button')!);
+  const nav = host.querySelector('nav[aria-label="设置分类"]')!;
+  const toggle = host.querySelector<HTMLButtonElement>('.settings-navigation-toggle')!;
+  const general = host.querySelector<HTMLElement>('#settings-home-general')!;
+  const github = host.querySelector<HTMLElement>('#settings-home-github')!;
+  const button = (title: string) => Array.from(nav.querySelectorAll('button')).find(node => node.textContent === title)!;
+  assert.deepEqual(Array.from(nav.querySelectorAll('[role="group"]'), group => group.getAttribute('aria-label')), ['应用', '运行与连接', '数据与排查']);
+  assert.equal(button('常规').getAttribute('aria-current'), 'page');
+  assert.equal(github.querySelector('h2:not([data-settings-fallback])'), null);
+  const anchor = outlineId('home:settings', '使用偏好', 0, 'settings:general');
+  assert.equal(general.querySelector('h2')?.id, anchor);
+  const draft = general.querySelector('input')!;
+  draft.value = '未保存路径';
+  await click(button('GitHub'));
+  assert.equal(toggle.getAttribute('aria-label'), '设置分类：GitHub');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(document.activeElement, toggle);
+  assert.equal(general.hidden, true);
+  assert.equal(github.hidden, false);
+  assert.equal(button('GitHub').getAttribute('aria-controls'), github.id);
+  assert.equal(github.querySelector('[data-outline-key="settings:github-sources"]')?.id, outlineId('home:settings', '仓库来源', 0, 'settings:github-sources'));
+  await click(toggle);
+  await click(button('常规'));
+  assert.equal(general.querySelector('input'), draft);
+  assert.equal(draft.value, '未保存路径');
 });

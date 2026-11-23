@@ -1,20 +1,15 @@
 import type { Resource } from './resources';
+import { SETTINGS_SECTIONS, SETTINGS_SECTION_KEYS, type SettingsSectionKey } from './settings-sections.ts';
 
 export type CommandTarget =
   | { kind: 'skill'; id: string; section: 'docs' | 'files' }
   | { kind: 'tool'; id: string }
   | { kind: 'resource-action'; id: string; actionId: string; expectedRevision: number }
   | { kind: 'view'; view: 'dashboard' | 'resources' | 'skills' | 'tools' | 'changes' | 'clients' | 'settings' }
-  | { kind: 'settings'; section: 'general' | 'display' | 'maintenance' | 'scenes' | 'storage' | 'network' | 'github' | 'configuration' | 'diagnostics' }
+  | { kind: 'settings'; section: SettingsSectionKey }
   | { kind: 'history' };
 export type Command = { id: string; label: string; detail: string; keywords: string; target: CommandTarget; disabledReason?: string };
 export type CommandSkill = { id: string; name: string; displayName?: string; alias?: string; notes?: string; description?: string };
-const settingSections = [
-  ['general', '使用偏好', '编辑器 检查方式'], ['display', '显示设置', '主题 强调色 密度 动效 字号 缩放 外观'],
-  ['maintenance', '维护设置', '暂停 自动维护 时间窗口'], ['scenes', '场景设置', '激活 场景 任务'],
-  ['storage', '保存位置', '路径 目录 数据 缓存 导出'], ['network', '网络设置', '代理 诊断 连接'], ['github', 'GitHub 设置', '仓库 来源 凭据'],
-  ['configuration', '配置导入导出', '管理配置 导入 导出 冲突'], ['diagnostics', '诊断摘要', '故障 摘要 脱敏'],
-] as const;
 
 function capabilityText(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -27,7 +22,10 @@ function capabilityText(value: unknown): string {
 export function buildCommands(skills: readonly CommandSkill[], resources: readonly Resource[], options: { readOnly?: boolean } = {}): Command[] {
   const commands: Command[] = [
     ...([['dashboard', '总览', 'Dashboard 仪表盘 收藏 任务'], ['resources', '全部资源', '资源目录 Skills 工具 搜索'], ['skills', '技能库', 'Skills'], ['tools', '工具目录', '资源 CLI MCP 便携程序'], ['changes', '变化', '检查 更新 差异'], ['clients', '客户端', 'Codex Claude Cursor 连接']] as const).map(([view, label, keywords]) => ({ id: `view:${view}`, label: `打开${label}`, detail: '导航', keywords, target: { kind: 'view' as const, view } })),
-    ...settingSections.map(([section, label, keywords]) => ({ id: `settings:${section}`, label, detail: '设置', keywords: `设置 ${keywords}`, target: { kind: 'settings' as const, section } })),
+    ...SETTINGS_SECTION_KEYS.map(section => {
+      const { commandLabel, keywords } = SETTINGS_SECTIONS[section];
+      return { id: `settings:${section}`, label: commandLabel, detail: '设置', keywords: `设置 ${keywords}`, target: { kind: 'settings' as const, section } };
+    }),
     { id: 'history', label: '操作记录', detail: '查看任务及结果，不重新执行', keywords: '任务 历史 进度 结果', target: { kind: 'history' } },
   ];
   for (const skill of skills) {

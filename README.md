@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 总览与设置导航（开发中） | 2026-11-24 | 1、整理总览统计与响应式阅读顺序，保留原功能入口。[详情](CHANGELOG.md#desktop-design-refresh-20261124)<br>2、按用途整理设置目录，统一快捷搜索与页面定位，直接进入 GitHub 来源。[详情](CHANGELOG.md#desktop-design-refresh-20261124) |
 | Skill 状态保存（开发中） | 2026-11-22 | 1、将当前状态直接写成所需的 JSON，减少全量检查保存时的临时数据。[详情](CHANGELOG.md#stream-skill-state-20261122) |
 | 后台检查结果（开发中） | 2026-11-22 | 1、后台 Skill 检查合并完成后只读取一次最新目录，完整结果和完成戳可照常读取。[详情](CHANGELOG.md#check-result-snapshot-20261122) |
 | 技能库搜索（开发中） | 2026-11-21 | 1、列表和状态数量共用搜索、来源及分类筛选结果。[详情](CHANGELOG.md#shared-library-filter-20261121) |

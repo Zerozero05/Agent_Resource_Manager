@@ -1,27 +1,23 @@
-import { Children, createContext, isValidElement, useContext, useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react';
+import { createContext, useContext, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { ChevronDown } from 'lucide-react';
+import { SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingsSectionKey } from './settings-sections.ts';
 import { outlineId } from './workspace';
 import './settings.css';
 
-type SectionProps = { sectionKey: string; title: string; children: ReactNode };
-const SettingsContext = createContext<{ paneId: string; activeSection: string } | null>(null);
-const originalLabels: Record<string, string> = { general: '使用偏好', display: '显示', storage: '保存位置', network: '网络', github: 'GitHub', maintenance: '自动维护', scenes: '场景' };
-const panelId = (paneId: string, key: string) => `settings-${encodeURIComponent(paneId)}-${encodeURIComponent(key)}`;
+type SectionProps = { sectionKey: SettingsSectionKey; children: ReactNode };
+const SettingsContext = createContext<{ paneId: string; activeSection: SettingsSectionKey } | null>(null);
+const panelId = (paneId: string, key: SettingsSectionKey) => `settings-${encodeURIComponent(paneId)}-${encodeURIComponent(key)}`;
 
 /** One functional group at a time, using the existing Home scroller. */
 export function SettingsLayout({ paneId, scopeRef, expanded, onExpandedChange, activeSection, onActiveSectionChange, children }: {
   paneId: string; scopeRef: RefObject<HTMLElement | null>; expanded: boolean;
-  onExpandedChange: (expanded: boolean) => void; activeSection?: string;
-  onActiveSectionChange?: (section: string) => void; children: ReactNode;
+  onExpandedChange: (expanded: boolean) => void; activeSection: SettingsSectionKey;
+  onActiveSectionChange: (section: SettingsSectionKey) => void; children: ReactNode;
 }) {
-  const sections = Children.toArray(children).filter(child => isValidElement<SectionProps>(child) && child.type === SettingsSection).map(child => (child as ReactElement<SectionProps>).props);
-  const [localSection, setLocalSection] = useState(sections[0]?.sectionKey || 'general');
-  const requested = activeSection ?? localSection;
-  const selected = sections.some(section => section.sectionKey === requested) ? requested : sections[0]?.sectionKey || 'general';
-  const current = sections.find(section => section.sectionKey === selected);
+  const current = SETTINGS_SECTIONS[activeSection];
   const [narrow, setNarrow] = useState(false);
   const shell = useRef<HTMLElement>(null), navigation = useRef<HTMLElement>(null), controls = useRef<HTMLElement>(null), toggle = useRef<HTMLButtonElement>(null);
-  const navigationId = useId(), scrollPositions = useRef(new Map<string, number>()), previousSection = useRef(selected);
+  const navigationId = useId(), scrollPositions = useRef(new Map<SettingsSectionKey, number>()), previousSection = useRef(activeSection);
 
   useLayoutEffect(() => {
     const root = shell.current, nav = navigation.current, header = controls.current;
@@ -46,26 +42,29 @@ export function SettingsLayout({ paneId, scopeRef, expanded, onExpandedChange, a
   useLayoutEffect(() => {
     const scroll = scopeRef.current?.querySelector<HTMLElement>('[data-pane-scroll]') || scopeRef.current;
     if (!scroll) return;
-    if (previousSection.current !== selected) scroll.scrollTop = scrollPositions.current.get(selected) || 0;
-    previousSection.current = selected;
-    const remember = () => scrollPositions.current.set(selected, scroll.scrollTop);
+    if (previousSection.current !== activeSection) scroll.scrollTop = scrollPositions.current.get(activeSection) || 0;
+    previousSection.current = activeSection;
+    const remember = () => scrollPositions.current.set(activeSection, scroll.scrollTop);
     scroll.addEventListener('scroll', remember, { passive: true });
     return () => scroll.removeEventListener('scroll', remember);
-  }, [scopeRef, selected]);
+  }, [scopeRef, activeSection]);
 
-  function activate(key: string) {
+  function activate(key: SettingsSectionKey) {
     const scroll = scopeRef.current?.querySelector<HTMLElement>('[data-pane-scroll]') || scopeRef.current;
-    if (scroll) scrollPositions.current.set(selected, scroll.scrollTop);
-    setLocalSection(key); onActiveSectionChange?.(key);
+    if (scroll) scrollPositions.current.set(activeSection, scroll.scrollTop);
+    onActiveSectionChange(key);
     if (narrow) { onExpandedChange(false); toggle.current?.focus({ preventScroll: true }); }
   }
 
-  return <SettingsContext.Provider value={{ paneId, activeSection: selected }}>
+  return <SettingsContext.Provider value={{ paneId, activeSection }}>
     <section ref={shell} className="settings-shell" data-narrow={narrow || undefined} data-expanded={expanded} aria-label="偏好设置">
-      <header ref={controls} className="settings-navigation-heading" data-pane-sticky><button ref={toggle} type="button" className="settings-navigation-toggle" aria-label={`设置分类：${current?.title || '设置'}`} title={expanded ? '收起设置分类' : '展开设置分类'} aria-expanded={expanded} aria-controls={navigationId} onClick={() => onExpandedChange(!expanded)}><span>{current?.title || '设置分类'}</span><ChevronDown size={15} aria-hidden="true" /></button></header>
+      <header ref={controls} className="settings-navigation-heading" data-pane-sticky><button ref={toggle} type="button" className="settings-navigation-toggle" aria-label={`设置分类：${current.title}`} title={expanded ? '收起设置分类' : '展开设置分类'} aria-expanded={expanded} aria-controls={navigationId} onClick={() => onExpandedChange(!expanded)}><span>{current.title}</span><ChevronDown size={15} aria-hidden="true" /></button></header>
       <aside ref={navigation} className="settings-navigation" hidden={!expanded}>
         <nav id={navigationId} className="settings-navigation-items" aria-label="设置分类" hidden={!expanded} inert={!expanded} onKeyDown={event => { if (event.key === 'Escape' && narrow && expanded) { event.preventDefault(); event.stopPropagation(); onExpandedChange(false); toggle.current?.focus(); } }}>
-          {sections.map(section => <button type="button" key={section.sectionKey} aria-current={selected === section.sectionKey ? 'page' : undefined} aria-controls={panelId(paneId, section.sectionKey)} onClick={() => activate(section.sectionKey)}>{section.title}</button>)}
+          {SETTINGS_GROUPS.map(group => <div className="settings-navigation-group" role="group" aria-label={group.title} key={group.title}>
+            <span className="settings-navigation-group-title" aria-hidden="true">{group.title}</span>
+            {group.sections.map(key => <button type="button" key={key} aria-current={activeSection === key ? 'page' : undefined} aria-controls={panelId(paneId, key)} onClick={() => activate(key)}>{SETTINGS_SECTIONS[key].title}</button>)}
+          </div>)}
         </nav>
       </aside>
       <div className="settings-content">{children}</div>
@@ -73,13 +72,14 @@ export function SettingsLayout({ paneId, scopeRef, expanded, onExpandedChange, a
   </SettingsContext.Provider>;
 }
 
-export function SettingsSection({ sectionKey, title, children }: SectionProps) {
+export function SettingsSection({ sectionKey, children }: SectionProps) {
+  const setting = SETTINGS_SECTIONS[sectionKey], { title } = setting;
   const context = useContext(SettingsContext), section = useRef<HTMLElement>(null);
   const [needsHeading, setNeedsHeading] = useState(false);
   const paneId = context?.paneId || 'settings', active = !context || context.activeSection === sectionKey;
   const [visited, setVisited] = useState(active);
   useLayoutEffect(() => { if (active) setVisited(true); }, [active]);
-  const headingId = outlineId(`${paneId}:settings`, originalLabels[sectionKey] || title, 0, `settings:${sectionKey}`);
+  const headingId = outlineId(`${paneId}:settings`, 'anchorLabel' in setting ? setting.anchorLabel : title, 0, `settings:${sectionKey}`);
   useLayoutEffect(() => {
     const decorate = () => {
       const root = section.current;
