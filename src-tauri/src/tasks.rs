@@ -655,15 +655,33 @@ impl TaskSystem {
         crate::resource_runtime::release_idle(&manager)
     }
 
-    /// A cheap scheduler view; do not serialize file inventories every tick.
+    /// Read scheduler policy every tick; only active skill watches need path data.
     pub(crate) fn check_configuration(&self) -> Result<Value, String> {
         let manager = self
             .manager
             .lock()
             .map_err(|_| "Manager state lock failed")?;
-        Ok(
-            json!({"mode":if manager.basic_mode {"manual"} else {manager.state.check_mode.as_str()},"generation":manager.state.check_generation,"maintenance":crate::maintenance::snapshot(&manager.state.settings,manager.basic_mode),"roots":manager.state.local_roots,"skills":manager.state.skills.iter().filter_map(|skill|Some(json!({"id":skill["id"],"localPath":skill["localPath"].as_str()?}))).collect::<Vec<_>>()}),
-        )
+        let mut config = json!({
+            "mode": if manager.basic_mode { "manual" } else { manager.state.check_mode.as_str() },
+            "generation": manager.state.check_generation,
+            "maintenance": crate::maintenance::snapshot(&manager.state.settings, manager.basic_mode),
+            "roots": [],
+            "skills": [],
+        });
+        if crate::checks::skill_watch_active(&config) {
+            config["roots"] = json!(manager.state.local_roots);
+            config["skills"] = Value::Array(
+                manager
+                    .state
+                    .skills
+                    .iter()
+                    .filter_map(|skill| {
+                        Some(json!({"id": skill["id"], "localPath": skill["localPath"].as_str()?}))
+                    })
+                    .collect(),
+            );
+        }
+        Ok(config)
     }
 
     pub(crate) fn automatic_check(self: &Arc<Self>, request: Value) -> Result<(), String> {
@@ -7228,6 +7246,70 @@ mod tests {
             .unwrap();
         let fresh = start(&service, json!({"action":"read_file","skillId":"one"}));
         service.wait(&fresh).unwrap();
+    }
+
+    #[test]
+    fn check_configuration_projects_only_active_skill_watch_inputs() {
+        let (_dir, service) = fixture();
+        let roots = json!([
+            {"resolvedPath": "D:/synthetic/skills", "enabled": true},
+            {"resolvedPath": "D:/synthetic/paused", "enabled": false}
+        ]);
+        let skills = (0..1000)
+            .map(|index| {
+                json!({
+                    "id": format!("skill-{index}"),
+                    "localPath": format!("D:/synthetic/skills/{index}")
+                })
+            })
+            .collect::<Vec<_>>();
+        {
+            let mut manager = service.manager.lock().unwrap();
+            manager.state.local_roots = roots.as_array().unwrap().clone();
+            manager.state.skills = skills
+                .iter()
+                .cloned()
+                .map(|mut skill| {
+                    skill["description"] = json!("Do not copy unrelated metadata");
+                    skill
+                })
+                .chain([json!({"id": "remote-only"})])
+                .collect();
+            manager.state.check_generation = 17;
+        }
+        let expected_skills = Value::Array(skills);
+        for (mode, paused, basic, watch_active) in [
+            ("manual", false, false, false),
+            ("auto", false, false, true),
+            ("auto", true, false, false),
+            ("auto", false, false, true),
+            ("auto", false, true, false),
+        ] {
+            {
+                let mut manager = service.manager.lock().unwrap();
+                manager.state.check_mode = mode.into();
+                manager.basic_mode = basic;
+                manager.state.settings["maintenance"] = json!({
+                    "revision": 8,
+                    "pausedManually": paused,
+                    "pauseUntil": null,
+                    "window": null,
+                });
+            }
+            let config = service.check_configuration().unwrap();
+            assert_eq!(config["mode"], if basic { "manual" } else { mode });
+            assert_eq!(config["generation"], 17);
+            assert_eq!(config["maintenance"]["revision"], 8);
+            assert_eq!(config["maintenance"]["automaticAllowed"], !paused && !basic);
+            assert_eq!(crate::checks::skill_watch_active(&config), watch_active);
+            if watch_active {
+                assert_eq!(config["roots"], roots);
+                assert_eq!(config["skills"], expected_skills);
+            } else {
+                assert_eq!(config["roots"], json!([]));
+                assert_eq!(config["skills"], json!([]));
+            }
+        }
     }
 
     #[test]

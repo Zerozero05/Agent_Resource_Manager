@@ -14,6 +14,14 @@ const MAX_DEBOUNCE: Duration = Duration::from_millis(1600);
 const REMOTE_INTERVAL: Duration = Duration::from_secs(60);
 const FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
 
+fn automatic_maintenance_allowed(config: &Value) -> bool {
+    config["maintenance"]["automaticAllowed"] != false
+}
+
+pub(crate) fn skill_watch_active(config: &Value) -> bool {
+    config["mode"] == "auto" && automatic_maintenance_allowed(config)
+}
+
 fn watched_paths(config: &Value) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = config["roots"]
         .as_array()
@@ -145,7 +153,8 @@ pub(crate) fn start(service: &Arc<TaskSystem>) {
             let Ok(config) = service.check_configuration() else {
                 continue;
             };
-            if config["maintenance"]["automaticAllowed"] != false
+            let maintenance_allowed = automatic_maintenance_allowed(&config);
+            if maintenance_allowed
                 && resource_checked.is_none_or(|last| last.elapsed() >= Duration::from_secs(60))
             {
                 // Tool version observations have their own persistent 24h due
@@ -153,8 +162,8 @@ pub(crate) fn start(service: &Arc<TaskSystem>) {
                 let _ = service.automatic_resource_version_check();
                 resource_checked = Some(Instant::now());
             }
-            if config["mode"] != "auto" || config["maintenance"]["automaticAllowed"] == false {
-                if config["maintenance"]["automaticAllowed"] == false {
+            if !skill_watch_active(&config) {
+                if !maintenance_allowed {
                     service.cancel_automatic();
                 } else {
                     service.cancel_automatic_skill_checks();
