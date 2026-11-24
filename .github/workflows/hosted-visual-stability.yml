@@ -16,10 +16,10 @@ env:
   CANDIDATE_BUILD_INFO_SHA256: 'ccb64061a3a6335d319870750ae7bc08fd1ce0a08bb2e19c67d9d44920d18686'
   REFERENCE_REVIEW_ARCHIVE_SHA256: '5b9a4011a2c14e865bfd222a0ad6b3e64e87a8316feb863d45c2d5f57945712d'
   REFERENCE_ROI_ARCHIVE_SHA256: '1b576b7f4edb00866db1a4ab9f2f9152a12e72c30411622165da3756f39ece11'
-  APPROVAL_SHA256: '8aeb3d613337dd9cbd9af624c03f7e4e8c92b2083ba2c53441ce000994c3cb22'
+  APPROVAL_SHA256: 'a39af03e5eb3c33120e062b2642efccbf00329656676ab82fdb2470e4492de93'
 jobs:
   stability:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-stability-d5b00b4-20261125' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-stability-d5b00b4-20261125-r2' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
