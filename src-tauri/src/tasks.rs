@@ -1282,6 +1282,10 @@ impl TaskSystem {
                     return Err(CANCELLED.into());
                 }
                 if let Some(summary) = hook.take_check_summary()? {
+                    // The detached check and its merge base are finished.
+                    // Release them before building the full live result.
+                    drop(worker);
+                    drop(hook);
                     value = self.snapshot()?;
                     for field in ["sceneRevision", "activeSceneId", "sceneError"] {
                         if value.get(field).is_none() {

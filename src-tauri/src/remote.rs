@@ -130,6 +130,22 @@ fn refresh_declared_local_version(skill: &mut Value) {
     // Declarations describe local files; they do not change source or baseline.
     let _ = local::refresh_declared_metadata(skill, None);
 }
+fn observe_local_package(skill: &mut Value) -> Result<BTreeMap<String, String>, String> {
+    refresh_declared_local_version(skill);
+    let hashes = current_hashes(skill);
+    match &hashes {
+        Ok(current) => {
+            local::invalidate_runtime_audit(skill, current);
+            crate::audit::refresh_local_audit(skill, Some(current));
+        }
+        Err(_) => {
+            local::invalidate_runtime_audit(skill, &BTreeMap::new());
+            crate::audit::refresh_local_audit(skill, None);
+        }
+    }
+    hashes
+}
+
 fn subset(all: &BTreeMap<String, String>, files: &[String]) -> BTreeMap<String, String> {
     files
         .iter()
@@ -1256,22 +1272,18 @@ fn refresh_and_save(m: &mut Manager, req: &Value) -> Result<Option<Vec<Value>>, 
     let previous = m.state.clone();
     let automatic = req["automatic"] == true;
     let remote_only = req["remoteOnly"] == true;
+    let no_sources = m.state.sources.is_empty();
     let mut snapshots = BTreeMap::new();
     // Local declarations remain readable even when the remote request later fails.
+    // Without a source, unlinked records can use the same observation for their final status.
     for skill in m.state.skills.iter_mut().filter(|s| {
-        !remote_only && s["localPath"].as_str().is_some() && refresh_matches(&selected, s)
+        !remote_only
+            && s["localPath"].is_string()
+            && (!no_sources || !s["sourceId"].is_null())
+            && refresh_matches(&selected, s)
     }) {
-        refresh_declared_local_version(skill);
-        match current_hashes(skill) {
-            Ok(current) => {
-                local::invalidate_runtime_audit(skill, &current);
-                crate::audit::refresh_local_audit(skill, Some(&current));
-                skill["lastLocalCheckedAt"] = json!(now());
-            }
-            Err(_) => {
-                local::invalidate_runtime_audit(skill, &BTreeMap::new());
-                crate::audit::refresh_local_audit(skill, None);
-            }
+        if observe_local_package(skill).is_ok() {
+            skill["lastLocalCheckedAt"] = json!(now());
         }
     }
     let selected_unlinked = m.state.skills.iter().any(|skill| {
@@ -1412,7 +1424,12 @@ fn refresh_and_save(m: &mut Manager, req: &Value) -> Result<Option<Vec<Value>>, 
         .filter(|s| !remote_only && s["sourceId"].is_null() && refresh_matches(&selected, s))
     {
         skill["lastChecked"] = json!(now());
-        match current_hashes(skill) {
+        let hashes = if no_sources && skill["localPath"].is_string() {
+            observe_local_package(skill)
+        } else {
+            current_hashes(skill)
+        };
+        match hashes {
             Ok(h) => {
                 skill["lastLocalCheckedAt"] = json!(now());
                 skill["localHashes"] = json!(h);
@@ -4216,6 +4233,12 @@ mod association_behavior_tests {
         assert!(record["lastRemoteCheckedAt"].is_null());
         record["lastLocalCheckedAt"] = json!("2000-01-01T00:00:00Z");
         record["favorite"] = json!(true);
+        fs::write(
+            left.join("README.md"),
+            "Local documentation outside runtime scope.",
+        )
+        .unwrap();
+        let inventory = json!(local::files(&left).unwrap());
         let mut m = Manager::new(d.path().join("data")).unwrap();
         m.upsert_skill(record.clone());
         crate::dispatch(
@@ -4228,6 +4251,13 @@ mod association_behavior_tests {
             record["lastLocalCheckedAt"]
         );
         assert_eq!(m.state.skills[0]["favorite"], true);
+        assert_eq!(m.state.skills[0]["status"], "local_only");
+        assert_eq!(m.state.skills[0]["localHashes"], inventory);
+        assert_eq!(
+            m.state.skills[0]["runtimeAudit"]["inventoryHashes"],
+            inventory
+        );
+        assert_eq!(m.state.skills[0]["runtimeFiles"], record["runtimeFiles"]);
         let success = m.state.skills[0]["lastLocalCheckedAt"].clone();
         m.state.skills[0]["localPath"] = json!(d.path().join("never-created"));
         crate::dispatch(
@@ -4236,6 +4266,8 @@ mod association_behavior_tests {
         )
         .unwrap();
         assert_eq!(m.state.skills[0]["lastLocalCheckedAt"], success);
+        assert_eq!(m.state.skills[0]["localHashes"], inventory);
+        assert_ne!(m.state.skills[0]["runtimeAudit"]["status"], "passed");
         assert!(m.state.skills[0]["lastRemoteCheckedAt"].is_null());
         assert!(m.state.skills[0]["error"].as_str().is_some());
     }
