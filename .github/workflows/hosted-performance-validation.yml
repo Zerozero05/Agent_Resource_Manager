@@ -14,7 +14,7 @@ env:
   CANDIDATE_BUILD_INFO_SHA256: 'a14841439708890bf287157e4da59d52325a4619c8d02277aa1f461cd3a675e5'
 jobs:
   measure:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-document-observer-6604519-20261124' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-document-observer-6604519-20261124-r2' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 15
     defaults:

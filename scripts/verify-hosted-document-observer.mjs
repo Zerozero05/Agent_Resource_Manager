@@ -13,7 +13,7 @@ const sourceCommit = '660451977f924eead9b16ceff72f17c1c61d9497';
 const candidateSha256 = '51d077f6e87b565b8496cdca852aa80549921d74b63167bcbc102132fbf79a25';
 const originalBuildInfoSha256 = 'a14841439708890bf287157e4da59d52325a4619c8d02277aa1f461cd3a675e5';
 const candidateRunId = '45399676483';
-const branch = 'codex/hosted-document-observer-6604519-20261124';
+const branch = 'codex/hosted-document-observer-6604519-20261124-r2';
 const fixtureParent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const maxTrials = 20;
 const samplesPerArm = 6;
@@ -38,6 +38,13 @@ async function ordinaryFile(path) {
   return readFile(path);
 }
 
+function orderedJson(value) {
+  if (Array.isArray(value)) return value.map(orderedJson);
+  if (value !== null && typeof value === 'object')
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, orderedJson(value[key])]));
+  return value;
+}
+
 function protectedCatalog(fixture) {
   const db = new DatabaseSync(fixture.dbPath, { readOnly: true });
   try {
@@ -48,11 +55,12 @@ function protectedCatalog(fixture) {
     assert.equal(tools.length, 100);
     assert.equal(checkMode, 'manual');
     assert.ok([sources, connections, localRoots, ignoredLocalPaths].every(items => Array.isArray(items) && !items.length), 'Fixture acquired an outside source, connection, or watch scope.');
-    return digest(JSON.stringify({
-      settings, sources, connections, localRoots, ignoredLocalPaths, checkMode, tools,
+    return {
+      // Re-saving the fixture can reorder nested settings keys without changing values.
+      settings: orderedJson(settings), sources, connections, localRoots, ignoredLocalPaths, checkMode, tools,
       skills: skills.map(({ id, name, displayName, localPath, version, categoryId, favorite, runtimeFiles }) =>
         ({ id, name, displayName, localPath, version, categoryId, favorite, runtimeFiles })),
-    }));
+    };
   } finally {
     db.close();
   }
@@ -242,6 +250,7 @@ async function run() {
       documentSha256: skillHash, diskFileManifestBeforeSha256: baselineFiles,
     };
     assert.equal(report.fixture.fingerprint, 'bd3bb8c680b1b7578d376583ab4b416c88ee47b66ae66b813bee455ca31ba3a1');
+    assert.equal(report.fixture.sourceSha256, '770ee3547318be4c8053e595b389726c43868e73e2f9a7b4043341961b16706e');
     const seed = new DatabaseSync(fixture.dbPath, { readOnly: true });
     try {
       const state = JSON.parse(seed.prepare('SELECT payload FROM app_state WHERE id=1').get().payload);
@@ -252,7 +261,8 @@ async function run() {
     const driverPath = join(fixture.root, 'document-observer-driver.json');
     app = await NativeUiaSession.launch({ executable, sha256: candidateSha256, dataDir: fixture.dataDir, reportPath: driverPath, accessibilityInput: true });
     assert.equal(app.identity.executableSha256, candidateSha256);
-    assert.ok(app.identity.completeBackendStartup !== false && samePath(app.identity.dataDirectory, fixture.dataDir));
+    assert.equal(app.identity.readinessMode, 'strict-skill-list');
+    assert.ok(app.identity.startupMs > 0 && samePath(app.identity.dataDirectory, fixture.dataDir));
     report.nativeSession = app.identity;
     await ownedWindow(app, 15000);
     await app.call('search', { index });
@@ -305,25 +315,37 @@ async function run() {
     report.error = error.message;
   } finally {
     if (app) {
+      let driver;
       try {
-        const { driverReport } = await app.quit();
-        assert.equal(driverReport.pid, app.identity.pid);
-        assert.equal(driverReport.creationFileTime, app.identity.creationFileTime);
-        assert.equal(driverReport.executableSha256, candidateSha256);
-        assert.equal(driverReport.datasetDescriptorSha256, report.fixture.descriptorSha256);
-        report.normalExit = true;
-        await writeFile(join(evidenceDirectory, 'native-driver.json'), json(driverReport), { flag: 'wx' });
+        driver = (await app.quit()).driverReport;
       } catch (error) {
         report.exitError = error.message;
-        if (app.driverReport) await writeFile(join(evidenceDirectory, 'native-driver-failure.json'), json(app.driverReport), { flag: 'wx' });
+        driver = app.driverReport;
+      }
+      try {
+        if (driver) {
+          await writeFile(join(evidenceDirectory, 'native-driver.json'), json(driver), { flag: 'wx' });
+          assert.equal(driver.pid, app.identity.pid);
+          assert.equal(driver.creationFileTime, app.identity.creationFileTime);
+          assert.equal(driver.windowHandle, app.identity.windowHandle);
+          assert.equal(driver.executableSha256, candidateSha256);
+          assert.equal(driver.datasetDescriptorSha256, report.fixture.descriptorSha256);
+          assert.equal(driver.closedNormally, true);
+          report.normalExit = true;
+        }
+      } catch (error) {
+        report.exitError ??= error.message;
       }
     }
     try {
       if (baselineFiles) {
         const diskFileManifestAfterSha256 = await protectedFiles(fixture);
-        const catalogAfterSha256 = baselineState && report.normalExit ? protectedCatalog(fixture) : null;
-        report.protectedState = { diskFileManifestAfterSha256, catalogBeforeSha256: baselineState ?? null, catalogAfterSha256,
-          filesUnchanged: diskFileManifestAfterSha256 === baselineFiles, catalogUnchanged: catalogAfterSha256 !== null && catalogAfterSha256 === baselineState };
+        const catalogAfter = baselineState && report.normalExit ? protectedCatalog(fixture) : null;
+        const catalogBeforeSha256 = baselineState ? digest(json(baselineState)) : null;
+        const catalogAfterSha256 = catalogAfter ? digest(json(catalogAfter)) : null;
+        report.protectedState = { diskFileManifestAfterSha256, catalogBeforeSha256, catalogAfterSha256,
+          filesUnchanged: diskFileManifestAfterSha256 === baselineFiles,
+          catalogUnchanged: catalogAfterSha256 !== null && catalogAfterSha256 === catalogBeforeSha256 };
       }
       assert.equal(await hashFile(executable), candidateSha256);
       assert.equal(await hashFile(buildInfoPath), report.provenance.buildInfoSha256);
@@ -334,6 +356,17 @@ async function run() {
       report.status = report.normalExit && report.protectedState?.filesUnchanged && report.protectedState?.catalogUnchanged &&
         !report.exitError && !report.readbackError ? 'paired-observers-observed' : 'incomplete';
     }
+    const admitted = report.attempts.filter(attempt => attempt.admitted);
+    const summarize = values => {
+      if (!values.length) return null;
+      const sorted = values.sort((left, right) => left - right);
+      const lower = sorted[Math.floor((sorted.length - 1) / 2)], upper = sorted[Math.ceil((sorted.length - 1) / 2)];
+      return { count: sorted.length, minMs: sorted[0], medianMs: (lower + upper) / 2, maxMs: sorted.at(-1) };
+    };
+    report.results = {
+      originalUiaMs: summarize(admitted.filter(attempt => attempt.arm === 'uia').map(attempt => attempt.sample.durationMs)),
+      firstVisibleHeadingAndTabUpperMs: summarize(admitted.filter(attempt => attempt.arm === 'pixels').map(attempt => attempt.sample.pixels.firstMatchUpperMs)),
+    };
     report.finishedAt = new Date().toISOString();
     await save();
   }
