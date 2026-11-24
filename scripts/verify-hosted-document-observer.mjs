@@ -9,11 +9,9 @@ import { assertNoUserManager, NativeUiaSession } from './native-uia-client.mjs';
 import { createPerformanceFixture } from './performance-fixture.mjs';
 import { ownedForeground } from './performance-policy.mjs';
 
-const sourceCommit = '660451977f924eead9b16ceff72f17c1c61d9497';
-const candidateSha256 = '51d077f6e87b565b8496cdca852aa80549921d74b63167bcbc102132fbf79a25';
-const originalBuildInfoSha256 = 'a14841439708890bf287157e4da59d52325a4619c8d02277aa1f461cd3a675e5';
-const candidateRunId = '45399676483';
-const branch = 'codex/hosted-document-observer-6604519-20261124-r2';
+const sourceCommit = 'd5b00b4d5bcbc86c83e8612594ba21fe187d4700';
+const candidateRunId = '45448781321';
+const branch = 'codex/hosted-document-observer-d5b00b4-20261125';
 const fixtureParent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const maxTrials = 20;
 const samplesPerArm = 6;
@@ -140,7 +138,7 @@ async function waitCheck(app, id, predicate, timeoutMs, initial) {
   return result;
 }
 
-function validateSample(sample, identity, arm) {
+function validateSample(sample, identity, arm, reference) {
   assert.equal(sample.category, 'document');
   assert.equal(sample.condition, 'native-accessibility-input-to-painted-result');
   assert.equal(sample.observationMode, arm === 'uia' ? 'synchronous-input-then-observation' : 'pixels-then-semantic-confirmation');
@@ -151,10 +149,14 @@ function validateSample(sample, identity, arm) {
   assert.ok(Number.isSafeInteger(sample.startedAtUtcMs) && Number.isSafeInteger(sample.finishedAtUtcMs) && sample.finishedAtUtcMs > sample.startedAtUtcMs);
   assert.ok(Number.isFinite(sample.durationMs) && sample.durationMs > 0);
   if (arm === 'pixels') {
-    const { firstMatchUpperMs, firstMatchAtUtcMs, captureCount, reconfirmedAtMs } = sample.pixels;
-    assert.ok(Number.isFinite(firstMatchUpperMs) && firstMatchUpperMs > 0 && Number.isFinite(reconfirmedAtMs) && reconfirmedAtMs >= firstMatchUpperMs);
+    const { firstMatchUpperMs, firstMatchAtUtcMs, captureCount, reconfirmedAtMs, firstCaptureSha256s, repeatedCaptureSha256s } = sample.pixels;
+    assert.ok(Number.isFinite(firstMatchUpperMs) && firstMatchUpperMs > 0 && Number.isFinite(reconfirmedAtMs) &&
+      reconfirmedAtMs > firstMatchUpperMs && reconfirmedAtMs < sample.durationMs);
     assert.ok(Number.isSafeInteger(firstMatchAtUtcMs) && firstMatchAtUtcMs >= sample.startedAtUtcMs && firstMatchAtUtcMs <= sample.finishedAtUtcMs);
     assert.ok(Number.isSafeInteger(captureCount) && captureCount >= 2);
+    const expectedHashes = [reference.titleSha256, reference.tabSha256, reference.bodySha256];
+    assert.deepEqual(firstCaptureSha256s, expectedHashes);
+    assert.deepEqual(repeatedCaptureSha256s, expectedHashes);
   }
 }
 
@@ -175,6 +177,9 @@ function overlap(attempt) {
 
 async function run() {
   const env = process.env;
+  const { CANDIDATE_SHA256: candidateSha256, CANDIDATE_BUILD_INFO_SHA256: originalBuildInfoSha256,
+    CANDIDATE_ARCHIVE_SHA256: candidateArchiveSha256, CANDIDATE_ARTIFACT_ID: candidateArtifactId,
+    CANDIDATE_JOB_ID: candidateJobId } = env;
   assert.equal(process.platform, 'win32');
   assert.equal(env.GITHUB_ACTIONS, 'true');
   assert.equal(env.RUNNER_ENVIRONMENT, 'github-hosted');
@@ -186,8 +191,9 @@ async function run() {
   assert.match(env.GITHUB_RUN_ATTEMPT ?? '', /^\d+$/);
   assert.equal(env.CANDIDATE_SOURCE, sourceCommit);
   assert.equal(env.CANDIDATE_RUN_ID, candidateRunId);
-  assert.equal(env.CANDIDATE_SHA256, candidateSha256);
-  assert.equal(env.CANDIDATE_BUILD_INFO_SHA256, originalBuildInfoSha256);
+  for (const value of [candidateSha256, originalBuildInfoSha256, candidateArchiveSha256])
+    assert.match(value ?? '', sha, 'The exact EXE, archive and original build info must be pinned.');
+  for (const value of [candidateJobId, candidateArtifactId]) assert.match(value ?? '', /^[1-9]\d*$/);
   assert.equal(process.argv.length, 5, 'Pass the verified x64 executable, native build-info file, and new evidence directory.');
   assert.ok(isAbsolute(env.RUNNER_TEMP ?? ''), 'The hosted runner temporary root is missing.');
 
@@ -213,18 +219,20 @@ async function run() {
   await mkdir(evidenceDirectory);
   assert.ok(samePath(await realpath(evidenceDirectory), evidenceDirectory));
   const report = {
-    format: 'agent-resource-manager-hosted-document-observer-v1',
+    format: 'agent-resource-manager-hosted-document-body-observer-v2',
     status: 'incomplete',
     provenance: {
-      sourceCommit, candidateSha256, candidateRunId, originalBuildInfoSha256, buildInfoSha256: digest(buildInfoBytes),
+      sourceCommit, candidateSha256, candidateRunId, candidateJobId, candidateArtifactId, candidateArchiveSha256,
+      originalBuildInfoSha256, buildInfoSha256: digest(buildInfoBytes),
       diagnosticCommit: env.GITHUB_SHA, hostedRunId: env.GITHUB_RUN_ID, imageOs: env.ImageOS, imageVersion: env.ImageVersion,
     },
-    scope: 'One fixed warmed synthetic document, one exact global check per trial, two separate observation methods in one native session.',
+    scope: 'One fixed warmed synthetic document at its normal initial scroll position, one exact global check per trial, two observers in one native session.',
     limitations: [
-      'Pixel timings are an observed upper bound for matching heading and selected description-tab regions. They do not time first visible Markdown text.',
+      'The pixel endpoint bounds the first observed exact match of a distinctive visible Markdown crop and both document controls. It does not time all Markdown content.',
+      'Calibration reports visible candidates without scrolling. If no distinctive body crop is visible, the diagnostic ends before any measured check.',
       'A previous mismatch completion time is an observation timestamp, not a proven lower bound for presentation.',
       'The pixel probe separately requires the original semantic predicate and repeat confirmation. Only samples fully inside a successful check are admitted.',
-      'This diagnostic does not replace the original mixed benchmark or pass its 200 ms P95 threshold.',
+      'Six warmed trials per observer do not establish a P95, cold opening, or result under other viewport or workload conditions. The original 200 ms criterion remains separate.',
     ],
     plan: { index, samplesPerArm, maxTrials, armOrder },
     attempts: [],
@@ -268,13 +276,23 @@ async function run() {
     await app.call('search', { index });
     await app.call('openDocument', { index });
     report.reference = await app.call('captureDocumentReference', { index });
-    for (const key of ['titleBounds', 'selectedTabBounds', 'windowBounds']) assert.ok(report.reference[key], 'The native pixel reference is incomplete.');
-    assert.match(report.reference.titleSha256, sha);
-    assert.match(report.reference.tabSha256, sha);
-    assert.equal(typeof report.reference.bodyMarkerVisible, 'boolean');
+    assert.ok(Array.isArray(report.reference.bodyObservations), 'Native Markdown elements were not recorded.');
+    await save();
     await ownedWindow(app);
     await app.call('closeDocument', { index });
     baselineState = protectedCatalog(fixture);
+    if (report.reference.status === 'no-verified-visible-markdown-body-at-open') {
+      report.status = 'no-verified-visible-markdown-body-at-open';
+      throw new Error('No uniquely identified Markdown body glyph fit the initial native viewport; the document was not scrolled.');
+    }
+    assert.equal(report.reference.status, 'visible-markdown-body-reference');
+    const { body } = report.reference;
+    assert.ok(['markdown-h1', 'markdown-h2', 'markdown-paragraph'].includes(body?.kind) && typeof body.name === 'string');
+    assert.ok(['native-heading-level', 'rendered-article-anchor', 'exact-paragraph-text'].includes(body.identification));
+    for (const value of [...['titleBounds', 'selectedTabBounds', 'windowBounds', 'viewportBounds', 'captureBounds'].map(key => report.reference[key]), body.bounds])
+      assert.ok(Array.isArray(value) && value.length === 4 && value.every(Number.isSafeInteger) &&
+        value[2] > 0 && value[3] > 0, 'The exact native pixel reference geometry is incomplete.');
+    for (const key of ['titleSha256', 'tabSha256', 'bodySha256']) assert.match(report.reference[key], sha);
     await save();
 
     const seenChecks = new Set();
@@ -294,7 +312,7 @@ async function run() {
       if (attempt.before.status === 'running') {
         attempt.sample = await app.call(arm === 'uia' ? 'openDocument' : 'openDocumentPixels', { index });
         attempt.after = await readCheck(app, id);
-        validateSample(attempt.sample, app.identity, arm);
+        validateSample(attempt.sample, app.identity, arm, report.reference);
         await ownedWindow(app);
       }
       attempt.completed = await waitCheck(app, id, task => task.status === 'succeeded', 20000, attempt.after);
@@ -365,7 +383,8 @@ async function run() {
     };
     report.results = {
       originalUiaMs: summarize(admitted.filter(attempt => attempt.arm === 'uia').map(attempt => attempt.sample.durationMs)),
-      firstVisibleHeadingAndTabUpperMs: summarize(admitted.filter(attempt => attempt.arm === 'pixels').map(attempt => attempt.sample.pixels.firstMatchUpperMs)),
+      firstVisibleMarkdownAndControlsUpperMs: summarize(admitted.filter(attempt => attempt.arm === 'pixels').map(attempt => attempt.sample.pixels.firstMatchUpperMs)),
+      pixelObserverWithSemanticConfirmationMs: summarize(admitted.filter(attempt => attempt.arm === 'pixels').map(attempt => attempt.sample.durationMs)),
     };
     report.finishedAt = new Date().toISOString();
     await save();

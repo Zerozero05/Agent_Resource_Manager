@@ -125,6 +125,8 @@ public sealed class NativeUiMeasurement : IDisposable {
   [DllImport("user32.dll",SetLastError=true)] static extern bool AttachThreadInput(uint from,uint to,bool attach);
   [DllImport("user32.dll",EntryPoint="PeekMessageW",CharSet=CharSet.Unicode)] static extern bool PeekMessage(out MSG message,IntPtr window,uint first,uint last,uint remove);
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window,out RECT rect);
+  [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr window,out RECT rect);
+  [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr window,ref POINT point);
   [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr window,IntPtr after,int x,int y,int width,int height,uint flags);
   [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr window,IntPtr hdc,uint flags);
   [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
@@ -266,10 +268,10 @@ public sealed class NativeUiMeasurement : IDisposable {
   public object Tab(bool home){AutomationElement scope=Named("工作区标签",null,false);if(scope==null)throw new InvalidOperationException("Workspace tabs unavailable.");AutomationElement target=null;foreach(AutomationElement item in scope.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.TabItem))){string name=item.Current.Name;if(home?(name=="工作台"||name.StartsWith("工作台 ",StringComparison.Ordinal)):name=="Perf Skill 0000"){if(target!=null)throw new InvalidOperationException("Workspace tab selector is ambiguous.");target=item;}}if(target==null)throw new InvalidOperationException("Requested workspace tab unavailable.");return Measure("tab",()=>Click(target),()=>home?Named("搜索 Skill",ControlType.Edit)!=null:DocumentReady("Perf Skill 0000"));}
   public void CloseDocument(string title){Click(Button("关闭 "+title));Wait(()=>Named("关闭 "+title,ControlType.Button,false)==null&&Named("搜索 Skill",ControlType.Edit)!=null);}
   DocumentFrame documentReference;
+  const string DocumentParagraph = "仅用于隔离的本地性能验收，不调用外部程序，不连接远端。";
   sealed class DocumentFrame {
-    public System.Drawing.Rectangle Title, SelectedTab, Window;
-    public byte[] TitlePixels, TabPixels;
-    public bool BodyMarkerVisible;
+    public System.Drawing.Rectangle Title, SelectedTab, Body, Window, Viewport, Capture;
+    public byte[] TitlePixels, TabPixels, BodyPixels;
   }
   System.Drawing.Rectangle ScreenWindow() {
     Identity(true);
@@ -277,17 +279,31 @@ public sealed class NativeUiMeasurement : IDisposable {
     if(!GetWindowRect(window,out box)) throw new InvalidOperationException("Owned screen bounds are unavailable.");
     return System.Drawing.Rectangle.FromLTRB(box.l,box.t,box.r,box.b);
   }
-  System.Drawing.Rectangle DocumentCrop(AutomationElement element, System.Drawing.Rectangle frame) {
-    Rect box=element.Current.BoundingRectangle;
-    if(box.IsEmpty||box.Width<2||box.Height<2||box.Width>620||box.Height>100)
-      throw new InvalidOperationException("The exact document crop does not have bounded text geometry.");
+  System.Drawing.Rectangle DocumentViewport() {
+    RECT client;
+    var origin=new POINT(0,0);
+    if(!GetClientRect(window,out client)||!ClientToScreen(window,ref origin)||GetSystemMetrics(80)!=1)
+      throw new InvalidOperationException("The owned client and single hosted desktop must have measurable screen bounds.");
+    var screen=new System.Drawing.Rectangle(GetSystemMetrics(76),GetSystemMetrics(77),GetSystemMetrics(78),GetSystemMetrics(79));
+    var visible=System.Drawing.Rectangle.Intersect(screen,new System.Drawing.Rectangle(origin.x,origin.y,client.r,client.b));
+    if(visible.Width<=0||visible.Height<=0) throw new InvalidOperationException("The owned client does not intersect the visible hosted desktop.");
+    return visible;
+  }
+  static int[] DocumentBounds(System.Drawing.Rectangle rect) {return new[]{rect.X,rect.Y,rect.Width,rect.Height};}
+  static System.Drawing.Rectangle DocumentCrop(Rect box, System.Drawing.Rectangle viewport) {
+    if(box.IsEmpty||!double.IsFinite(box.X)||!double.IsFinite(box.Y)||!double.IsFinite(box.Width)||!double.IsFinite(box.Height)
+      ||box.Width<2||box.Height<2||box.Width>960||box.Height>100) return System.Drawing.Rectangle.Empty;
     var crop=System.Drawing.Rectangle.FromLTRB((int)Math.Ceiling(box.Left),(int)Math.Ceiling(box.Top),(int)Math.Floor(box.Right),(int)Math.Floor(box.Bottom));
-    if(!frame.Contains(crop)||crop.Width<2||crop.Height<2) throw new InvalidOperationException("The text is not fully visible in the owned window.");
-    return crop;
+    return viewport.Contains(crop)&&crop.Width>=2&&crop.Height>=2?crop:System.Drawing.Rectangle.Empty;
+  }
+  void AssertOwnedDocumentCrop(System.Drawing.Rectangle crop) {
+    foreach(var point in new[]{new POINT(crop.Left,crop.Top),new POINT(crop.Right-1,crop.Top),
+      new POINT(crop.Left,crop.Bottom-1),new POINT(crop.Right-1,crop.Bottom-1),new POINT(crop.X+crop.Width/2,crop.Y+crop.Height/2)}) {
+      if(GetAncestor(WindowFromPoint(point),2)!=window)
+        throw new InvalidOperationException("A document crop is obscured or outside the owned window.");
+    }
   }
   byte[] DocumentScreenPixels(System.Drawing.Rectangle crop) {
-    if(GetAncestor(WindowFromPoint(new POINT(crop.X+crop.Width/2,crop.Y+crop.Height/2)),2)!=window)
-      throw new InvalidOperationException("The document crop is obscured or outside the owned window.");
     var size=crop.Size;
     var format=System.Drawing.Imaging.PixelFormat.Format32bppRgb;
     using(var bitmap=new System.Drawing.Bitmap(size.Width,size.Height,format)) {
@@ -305,37 +321,118 @@ public sealed class NativeUiMeasurement : IDisposable {
       }
     }
   }
-  bool MatchesDocumentFrame(DocumentFrame reference) {
-    if(ScreenWindow()!=reference.Window) throw new InvalidOperationException("Owned window geometry changed after capturing the reference.");
-    bool titleMatch=DocumentScreenPixels(reference.Title).AsSpan().SequenceEqual(reference.TitlePixels);
-    bool tabMatch=DocumentScreenPixels(reference.SelectedTab).AsSpan().SequenceEqual(reference.TabPixels);
+  static byte[] ExtractDocumentPixels(byte[] frame, System.Drawing.Rectangle capture, System.Drawing.Rectangle crop) {
+    int columns=crop.Width*4;
+    var pixels=new byte[columns*crop.Height];
+    int offset=((crop.Y-capture.Y)*capture.Width+crop.X-capture.X)*4;
+    for(int row=0;row<crop.Height;row++) Buffer.BlockCopy(frame,offset+row*capture.Width*4,pixels,row*columns,columns);
+    return pixels;
+  }
+  byte[] CaptureOwnedDocumentFrame(DocumentFrame reference) {
+    if(ScreenWindow()!=reference.Window||DocumentViewport()!=reference.Viewport)
+      throw new InvalidOperationException("Owned visible desktop geometry changed after capturing the reference.");
+    AssertOwnedDocumentCrop(reference.Title);
+    AssertOwnedDocumentCrop(reference.SelectedTab);
+    AssertOwnedDocumentCrop(reference.Body);
+    AssertOwnedDocumentCrop(reference.Capture);
+    var frame=DocumentScreenPixels(reference.Capture);
     Identity(true);
-    return titleMatch&&tabMatch;
+    return frame;
+  }
+  static string DocumentPixelHash(byte[] pixels) {return Convert.ToHexString(SHA256.HashData(pixels)).ToLowerInvariant();}
+  bool MatchesDocumentFrame(DocumentFrame reference, out bool bodyMatches, out string[] matchHashes) {
+    var frame=CaptureOwnedDocumentFrame(reference);
+    var body=ExtractDocumentPixels(frame,reference.Capture,reference.Body);
+    bodyMatches=body.AsSpan().SequenceEqual(reference.BodyPixels);
+    matchHashes=null;
+    if(!bodyMatches) return false;
+    var title=ExtractDocumentPixels(frame,reference.Capture,reference.Title);
+    var tab=ExtractDocumentPixels(frame,reference.Capture,reference.SelectedTab);
+    if(!title.AsSpan().SequenceEqual(reference.TitlePixels)||!tab.AsSpan().SequenceEqual(reference.TabPixels)) return false;
+    matchHashes=new[]{DocumentPixelHash(title),DocumentPixelHash(tab),DocumentPixelHash(body)};
+    return true;
+  }
+  static int? DocumentHeadingLevel(AutomationElement element) {
+    // UI Automation exposes the Windows heading enumeration as an internal managed type.
+    var heading=element.GetCurrentPropertyValue(AutomationElement.HeadingLevelProperty,true);
+    if(heading==null||heading==AutomationElement.NotSupported) return null;
+    int controlValue=Convert.ToInt32(heading);
+    return controlValue>=80051&&controlValue<=80059?controlValue-80050:(int?)null;
+  }
+  System.Drawing.Rectangle FindDocumentBody(string title, DocumentFrame reference, List<object> observations, out object body) {
+    body=null;
+    var crop=System.Drawing.Rectangle.Empty;
+    // A window title, detail header, or outline button is not the article's H1.
+    foreach(var target in new[]{(name:title,level:1,kind:"markdown-h1"),(name:"作用与适用范围",level:2,kind:"markdown-h2"),(name:DocumentParagraph,level:0,kind:"markdown-paragraph")}) {
+      var matches=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,target.name));
+      if(matches.Count>12) throw new InvalidOperationException("The fixed document selector is unexpectedly ambiguous.");
+      int exact=0;
+      var possible=System.Drawing.Rectangle.Empty;
+      string identification=null;
+      foreach(AutomationElement element in matches) {
+        var properties=element.Current;
+        var level=DocumentHeadingLevel(element);
+        var automationId=Uri.UnescapeDataString(properties.AutomationId??"");
+        bool articleAnchor=automationId.StartsWith("pane-",StringComparison.Ordinal)&&
+          automationId.Contains("-document:SKILL.md:latest:"+target.name+"-0-",StringComparison.Ordinal);
+        string identity=target.level==0&&properties.ControlType==ControlType.Text?"exact-paragraph-text":
+          target.level>0&&level==target.level?"native-heading-level":
+          target.level>0&&level==null&&articleAnchor?"rendered-article-anchor":null;
+        var candidate=DocumentCrop(properties.BoundingRectangle,reference.Viewport);
+        bool visible=identity!=null&&properties.IsEnabled&&!properties.IsOffscreen&&!candidate.IsEmpty&&candidate.Top>=reference.SelectedTab.Bottom;
+        observations.Add(new{name=target.name, kind=target.kind, type=properties.ControlType.ProgrammaticName, headingLevel=level,
+          identification=identity, enabled=properties.IsEnabled, offscreen=properties.IsOffscreen, bounds=properties.BoundingRectangle.ToString(),
+          visibleWithinClient=visible});
+        if(identity!=null) exact++;
+        if(visible) {possible=candidate;identification=identity;}
+      }
+      if(body==null&&exact==1&&!possible.IsEmpty) {
+        crop=possible;
+        body=new{name=target.name,kind=target.kind,identification,bounds=DocumentBounds(crop)};
+      }
+    }
+    return crop;
+  }
+  static bool DocumentPixelsHaveInk(byte[] pixels) {
+    int darkest=255,lightest=0;
+    for(int i=0;i<pixels.Length;i+=4) {
+      int intensity=(pixels[i]+pixels[i+1]+pixels[i+2])/3;
+      darkest=Math.Min(darkest,intensity);lightest=Math.Max(lightest,intensity);
+    }
+    return lightest-darkest>=32;
   }
   public object CaptureDocumentReference(int index) {
     if(!AccessibilityInput||ConcurrentObservation||index!=0||documentReference!=null)
       throw new InvalidOperationException("Expected a single fixed fixture reference and synchronous accessibility input.");
-    var frame=ScreenWindow();
     string title="Perf Skill 0000";
     Wait(()=>DocumentReady(title));
     AutomationElement heading=Named(title,ControlType.Text);
     AutomationElement tabs=Named("Skill 详情");
     AutomationElement tab=tabs==null?null:Find(tabs,"说明",ControlType.TabItem);
     if(heading==null||tab==null) throw new InvalidOperationException("Exact visible document heading and selected description tab are unavailable.");
-    var reference=new DocumentFrame {
-      Window=frame, Title=DocumentCrop(heading,frame), SelectedTab=DocumentCrop(tab,frame),
-      BodyMarkerVisible=Named("仅用于隔离的本地性能验收，不调用外部程序，不连接远端。",ControlType.Text)!=null
-    };
-    reference.TitlePixels=DocumentScreenPixels(reference.Title);
-    reference.TabPixels=DocumentScreenPixels(reference.SelectedTab);
-    if(!MatchesDocumentFrame(reference)) throw new InvalidOperationException("The captured document reference could not be reproduced.");
+    var reference=new DocumentFrame { Window=ScreenWindow(), Viewport=DocumentViewport() };
+    reference.Title=DocumentCrop(heading.Current.BoundingRectangle,reference.Viewport);
+    reference.SelectedTab=DocumentCrop(tab.Current.BoundingRectangle,reference.Viewport);
+    if(reference.Title.IsEmpty||reference.SelectedTab.IsEmpty) throw new InvalidOperationException("The document controls are clipped.");
+    var observations=new List<object>();
+    reference.Body=FindDocumentBody(title,reference,observations,out var body);
+    if(body==null) return new {title, body, bodyObservations=observations, windowBounds=DocumentBounds(reference.Window),
+      viewportBounds=DocumentBounds(reference.Viewport), status="no-verified-visible-markdown-body-at-open"};
+    reference.Capture=System.Drawing.Rectangle.Union(reference.Body,System.Drawing.Rectangle.Union(reference.Title,reference.SelectedTab));
+    if((long)reference.Capture.Width*reference.Capture.Height>1000000)
+      throw new InvalidOperationException("The combined document crop exceeds the fixed observation budget.");
+    var captured=CaptureOwnedDocumentFrame(reference);
+    reference.TitlePixels=ExtractDocumentPixels(captured,reference.Capture,reference.Title);
+    reference.TabPixels=ExtractDocumentPixels(captured,reference.Capture,reference.SelectedTab);
+    reference.BodyPixels=ExtractDocumentPixels(captured,reference.Capture,reference.Body);
+    if(!DocumentPixelsHaveInk(reference.BodyPixels)||!MatchesDocumentFrame(reference,out _,out _))
+      throw new InvalidOperationException("The captured visible Markdown glyphs could not be reproduced.");
     documentReference=reference;
-    return new {title, scope="visible document heading and selected description tab", bodyMarkerVisible=reference.BodyMarkerVisible,
-      titleBounds=new[]{reference.Title.X,reference.Title.Y,reference.Title.Width,reference.Title.Height},
-      selectedTabBounds=new[]{reference.SelectedTab.X,reference.SelectedTab.Y,reference.SelectedTab.Width,reference.SelectedTab.Height},
-      windowBounds=new[]{reference.Window.X,reference.Window.Y,reference.Window.Width,reference.Window.Height},
-      titleSha256=Convert.ToHexString(SHA256.HashData(reference.TitlePixels)).ToLowerInvariant(),
-      tabSha256=Convert.ToHexString(SHA256.HashData(reference.TabPixels)).ToLowerInvariant()};
+    return new {title, body, bodyObservations=observations, status="visible-markdown-body-reference",
+      titleBounds=DocumentBounds(reference.Title), selectedTabBounds=DocumentBounds(reference.SelectedTab),
+      windowBounds=DocumentBounds(reference.Window), viewportBounds=DocumentBounds(reference.Viewport), captureBounds=DocumentBounds(reference.Capture),
+      titleSha256=DocumentPixelHash(reference.TitlePixels), tabSha256=DocumentPixelHash(reference.TabPixels),
+      bodySha256=DocumentPixelHash(reference.BodyPixels)};
   }
   public object OpenDocumentPixels(int index) {
     if(!AccessibilityInput||ConcurrentObservation||index!=0||documentReference==null)
@@ -344,21 +441,24 @@ public sealed class NativeUiMeasurement : IDisposable {
     AutomationElement scope=Named("可横向滚动的 Skill 列表",null,false);
     if(scope==null) throw new InvalidOperationException("Skill table is unavailable.");
     AutomationElement button=Button(title,scope);
-    if(MatchesDocumentFrame(documentReference))
-      throw new InvalidOperationException("The exact target frame already matched before any measurement input.");
+    if(MatchesDocumentFrame(documentReference,out bool bodyBefore,out _)||bodyBefore)
+      throw new InvalidOperationException("The exact Markdown body already matched before any measurement input.");
     double hit=0,previousMismatch=0,reconfirmed=0;
     long hitUtc=0;
     int captureCount=0;
+    string[] firstHashes=null,repeatedHashes=null;
     var sample=(Dictionary<string,object>)Measure("document",()=>Click(button),()=>DocumentReady(title),time=> {
       while(time.ElapsedMilliseconds<2500) {
         captureCount++;
-        if(MatchesDocumentFrame(documentReference)) {
+        if(MatchesDocumentFrame(documentReference,out _,out var matchHashes)) {
           if(hit==0) {
             hit=time.Elapsed.TotalMilliseconds;
             hitUtc=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            firstHashes=matchHashes;
           }
           else {
             reconfirmed=time.Elapsed.TotalMilliseconds;
+            repeatedHashes=matchHashes;
             return;
           }
         }
@@ -368,10 +468,11 @@ public sealed class NativeUiMeasurement : IDisposable {
         }
         Thread.Sleep(4);
       }
-      throw new InvalidOperationException("Exact visible document crops did not match and reconfirm within 2500 ms.");
+      throw new InvalidOperationException("The exact visible Markdown body and controls did not match and reconfirm within 2500 ms.");
     });
     sample["observationMode"]="pixels-then-semantic-confirmation";
-    sample["pixels"]=new {firstMatchUpperMs=hit, firstMatchAtUtcMs=hitUtc, previousMismatchCompletedMs=previousMismatch, captureCount, reconfirmedAtMs=reconfirmed};
+    sample["pixels"]=new {firstMatchUpperMs=hit, firstMatchAtUtcMs=hitUtc, previousMismatchCompletedMs=previousMismatch,
+      captureCount, reconfirmedAtMs=reconfirmed, firstCaptureSha256s=firstHashes, repeatedCaptureSha256s=repeatedHashes};
     return sample;
   }
   object Measure(string category,Action input,Func<bool> expected,Action<Stopwatch> afterDispatch=null){
