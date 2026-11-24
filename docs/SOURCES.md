@@ -12,6 +12,7 @@
 - [动效](https://developer.apple.com/design/human-interface-guidelines/motion.md)与[iPhone 动效辅助设置](https://support.apple.com/en-mide/guide/iphone/iph0b691d3ed/27/ios/27)：反馈轻量、立即可用，可以中断，状态可通过文字或焦点辨认。管理器沿用既有动效策略，加 150 ms 快捷入口轻入场、目录箭头旋转和工具图标按压反馈；时间及距离为本项目设计选择。
 - [可访问性](https://developer.apple.com/design/human-interface-guidelines/accessibility.md)：保留键盘、对比度和辅助设置。样式由项目自身实现，未复制苹果界面、素材、图标或 SDK。
 - 2026-11-25 补读 [WWDC26 iOS 27 材质更新](https://developer.apple.com/videos/play/wwdc2026/102/?time=1363)、[侧栏](https://developer.apple.com/design/human-interface-guidelines/sidebars.md)、[设置](https://developer.apple.com/design/human-interface-guidelines/settings.md)、[自适应布局](https://developer.apple.com/design/human-interface-guidelines/layout.md)及[反馈](https://developer.apple.com/design/human-interface-guidelines/feedback.md)。应用到操作菜单和快捷键浮层的实色边缘、菜单入场反馈与展开状态。Windows 版本保留鼠标、键盘和原有布局，以现有主题及辅助显示设置控制效果。
+- 2026-11-25 复核 Apple 正式版记录（27.2.1），在线阅读 [分段控件](https://developer.apple.com/design/human-interface-guidelines/segmented-controls.md)、[材质](https://developer.apple.com/design/human-interface-guidelines/materials.md)、[动效](https://developer.apple.com/design/human-interface-guidelines/motion.md)与 [Meet Liquid Glass](https://developer.apple.com/videos/play/wwdc2025/219/) 的相关章节。沿用同组选择的一致选中态、内容与操作层分离、短促可中断的反馈。在管理器原有导航、对话框和快捷键面板中以 CSS 实现，未采用 Apple 代码、素材或平台专属交互。
 
 <a id="desktop-design-refresh-20261124"></a>
 

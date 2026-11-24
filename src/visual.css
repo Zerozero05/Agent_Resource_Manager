@@ -106,3 +106,47 @@ button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outli
 .desktop-workspace :is(.dropdown,.floating-menu){border-color:var(--control-line);border-radius:10px}
 .desktop-workspace :is(.dropdown button,.floating-menu-item){border-radius:6px;line-height:1.5}
 .desktop-workspace .dropdown button{font-size:.875rem;white-space:normal;overflow-wrap:anywhere}
+/* A standalone reader starts at the document; the existing actions remain
+   together in an expandable overview. */
+.desktop-workspace .detail-overview > summary {
+  width: fit-content;
+  padding: 4px 8px;
+  border-radius: 7px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: .875rem;
+  font-weight: 600;
+}
+.desktop-workspace .detail-overview > summary:hover,
+.desktop-workspace .detail-overview[open] > summary {
+  background: var(--hover);
+}
+.desktop-workspace .detail-overview[open] > .detail-title {
+  margin-top: 12px;
+}
+
+/* Skill declarations are formatted as original text, outside the reading outline. */
+.desktop-workspace .document-caption:has(+ .document-frontmatter) {
+  margin-bottom: 4px;
+}
+.document-frontmatter {
+  margin: 0 0 8px;
+  color: var(--text-secondary);
+  font-size: .75rem;
+}
+.document-frontmatter > summary {
+  width: fit-content;
+  cursor: pointer;
+}
+.document-frontmatter > pre {
+  max-block-size: 14rem;
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--control-line);
+  border-radius: 8px;
+  background: var(--code-bg);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

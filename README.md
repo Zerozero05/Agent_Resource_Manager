@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 浮层与 Skill 阅读（开发中） | 2026-11-25 | 1、统一工作区快捷键、对话框和分段控件的视觉层次。[详情](CHANGELOG.md#ios27-panels-and-skill-reading-20261125)<br>2、Skill 原始元数据可按需展开，正文和目录独立显示。[详情](CHANGELOG.md#ios27-panels-and-skill-reading-20261125) |
 | Skill 详情打开（开发中） | 2026-11-25 | 1、本窗口新建详情省去读取空草稿的一次往返。[详情](CHANGELOG.md#fresh-detail-runtime-20261125)<br>2、保留草稿恢复、聚焦与跨窗口转移。[详情](CHANGELOG.md#fresh-detail-runtime-20261125) |
 | 后台检查摘要保存（开发中） | 2026-11-25 | 1、仅摘要变更时省去重复合并及复制技能库。[详情](CHANGELOG.md#check-summary-write-20261125)<br>2、保留保存时机、修订及失败处理。[详情](CHANGELOG.md#check-summary-write-20261125) |
 | 操作菜单与快捷键（开发中） | 2026-11-25 | 1、统一菜单和快捷键浮层样式，限制极窄窗口下的菜单宽度。[详情](CHANGELOG.md#ios27-anchored-controls-20261125)<br>2、改善展开反馈，淡入遵循动效及对比偏好。[详情](CHANGELOG.md#ios27-anchored-controls-20261125) |

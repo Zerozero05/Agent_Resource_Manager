@@ -623,6 +623,41 @@ pub(crate) fn local_document_skill(m: &Manager, req: &Value) -> Option<Value> {
     let skill = m.skill_entry(req["skillId"].as_str()?).ok()?;
     local_document_requested(skill, req).then(|| skill.clone())
 }
+
+// The reader keeps the raw Markdown. This boundary lets it present the
+// original declaration separately without making it part of the document outline.
+fn skill_frontmatter_end(path: &str, markdown: &str) -> Option<usize> {
+    if !path
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+    {
+        return None;
+    }
+    fn trim_boundary(line: &str) -> &str {
+        line.trim_end_matches([' ', '\t', '\r', '\n'])
+    }
+    let mut lines = markdown.split_inclusive('\n');
+    let opening = lines.next()?;
+    if trim_boundary(opening.trim_start_matches('\u{feff}')) != "---" {
+        return None;
+    }
+    let mut end = opening.len();
+    for line in lines {
+        if matches!(trim_boundary(line), "---" | "...") {
+            let metadata: serde_yaml::Mapping =
+                serde_yaml::from_str(&markdown[opening.len()..end]).ok()?;
+            if metadata.contains_key("name") || metadata.contains_key("description") {
+                // Match the JavaScript string offset, including BOM, CRLF and astral text.
+                return Some(markdown[..end + line.len()].encode_utf16().count());
+            }
+            return None;
+        }
+        end += line.len();
+    }
+    None
+}
+
 fn get_document_with_generation(
     m: &Manager,
     req: &Value,
@@ -640,13 +675,14 @@ fn get_document_with_generation(
         let fingerprint = hash(&raw);
         let markdown =
             String::from_utf8(raw).map_err(|_| "This local document is not UTF-8 text")?;
+        let frontmatter_end = skill_frontmatter_end(path, &markdown);
         // Local bytes do not depend on remote credentials. An unrelated access
         // change must not turn a successful local read into an authentication
         // error. Keep the response's cache namespace current without re-tagging
         // any response obtained through the remote branch below.
         let generation = read_generation()?;
         return Ok(
-            json!({"markdown":markdown,"documentPath":path,"basePath":path.rsplit_once('/').map(|(p,_)|p).unwrap_or(""),"baseUrl":null,"source":"本地运行文件","commit":null,"localFingerprint":fingerprint,"readGeneration":generation,"checkedAt":now(),"private":false}),
+            json!({"markdown":markdown,"frontmatterEnd":frontmatter_end,"documentPath":path,"basePath":path.rsplit_once('/').map(|(p,_)|p).unwrap_or(""),"baseUrl":null,"source":"本地运行文件","commit":null,"localFingerprint":fingerprint,"readGeneration":generation,"checkedAt":now(),"private":false}),
         );
     }
     let snap = requested_document_reader(m, &skill, req)?;
@@ -662,6 +698,7 @@ fn get_document_with_generation(
         return Err("Documentation exceeds the 1 MiB limit".into());
     }
     let markdown = String::from_utf8(raw).map_err(|_| "This document is not UTF-8 text")?;
+    let frontmatter_end = skill_frontmatter_end(&path, &markdown);
     let base_path = path.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
     let mut base = Url::parse("https://github.com/").expect("constant URL");
     {
@@ -681,7 +718,7 @@ fn get_document_with_generation(
         return Err("读取来源或访问凭据已变化，请重新读取说明".into());
     }
     Ok(
-        json!({"markdown":markdown,"documentPath":path,"basePath":base_path,"baseUrl":base.as_str(),"source":snap.api.repo,"commit":snap.commit,"readGeneration":generation,"checkedAt":now(),"private":snap.private}),
+        json!({"markdown":markdown,"frontmatterEnd":frontmatter_end,"documentPath":path,"basePath":base_path,"baseUrl":base.as_str(),"source":snap.api.repo,"commit":snap.commit,"readGeneration":generation,"checkedAt":now(),"private":snap.private}),
     )
 }
 fn get_doc_asset(m: &Manager, req: &Value) -> Result<Value, String> {
@@ -2803,6 +2840,25 @@ mod tests {
         assert_eq!(m.snapshot()["stateRevision"], prior);
     }
     #[test]
+    fn skill_frontmatter_boundary_preserves_the_original_text() {
+        let metadata =
+            "\u{feff}---\r\nname: example-🧪\r\ndescription: |\r\n  ---\r\n  Example\r\n...\r\n";
+        let markdown = format!("{metadata}# Example\r\n");
+        assert_eq!(
+            skill_frontmatter_end("examples/sKiLl.Md", &markdown),
+            Some(metadata.encode_utf16().count())
+        );
+        assert_eq!(skill_frontmatter_end("README.md", &markdown), None);
+        for text in [
+            "---\nname: example\n",
+            "---\nname: [invalid\n---\n# Example\n",
+            "---\ncolor: blue\n---\n# Example\n",
+            "---\n# Ordinary Markdown\n---\n",
+        ] {
+            assert_eq!(skill_frontmatter_end("SKILL.md", text), None);
+        }
+    }
+    #[test]
     fn local_documents_work_offline_and_cannot_escape_the_source() {
         let parent = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -2812,20 +2868,16 @@ mod tests {
         let temp = tempfile::tempdir_in(parent).unwrap();
         let source = temp.path().join("skill");
         fs::create_dir(&source).unwrap();
-        fs::write(
-            source.join("SKILL.md"),
-            "---\nname: local-document\ndescription: Offline test\n---\n# Offline document\n",
-        )
-        .unwrap();
+        let metadata = "---\nname: local-document\ndescription: Offline test\n---\n";
+        let markdown = format!("{metadata}# Offline document\n");
+        fs::write(source.join("SKILL.md"), &markdown).unwrap();
         let mut m = Manager::new(temp.path().join("data")).unwrap();
         let mut record = local::draft(&source).unwrap();
         record["id"] = json!("offline");
         m.upsert_skill(record);
         let doc = get_document(&m, &json!({"skillId":"offline","version":"latest"})).unwrap();
-        assert!(doc["markdown"]
-            .as_str()
-            .unwrap()
-            .contains("Offline document"));
+        assert_eq!(doc["markdown"], markdown);
+        assert_eq!(doc["frontmatterEnd"], metadata.encode_utf16().count());
         assert_eq!(doc["source"], "本地运行文件");
         assert!(doc["commit"].is_null());
         assert_eq!(doc["localFingerprint"].as_str().unwrap().len(), 64);
@@ -2834,6 +2886,7 @@ mod tests {
         let changed = get_document(&m, &json!({"skillId":"offline","version":"latest"})).unwrap();
         assert_ne!(doc["localFingerprint"], changed["localFingerprint"]);
         assert!(changed["markdown"].as_str().unwrap().contains("changed"));
+        assert!(changed["frontmatterEnd"].is_null());
         // Control the access-epoch change during the real local read without
         // changing global credentials or disturbing other parallel tests.
         let generation = std::cell::Cell::new(40u64);
