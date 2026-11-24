@@ -4,7 +4,7 @@ import { dirname, join, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual as same } from 'node:util';
 import { MAX_NATIVE_UPDATE_FIXTURES } from './performance-load-fixture.mjs';
-import { PERFORMANCE_POLICY as policy, backgroundLoadVerdict } from './performance-policy.mjs';
+import { MAX_NATIVE_CHECK_TASKS, PERFORMANCE_POLICY as policy, backgroundLoadVerdict } from './performance-policy.mjs';
 
 const actions = { check: 'check_now', download: 'apply_resource_download', update: 'apply_resource_update_stage' };
 const kinds = Object.keys(actions);
@@ -73,6 +73,7 @@ function replay({ report, driver, events, dataset, datasetDescriptorSha256 }, ex
   requireEvidence(kinds.includes(kind) && report.formatVersion === 1 && report.suite === 'loads'
     && selection.scope === 'sampled-' + kind + '-only' && selection.fullLoadsAcceptanceClaimed === false
     && same(selection.omittedKinds, kinds.filter(value => value !== kind)) && selection.requiredSamplesPerCategory === policy.localSamplesPerCategory
+    && selection.budget?.maximumTasks?.check === MAX_NATIVE_CHECK_TASKS
     && stats?.kind === kind && ['sample-count', 'time-budget', 'attempt-budget', 'task-budget'].includes(stats.stopReason),
   'A completed single-workload sampling scope is required.');
   requireEvidence(!report.error && !report.foregroundFailure && Array.isArray(report.nativeErrors) && !report.nativeErrors.length
@@ -113,8 +114,9 @@ function replay({ report, driver, events, dataset, datasetDescriptorSha256 }, ex
     && same(taskRuns, completions.map(event => taskPayload(payload(event)))),
   'A raw observation or native task completion differs from its event log.');
   const runs = new Map(taskRuns.map(run => [run.taskId, run]));
-  const maximumTasks = { check: 96, download: 1, update: MAX_NATIVE_UPDATE_FIXTURES }[kind];
+  const maximumTasks = { check: MAX_NATIVE_CHECK_TASKS, download: 1, update: MAX_NATIVE_UPDATE_FIXTURES }[kind];
   requireEvidence(runs.size === taskRuns.length && taskRuns.length <= maximumTasks
+    && (kind !== 'check' || stats.stopReason !== 'task-budget' || taskRuns.length === maximumTasks)
     && taskRuns.every((run, index) => completedTask(report, kind, run) && timestamp(run.startedAt) >= from
       && timestamp(run.finishedAt) <= timestamp(completions[index].observedAt) && timestamp(completions[index].observedAt) <= to),
   'Workload completion receipts are missing, repeated, or out of scope.');

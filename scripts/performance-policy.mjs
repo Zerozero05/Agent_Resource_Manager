@@ -20,6 +20,9 @@ export const PERFORMANCE_POLICY = Object.freeze({
   idleCpuFloorPercent: 2,
 });
 
+// Collection budget only. Each category still requires 100 completed overlaps.
+export const MAX_NATIVE_CHECK_TASKS = 144;
+
 export function percentile(values, p) {
   if (!values.length || values.some(value => !Number.isFinite(value) || value < 0)) return null;
   const sorted = [...values].sort((a, b) => a - b);

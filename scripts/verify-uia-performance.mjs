@@ -10,7 +10,7 @@ import { NativeUiaSession, assertNoUserManager } from './native-uia-client.mjs';
 import { beginUiaNativeStage, beginUiaNativeDownload, resumeUiaNativeDownload, waitNativeTask } from './native-uia-loads.mjs';
 import { MAX_NATIVE_UPDATE_FIXTURES, readNativeLoadFixture, attachNativeLoadResource, attachNativeLoadResources } from './performance-load-fixture.mjs';
 import { createPerformanceFixture } from './performance-fixture.mjs';
-import { PERFORMANCE_POLICY as policy, ownedForeground, startupComparison, localInteractionVerdict, backgroundLoadVerdict, freezeConvergenceBounds, stabilityVerdict } from './performance-policy.mjs';
+import { MAX_NATIVE_CHECK_TASKS, PERFORMANCE_POLICY as policy, ownedForeground, startupComparison, localInteractionVerdict, backgroundLoadVerdict, freezeConvergenceBounds, stabilityVerdict } from './performance-policy.mjs';
 
 const argumentPairs = process.argv.slice(2).flatMap((arg, index, args) => arg.startsWith('--')
   ? [[arg.slice(2), args[index + 1]?.startsWith('--') || !args[index + 1] ? true : args[index + 1]]] : []);
@@ -72,7 +72,7 @@ const interactionKind = validateInteractionSelection(options, suite);
 const loadKind = validateLoadSelection(options, suite);
 const sampleOverlap = validateOverlapSampling(options, suite, loadKind, stageFixturePaths, downloadSpecCount);
 const sampledLoadActions = Object.freeze({ check: 'check_now', download: 'apply_resource_download', update: 'apply_resource_update_stage' });
-const sampledLoadPolicy = Object.freeze({ maximumTasks: { check: 96, download: 1, update: MAX_NATIVE_UPDATE_FIXTURES }, maximumAttempts: 560, maximumMeasurementMs: 12 * 60 * 1000, maximumQueuedObservationMs: 8000, longTaskCategoryBurst: 5 });
+const sampledLoadPolicy = Object.freeze({ maximumTasks: { check: MAX_NATIVE_CHECK_TASKS, download: 1, update: MAX_NATIVE_UPDATE_FIXTURES }, maximumAttempts: 560, maximumMeasurementMs: 12 * 60 * 1000, maximumQueuedObservationMs: 8000, longTaskCategoryBurst: 5 });
 const passedLoadsStatus = sampleOverlap ? `passed-sampled-native-${loadKind}-only` : loadKind ? 'passed-partial-limited-background-loads-only' : 'passed-background-loads-only';
 const passedInteractionStatus = 'passed-partial-document-interactions-only';
 if (options['await-foreground'] !== undefined && !['true', 'false'].includes(options['await-foreground'])) throw new Error('--await-foreground requires an explicit true or false.');

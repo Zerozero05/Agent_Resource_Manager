@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { win32 } from 'node:path';
 import test from 'node:test';
 import { MAX_NATIVE_UPDATE_FIXTURES } from '../scripts/performance-load-fixture.mjs';
-import { PERFORMANCE_POLICY } from '../scripts/performance-policy.mjs';
+import { MAX_NATIVE_CHECK_TASKS, PERFORMANCE_POLICY } from '../scripts/performance-policy.mjs';
 import { consolidateSampledLoads } from '../scripts/verify-sampled-load-evidence.mjs';
 
 const candidate = 'a'.repeat(64), driverHash = 'b'.repeat(64);
@@ -30,7 +30,8 @@ function scope(kind, duration = () => 70, count = 100) {
     candidate: { sha256: candidate, buildMode: 'release', releaseProvenanceVerified: true, source: 'test-source', buildInfoSha256: 'c'.repeat(64) },
     harness: [{ path: win32.join('D:/test-sources', 'verify-native-uia.ps1'), sha256: driverHash }],
     loadSelection: { kind, scope: 'sampled-' + kind + '-only', omittedKinds: kinds.filter(value => value !== kind),
-      fullLoadsAcceptanceClaimed: false, requiredSamplesPerCategory: 100 },
+      fullLoadsAcceptanceClaimed: false, requiredSamplesPerCategory: 100,
+      budget: { maximumTasks: { check: MAX_NATIVE_CHECK_TASKS } } },
   };
   const driver = { ...identity, datasetDescriptorSha256, inputMethod: report.inputMethod, observationMode: synchronous,
     observationCostsIncluded: true, executableSha256: candidate, harnessSha256: driverHash, dataDirectory: dataDir,
@@ -150,6 +151,8 @@ test('sample shortages and absent or incomparable evidence stay incomplete', () 
 
 test('old release, changed layout, altered event evidence and incomplete task receipts cannot pass', () => {
   const mutations = [
+    [value => { value.report.loadSelection.budget.maximumTasks.check--; }, /single-workload sampling scope/],
+    [value => { value.report.sampledLoad.stopReason = 'task-budget'; }, /completion receipts/, 'check'],
     [value => { value.report.candidate.sha256 = 'f'.repeat(64); }, /exact release binary/],
     [value => { value.dataset.settings.uiZoom = 130; }, /dataset\/layout/],
     [value => { value.report.loadCoverage[0].sample.durationMs = 1; }, /differs from its event log/],
@@ -157,10 +160,10 @@ test('old release, changed layout, altered event evidence and incomplete task re
       value.events.at(-2).receipt.switched = true; }, /completion receipts/],
     [value => { value.driver.closedNormally = false; }, /normal exit/],
   ];
-  for (const [mutate, reason] of mutations) {
-    const update = scope('update');
-    mutate(update);
-    const result = consolidateSampledLoads([scope('check'), scope('download'), update], candidate);
+  for (const [mutate, reason, kind = 'update'] of mutations) {
+    const reports = kinds.map(workload => scope(workload));
+    mutate(reports[kinds.indexOf(kind)]);
+    const result = consolidateSampledLoads(reports, candidate);
     assert.equal(result.status, 'incomplete');
     assert.match(result.reasons[0], reason);
   }
