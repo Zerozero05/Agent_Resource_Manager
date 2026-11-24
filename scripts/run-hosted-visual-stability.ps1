@@ -10,8 +10,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$candidateSource = '660451977f924eead9b16ceff72f17c1c61d9497'
-$candidateRun = '45399676483'
+$candidateSource = 'd5b00b4d5bcbc86c83e8612594ba21fe187d4700'
+$candidateRun = '45448781321'
 $candidateArtifact = $env:CANDIDATE_ARTIFACT_ID
 $candidateSha256 = $env:CANDIDATE_SHA256
 $candidateBuildInfoSha256 = $env:CANDIDATE_BUILD_INFO_SHA256
