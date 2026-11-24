@@ -16,7 +16,7 @@ mod upload;
 
 use crate::{
     local,
-    model::{now, Manager},
+    model::{now, Manager, State},
     transaction,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -24,6 +24,7 @@ use github::{Api, DocumentSnapshot, Entry, Snapshot, MAX_FILE, MAX_TOTAL};
 use logic::{checked_selection, hash, selected_changes};
 use serde_json::{json, Value};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
@@ -1187,17 +1188,17 @@ fn auto_associate_selected(
     }
 }
 
-fn save_association_state(m: &mut Manager, previous: crate::model::State) -> Result<Value, String> {
-    save_association_changes(m, previous)?;
+fn save_association_state(m: &mut Manager, previous: State) -> Result<Value, String> {
+    save_association_changes(m, Cow::Owned(previous))?;
     Ok(m.snapshot())
 }
 
-fn save_association_changes(
+fn save_association_changes<'a>(
     m: &mut Manager,
-    previous: crate::model::State,
-) -> Result<crate::model::State, String> {
+    previous: Cow<'a, State>,
+) -> Result<Cow<'a, State>, String> {
     if let Err(error) = m.save() {
-        m.state = previous;
+        m.state = previous.into_owned();
         return Err(error);
     }
     Ok(previous)
@@ -1260,16 +1261,24 @@ fn auto_associate(m: &mut Manager) -> Result<Value, String> {
 }
 
 fn refresh(m: &mut Manager, req: &Value) -> Result<Value, String> {
-    refresh_and_save(m, req)?;
+    refresh_and_save(m, req, None)?;
     Ok(m.snapshot())
 }
 
-fn refresh_and_save(m: &mut Manager, req: &Value) -> Result<Option<Vec<Value>>, String> {
+fn refresh_and_save<'a>(
+    m: &mut Manager,
+    req: &Value,
+    before_discovery: Option<&'a State>,
+) -> Result<Option<Cow<'a, [Value]>>, String> {
     if req["localOnly"] == true {
-        return refresh_local(m, req).map(Some);
+        return refresh_local(m, req).map(|skills| Some(Cow::Owned(skills)));
     }
     let selected = m.refresh_selection(req)?;
-    let previous = m.state.clone();
+    // Discovery may have already saved changes, so roll back to the actual refresh input.
+    let previous = match before_discovery {
+        Some(state) if *state == m.state => Cow::Borrowed(state),
+        _ => Cow::Owned(m.state.clone()),
+    };
     let automatic = req["automatic"] == true;
     let remote_only = req["remoteOnly"] == true;
     let no_sources = m.state.sources.is_empty();
@@ -1471,10 +1480,14 @@ fn refresh_and_save(m: &mut Manager, req: &Value) -> Result<Option<Vec<Value>>, 
         }
     }
     if automatic && semantic_state(&m.state)? == semantic_state(&previous)? {
-        m.state = previous;
+        m.state = previous.into_owned();
         return Ok(None);
     }
-    save_association_changes(m, previous).map(|previous| Some(previous.skills))
+    let previous = save_association_changes(m, previous)?;
+    Ok(Some(match previous {
+        Cow::Borrowed(state) => Cow::Borrowed(state.skills.as_slice()),
+        Cow::Owned(state) => Cow::Owned(state.skills),
+    }))
 }
 
 fn check_fingerprint(source: &Value, skills: &[Value]) -> Result<String, String> {
@@ -1557,8 +1570,12 @@ fn semantic_state(state: &crate::model::State) -> Result<Value, String> {
     Ok(value)
 }
 
-pub(crate) fn check(m: &mut Manager, req: &Value) -> Result<Value, String> {
-    let previous_skills = refresh_and_save(m, req)?;
+pub(crate) fn check(
+    m: &mut Manager,
+    req: &Value,
+    before_discovery: Option<&State>,
+) -> Result<Value, String> {
+    let previous_skills = refresh_and_save(m, req, before_discovery)?;
     // An unchanged automatic check restores the prior state without saving.
     let before = previous_skills.as_deref().unwrap_or(&m.state.skills);
     let associated = m
@@ -1781,7 +1798,7 @@ fn refresh_local(m: &mut Manager, req: &Value) -> Result<Vec<Value>, String> {
             }
         }
     }
-    save_association_changes(m, previous).map(|previous| previous.skills)
+    save_association_changes(m, Cow::Owned(previous)).map(|previous| previous.into_owned().skills)
 }
 fn note_untracked(skill: &mut Value, all: &BTreeMap<String, String>, scope: &[String]) {
     let untracked: Vec<_> = all.keys().filter(|p| !scope.contains(p)).cloned().collect();
@@ -3297,7 +3314,12 @@ mod association_behavior_tests {
         }));
         let previous = m.state.clone();
         let revision = m.snapshot()["stateRevision"].clone();
-        let result = check(&mut m, &json!({"automatic":true,"remoteOnly":true})).unwrap();
+        let result = check(
+            &mut m,
+            &json!({"automatic":true,"remoteOnly":true}),
+            Some(&previous),
+        )
+        .unwrap();
         assert_eq!(result["checkSummary"]["newRemote"], 0);
         assert_eq!(result["checkSummary"]["docsUpdated"], 0);
         assert!(m.state == previous);
@@ -3314,8 +3336,15 @@ mod association_behavior_tests {
         let previous = m.state.clone();
         let revision = m.snapshot()["stateRevision"].clone();
         m.basic_mode = true;
-        for local_only in [true, false] {
-            let result = check(&mut m, &json!({"localOnly":local_only}));
+        let mut before_discovery = previous.clone();
+        before_discovery.check_summary = json!({"changed":false});
+        for (local_only, baseline) in [
+            (true, Some(&previous)),
+            (false, None),
+            (false, Some(&previous)),
+            (false, Some(&before_discovery)),
+        ] {
+            let result = check(&mut m, &json!({"localOnly":local_only}), baseline);
             assert!(result.unwrap_err().contains("基本模式"));
             assert!(m.state == previous);
             assert_eq!(m.snapshot()["stateRevision"], revision);

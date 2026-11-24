@@ -928,7 +928,13 @@ fn v029_selected_check_discovers_external_upload_and_preserves_other_records() {
         .connections
         .push(json!({"id":"connection","skillId":"local-id","target":"synthetic-client-entry"}));
     let before_files = local::files(&fixture.root).unwrap();
-    let result = check(&mut fixture.manager, &json!({"skillIds":["local-id"]})).unwrap();
+    let previous = fixture.manager.state.clone();
+    let result = check(
+        &mut fixture.manager,
+        &json!({"skillIds":["local-id"]}),
+        Some(&previous),
+    )
+    .unwrap();
     let local = fixture.manager.skill("local-id").unwrap();
     assert_eq!(local["sourceId"], "source");
     assert_eq!(local["remotePath"], "skills/protocol-skill");
@@ -944,6 +950,7 @@ fn v029_selected_check_discovers_external_upload_and_preserves_other_records() {
     let next = check(
         &mut fixture.manager,
         &json!({"automatic":true,"remoteOnly":true}),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -978,7 +985,12 @@ fn v029_selected_discovery_keeps_ambiguous_remote_candidates_unassociated() {
     let _transport = server.transport();
     let mut fixture = fixture(&server);
     fixture.manager.state.sources[0]["roots"] = json!(["skills"]);
-    let result = check(&mut fixture.manager, &json!({"skillIds":["local-id"]})).unwrap();
+    let result = check(
+        &mut fixture.manager,
+        &json!({"skillIds":["local-id"]}),
+        None,
+    )
+    .unwrap();
     assert!(fixture.manager.skill("local-id").unwrap()["sourceId"].is_null());
     assert_eq!(fixture.manager.state.skills.len(), 1);
     assert_eq!(result["checkSummary"]["associated"], 0);
@@ -1004,7 +1016,7 @@ fn v029_unchanged_automatic_tick_only_probes_commit_without_state_or_file_reads(
     let _transport = server.transport();
     let mut fixture = fixture(&server);
     fixture.manager.state.sources[0]["roots"] = json!(["skills"]);
-    check(&mut fixture.manager, &json!({})).unwrap();
+    check(&mut fixture.manager, &json!({}), None).unwrap();
     let before = serde_json::to_value(&fixture.manager.state).unwrap();
     let before_revision = fixture.manager.snapshot()["stateRevision"].clone();
     let request_count = server.state.lock().unwrap().requests.len();
@@ -1014,6 +1026,7 @@ fn v029_unchanged_automatic_tick_only_probes_commit_without_state_or_file_reads(
     check(
         &mut fixture.manager,
         &json!({"automatic":true,"remoteOnly":true}),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1035,6 +1048,7 @@ fn v029_unchanged_automatic_tick_only_probes_commit_without_state_or_file_reads(
     let result = check(
         &mut fixture.manager,
         &json!({"automatic":true,"remoteOnly":true}),
+        None,
     )
     .unwrap();
     assert_eq!(result["checkSummary"]["newRemote"], 1);
@@ -1078,6 +1092,7 @@ fn v029_periodic_discovery_obeys_source_scope_and_ignored_paths() {
     check(
         &mut fixture.manager,
         &json!({"automatic":true,"remoteOnly":true}),
+        None,
     )
     .unwrap();
     assert!(fixture

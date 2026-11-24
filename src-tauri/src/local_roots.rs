@@ -521,7 +521,8 @@ pub(crate) fn handle(manager: &mut Manager, request: &Value) -> Result<Option<Va
                 // A discovery-only no-op inherits the current live summary.
                 manager.snapshot()["checkSummary"].clone()
             } else {
-                crate::remote::check(manager, &remote_request)?["checkSummary"].clone()
+                crate::remote::check(manager, &remote_request, Some(&previous))?["checkSummary"]
+                    .clone()
             };
             let mut summary = check.as_object().cloned().unwrap_or_default();
             summary.insert("imported".into(), json!(discovery.imported));

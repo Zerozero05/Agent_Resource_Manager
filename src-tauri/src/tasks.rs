@@ -2242,6 +2242,7 @@ impl ManagerRuntime for WorkerHook {
             &self.action,
         )?;
         if merged == manager.state && !history_changed {
+            drop(merged);
             base.state = worker.state.clone();
             return Ok(());
         }
@@ -2260,6 +2261,10 @@ impl ManagerRuntime for WorkerHook {
             }
             return Err(error);
         }
+        // After the durable save succeeds, free rollback copies before allocating
+        // the next worker baseline.
+        drop(previous);
+        drop(previous_history);
         base.state = worker.state.clone();
         if history_changed {
             base.undo = worker.management_undo.clone();
