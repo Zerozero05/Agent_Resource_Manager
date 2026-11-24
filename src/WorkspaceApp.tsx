@@ -88,7 +88,7 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
   const [movingIds, setMovingIds] = useState<ReadonlySet<string>>(new Set());
   const openingHistory = useRef(false);
   const openingTaskResults = useRef(new Set<string>());
-  const openingDetails = useRef(new Set<string>());
+  const openingDetails = useRef(new Map<string, string>());
   useEffect(() => {
     if (!isTauri()) return;
     const root = document.documentElement, window = getCurrentWindow();
@@ -221,6 +221,12 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
         const transfer = targets.find(item => item.paneId === pane.id);
         const refreshTransfer = transfer && loadedTransfers.current.get(pane.id) !== transfer.id;
         if (loaded.current.has(pane.id) && !refreshTransfer) continue;
+        // This window created this exact detail ID without sending a runtime draft.
+        // An accepted navigation can arrive from the broadcast before the open reply.
+        if (!transfer && pane.kind === 'detail' && pane.skillId && openingDetails.current.get(pane.skillId) === pane.id) {
+          values[pane.id] = {};
+          continue;
+        }
         const result = await retryBridgeRead(() => api<{ runtime?: SessionDraft }>('workspace_get_pane_runtime', { paneId: pane.id }), { active: () => mounted.current });
         values[pane.id] = result.runtime || {};
         if (transfer) transferIds.set(pane.id, transfer.id);
@@ -308,8 +314,8 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
       void applyReply(api('workspace_focus_pane', { paneId: existing.id, section })); return;
     }
     if (openingDetails.current.has(skill.id)) return;
-    openingDetails.current.add(skill.id);
     const pane: WorkspacePane = { id: crypto.randomUUID(), kind: 'detail', title: skill.displayName || skill.name, skillId: skill.id, state: { section } };
+    openingDetails.current.set(skill.id, pane.id);
     void applyReply(api('workspace_open_pane', { pane })).finally(() => { openingDetails.current.delete(skill.id); });
   }, [applyReply]);
   const openOperation = useCallback((modal: unknown, draft: SessionDraft, title: string, skillId?: string, activate = true, parentPaneId?: string) => {

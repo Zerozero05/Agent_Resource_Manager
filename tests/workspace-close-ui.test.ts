@@ -4,7 +4,7 @@ import { readFile, access } from 'node:fs/promises';
 import { createElement, act } from 'react';
 import { JSDOM } from 'jsdom';
 import ts from 'typescript';
-import type { WindowWorkspace, WorkspacePane } from '../src/workspace.ts';
+import type { WindowWorkspace, WorkspaceNavigation, WorkspacePane } from '../src/workspace.ts';
 import type { CheckCompletionStamp } from '../src/tasks.ts';
 
 // Exercise WorkspaceApp's real close handshake; only native IPC and unrelated panes are replaced.
@@ -46,7 +46,7 @@ const host = document.getElementById('root')!;
 let unmount = () => {};
 let restoreClock = () => {};
 afterEach(async () => { await act(async () => unmount()); unmount = () => {}; restoreClock(); restoreClock = () => {}; });
-async function mount(failSave = false, options: { snapshot?: Record<string, unknown>; workspace?: WindowWorkspace; basicMode?: boolean; readPaneRuntime?: (paneId: string) => Record<string, unknown>; taskResult?: (attempt: number) => { snapshot?: Record<string, unknown>; error?: string } } = {}) {
+async function mount(failSave = false, options: { snapshot?: Record<string, unknown>; workspace?: WindowWorkspace; basicMode?: boolean; readPaneRuntime?: (paneId: string) => Record<string, unknown>; openPane?: (pane: WorkspacePane) => Promise<WorkspaceNavigation>; taskResult?: (attempt: number) => { snapshot?: Record<string, unknown>; error?: string } } = {}) {
   const calls: Record<string, unknown>[] = [], listeners = new Map<string, (event: unknown) => void>();
   const taskCalls: { action: string; args: Record<string, unknown>; foreground: boolean }[] = [];
   const readReplies: (() => Promise<unknown> | unknown)[] = [];
@@ -57,7 +57,7 @@ async function mount(failSave = false, options: { snapshot?: Record<string, unkn
   const fixture = {
     panes: [] as WorkspacePane[],
     onCheckCompletion: undefined as unknown as (stamp: CheckCompletionStamp | null) => Promise<void>,
-    session: undefined as unknown as { pane: WorkspacePane; requestStorageRestart: (id: string) => Promise<void>; managerSnapshot: { stateRevision?: number; settings?: { marker?: string }; maintenance?: { automaticAllowed?: boolean } }; acceptSnapshot: (snapshot: unknown) => void },
+    session: undefined as unknown as { pane: WorkspacePane; initialDraft: Record<string, unknown>; openDetail: (skill: { id: string; name: string }, section: 'docs' | 'files' | 'source') => void; requestStorageRestart: (id: string) => Promise<void>; managerSnapshot: { stateRevision?: number; settings?: { marker?: string }; maintenance?: { automaticAllowed?: boolean } }; acceptSnapshot: (snapshot: unknown) => void },
     tasks: { tasks: [], run: async (_label: string, action: string, args: Record<string, unknown>, _origin: unknown, foreground: boolean) => {
       if (!options.snapshot) throw new Error('Window closure must not run a resource task');
       taskCalls.push({ action, args, foreground });
@@ -73,6 +73,7 @@ async function mount(failSave = false, options: { snapshot?: Record<string, unkn
       switch (request.action) {
         case 'get_state': return readReplies.length ? readReplies.shift()!() : managerSnapshot;
         case 'workspace_get_pane_runtime': return { runtime: options.readPaneRuntime?.(String(request.paneId)) ?? {} };
+        case 'workspace_open_pane': return options.openPane ? { ...reply, workspace: await options.openPane(request.pane as WorkspacePane) } : reply;
         case 'workspace_save': if (failSave) throw new Error('synthetic save failure'); return reply;
         case 'workspace_close_intent': return { final: true, closeId: 'fixed-close' };
         case 'workspace_finish_close': return { ready: true };
@@ -153,6 +154,49 @@ test('duplicate navigation skips a workspace render but a transfer at the same r
   assert.deepEqual(fixture.panes().map(pane => pane.id), ['home', detail.id]);
   assert.deepEqual(fixture.calls.slice(callStart), [{ action: 'workspace_get_pane_runtime', paneId: detail.id }]);
 });
+
+for (const order of ['broadcast first', 'reply first']) {
+  test(`a freshly opened local detail uses an empty runtime with ${order}`, async () => {
+    let requested!: WorkspacePane;
+    let acknowledge!: (navigation: WorkspaceNavigation) => void;
+    const fixture = await mount(false, {
+      openPane: pane => {
+        requested = pane;
+        return new Promise(resolve => { acknowledge = resolve; });
+      },
+      readPaneRuntime: () => ({ scrollTop: 177 }),
+    });
+    const skill = { id: 'fresh-skill', name: 'Fresh Skill' };
+    const callStart = fixture.calls.length;
+    const initial = [...fixture.panes()];
+    await act(async () => {
+      fixture.session().openDetail(skill, 'files');
+      fixture.session().openDetail(skill, 'files');
+    });
+    assert.deepEqual(fixture.panes(), initial, 'a pending request does not open an uncommitted pane');
+    assert.deepEqual(fixture.calls.slice(callStart), [{ action: 'workspace_open_pane', pane: requested }]);
+    assert.equal(requested.state.section, 'files');
+
+    const other = { ...requested, id: 'different-pane-for-same-skill' };
+    const restored = { revision: 2, windows: [{ label: 'main', activePaneId: other.id, panes: [...initial, other] }] };
+    const publish = (layout: WorkspaceNavigation) => fixture.listeners.get('workspace-changed')!({ payload: layout });
+    await act(async () => publish(restored));
+    assert.deepEqual(fixture.session().initialDraft, { scrollTop: 177 }, 'a different pane for the same Skill still reads its runtime');
+
+    const committed = { revision: 3, windows: [{ label: 'main', activePaneId: requested.id, panes: [...initial, other, requested] }] };
+    if (order === 'broadcast first') {
+      await act(async () => publish(committed));
+      assert.equal(fixture.panes().at(-1)?.id, requested.id);
+      await act(async () => acknowledge(committed));
+    } else {
+      await act(async () => acknowledge(committed));
+      await act(async () => publish(committed));
+    }
+    assert.equal(fixture.session().pane.id, requested.id);
+    assert.deepEqual(fixture.session().initialDraft, {});
+    assert.deepEqual(fixture.calls.slice(callStart + 1), [{ action: 'workspace_get_pane_runtime', paneId: other.id }]);
+  });
+}
 
 
 test('a failed pane read does not prevent another pane in the same snapshot from restoring on retry', async () => {
