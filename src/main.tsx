@@ -9,6 +9,7 @@ import './contrast.css';
 import './layout-v024.css';
 import './layout-v026.css';
 import './appearance.css';
+import './interaction-surfaces.css';
 
 const root = ReactDOM.createRoot(document.getElementById('root')!);
 async function start() {

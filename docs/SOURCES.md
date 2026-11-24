@@ -1,6 +1,17 @@
 # Sources and dependencies
 
 
+
+<a id="ios27-desktop-material-20261124"></a>
+
+## iOS 27 材质与动效参考 — 2026-11-24
+
+苹果支持页列出的最新正式版为 27.2.1，发布于 2026-11-09；开发者版本记录中的 27.3 属于测试版。[正式版本](https://support.apple.com/en-us/100100) · [开发者版本记录](https://developer.apple.com/news/releases/) · [iOS 27 设计说明](https://www.apple.com/os/ios/)
+
+- [材质](https://developer.apple.com/design/human-interface-guidelines/materials?changes=l_8_1)与[适配方法](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass?changes=_3)：功能层与内容层分开，文字浮层倾向更实的材质，内外圆角协调，控件之间保留空间。管理器用 CSS 在顶栏、快捷入口及浮层加细边缘，透明和模糊只用于快捷入口且按显示偏好回退，内容区为实色。
+- [动效](https://developer.apple.com/design/human-interface-guidelines/motion.md)与[iPhone 动效辅助设置](https://support.apple.com/en-mide/guide/iphone/iph0b691d3ed/27/ios/27)：反馈轻量、立即可用，可以中断，状态可通过文字或焦点辨认。管理器沿用既有动效策略，加 150 ms 快捷入口轻入场、目录箭头旋转和工具图标按压反馈；时间及距离为本项目设计选择。
+- [可访问性](https://developer.apple.com/design/human-interface-guidelines/accessibility.md)：保留键盘、对比度和辅助设置。样式由项目自身实现，未复制苹果界面、素材、图标或 SDK。
+
 <a id="desktop-design-refresh-20261124"></a>
 
 ## 桌面管理界面参考 — 2026-11-24

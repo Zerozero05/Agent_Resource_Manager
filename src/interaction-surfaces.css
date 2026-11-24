@@ -1,0 +1,146 @@
+/* The desktop control layer uses a still edge highlight. Content scrollers and
+   lists keep their own opaque surfaces and do not share a backdrop filter. */
+:root {
+  --arm-control-radius: 10px;
+  --arm-overlay-radius: 15px;
+  --arm-control-edge: #ffffffa3;
+  --arm-control-shadow: 0 8px 24px #18233920;
+  --arm-pressed-surface: var(--selected);
+}
+
+:root[data-theme=dark] {
+  --arm-control-edge: #ffffff1a;
+  --arm-control-shadow: 0 8px 24px #0006;
+}
+
+:root[data-theme=eye] {
+  --arm-control-edge: #f8faf078;
+  --arm-control-shadow: 0 8px 24px #27342933;
+}
+
+.desktop-workspace .workspace-bar,
+.desktop-workspace .workspace-pane-header {
+  box-shadow: inset 0 1px var(--arm-control-edge);
+}
+
+.desktop-workspace .workspace-bar .workspace-tab.is-active {
+  border-start-start-radius: var(--arm-control-radius);
+  border-start-end-radius: var(--arm-control-radius);
+  box-shadow: inset 0 2px var(--accent), inset 0 -1px var(--arm-control-edge);
+}
+
+.desktop-workspace .check-button-group,
+.desktop-workspace :is(.workspace-sidebar-toggle, .pane-outline-toggle, .settings-navigation-toggle, .command-palette-trigger) {
+  border-radius: var(--arm-control-radius);
+}
+
+.desktop-workspace .check-button-group {
+  background: var(--surface);
+  box-shadow: inset 0 1px var(--arm-control-edge);
+}
+
+.desktop-workspace .check-button-group .button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.desktop-workspace :is(.segmented, .unified-types) {
+  border-radius: var(--arm-control-radius);
+}
+
+.desktop-workspace :is(.segmented, .unified-types) button {
+  border-radius: 7px;
+}
+
+.desktop-workspace :is(.workspace-sidebar-toggle, .pane-outline-toggle, .settings-navigation-toggle, .command-palette-trigger):active:not(:disabled),
+.desktop-workspace .workspace-actions .icon-button:active:not(:disabled),
+.desktop-workspace :is(.segmented, .unified-types) button:active:not(:disabled) {
+  background-color: var(--arm-pressed-surface);
+}
+
+/* Some of these panels are portals and live outside .desktop-workspace. */
+:root :is(.command-palette, .shortcut-help),
+.desktop-workspace :is(.workspace-shortcut-help, .pane-outline-list[data-overlay=true], .check-error),
+.desktop-workspace .sidebar-flyout > .sidebar {
+  background-color: var(--surface-raised);
+  box-shadow: inset 0 1px var(--arm-control-edge), var(--arm-control-shadow);
+}
+
+:root :is(.command-palette, .shortcut-help),
+.desktop-workspace :is(.workspace-shortcut-help, .check-error, .modal) {
+  border-radius: var(--arm-overlay-radius);
+}
+
+.desktop-workspace .pane-outline-list[data-overlay=true],
+.desktop-workspace .sidebar-flyout > .sidebar {
+  border-start-end-radius: var(--arm-overlay-radius);
+  border-end-end-radius: var(--arm-overlay-radius);
+}
+
+.command-palette :is(.command-palette-close, .command-palette-option, .command-palette-search input) {
+  border-radius: var(--arm-control-radius);
+}
+
+.command-palette .command-palette-search input:focus-visible {
+  outline-offset: -2px;
+}
+
+.desktop-workspace .modal-backdrop {
+  backdrop-filter: none;
+}
+
+@supports (backdrop-filter: blur(8px)) and (background: color-mix(in srgb, white, transparent)) {
+  @media (prefers-reduced-transparency: no-preference) and (prefers-contrast: no-preference) and (forced-colors: none) {
+    :root .command-palette {
+      background-color: color-mix(in srgb, var(--surface-raised) 94%, transparent);
+      backdrop-filter: blur(8px);
+    }
+  }
+}
+
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
+  :root .command-palette {
+    background-color: var(--surface-raised);
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-contrast: more), (forced-colors: active) {
+  :root :is(.command-palette, .shortcut-help),
+  .desktop-workspace :is(.workspace-shortcut-help, .pane-outline-list[data-overlay=true], .check-error),
+  .desktop-workspace .sidebar-flyout > .sidebar {
+    box-shadow: none;
+    border-color: var(--control-line);
+  }
+
+  .desktop-workspace .workspace-tab.is-active {
+    border-top-color: currentColor;
+  }
+}
+
+/* The effective motion setting is shared with the native workspace. Existing
+   color transitions and focus management remain independent of these cues. */
+:root[data-motion=light] .command-palette {
+  animation: arm-palette-enter var(--motion-duration) cubic-bezier(.2, .7, .35, 1);
+}
+
+:root[data-motion=light] .desktop-workspace .settings-navigation-toggle > svg {
+  transition: transform var(--motion-duration) cubic-bezier(.2, .7, .35, 1);
+}
+
+:root[data-motion=light] .desktop-workspace :is(.workspace-sidebar-toggle, .workspace-actions .icon-button) > svg {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: scale var(--motion-duration) ease-out;
+}
+
+:root[data-motion=light] .desktop-workspace :is(.workspace-sidebar-toggle, .workspace-actions .icon-button):active:not(:disabled) > svg {
+  scale: .92;
+}
+
+@keyframes arm-palette-enter {
+  from { translate: 0 4px; opacity: .96; }
+  to { translate: 0 0; opacity: 1; }
+}
