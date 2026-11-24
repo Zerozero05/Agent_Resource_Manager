@@ -8,9 +8,9 @@ import { NativeUiaSession } from './native-uia-client.mjs';
 import { createPerformanceFixture } from './performance-fixture.mjs';
 import { referenceObservationRows, validBox, VisualSession } from './verify-native-visual-stability.mjs';
 
-const source = 'd5b00b4d5bcbc86c83e8612594ba21fe187d4700';
-const candidateRun = '45448781321';
-const branch = 'codex/hosted-narrow-detail-d5b00b4-20261125-r2';
+const source = 'c81fda47073b92938a45da1bfd5afd8b6e8fa4ce';
+const candidateRun = '45459930763';
+const branch = 'codex/hosted-narrow-detail-c81fda4-20261125';
 const repository = 'zerozero05/agent_resource_manager';
 const approved = 'D:/03_github_projects/Agent_Management/Agent_Resource_Manager/validation/manager-data';
 const frame = { left: 60, top: 60, width: 960, height: 650, dpi: 96 };
@@ -170,6 +170,8 @@ async function exercise(dataset, executable, sha256, report) {
       report.management[name] = await element(name, { scope, type: button, reveal: true });
     assert.equal(workspace().id, report.open.after.id);
     assert.equal(workspace().section, 'source');
+    assert.ok(report.firstParagraph.enabled && !report.firstParagraph.offscreen && !report.firstParagraph.scroll && inFrame(report.firstParagraph.bounds),
+      'The exact first paragraph must be fully visible in the compact initial viewport without scrolling.');
     report.stage = 'checks-completed';
   } catch (failure) {
     error = failure;
