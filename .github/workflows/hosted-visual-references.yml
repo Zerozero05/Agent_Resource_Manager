@@ -4,24 +4,24 @@ permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '45448781321'
-  CANDIDATE_BRANCH: 'codex/check-and-detail-20261125'
-  CANDIDATE_SOURCE: 'd5b00b4d5bcbc86c83e8612594ba21fe187d4700'
-  CANDIDATE_ARTIFACT: 'Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_d5b00b4d5bcbc86c83e8612594ba21fe187d4700'
-  CANDIDATE_ARTIFACT_ID: '14948808321'
-  CANDIDATE_SHA256: '683a6a54414f3582aae02125290e4f8957f4aca6b923b88effd9188160c57af7'
-  CANDIDATE_ARCHIVE_SHA256: '3904bbefde135d87eec58282782ebce7abdf4784b112decf671d3ef5a097d38c'
-  CANDIDATE_BUILD_INFO_SHA256: 'ccb64061a3a6335d319870750ae7bc08fd1ce0a08bb2e19c67d9d44920d18686'
-  FIRST_SEARCH_RUN_ID: '45453979358'
-  FIRST_SEARCH_ARTIFACT_ID: '14948829595'
-  FIRST_SEARCH_SHA256: '7074c0a359e68616053a3049fa527d967e299e5264d77dbf6fc8cfcf1d15aad0'
-  FIRST_SEARCH_ARCHIVE_SHA256: 'e6abdbd04a6b7db6371d8026df9cd0ded6c5c2184b9c4cad7704d775d3a0a506'
+  CANDIDATE_RUN_ID: '45459930763'
+  CANDIDATE_BRANCH: 'codex/skill-document-presentation-20261125'
+  CANDIDATE_SOURCE: 'c81fda47073b92938a45da1bfd5afd8b6e8fa4ce'
+  CANDIDATE_ARTIFACT: 'Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_c81fda47073b92938a45da1bfd5afd8b6e8fa4ce'
+  CANDIDATE_ARTIFACT_ID: '14954871336'
+  CANDIDATE_SHA256: '1b882dd3021cfc8075e3ede312e17c545223ced4498e80692ca706b8b2f872c7'
+  CANDIDATE_ARCHIVE_SHA256: 'cabe04552e9d1f1aeb13c438713d4c30e01a74feda484b9fba7bd91cbbb96d62'
+  CANDIDATE_BUILD_INFO_SHA256: 'b95b7bce39d11803fd2b6c0a1ae273e485b2eba4a0d243aac735113455ecf3dd'
+  FIRST_SEARCH_RUN_ID: '45464633279'
+  FIRST_SEARCH_ARTIFACT_ID: '14955390374'
+  FIRST_SEARCH_SHA256: '8157f80bd5ae49df3bd9a9bb67578fc0ff9fa1fb96a17269dcbe8b8cc1f7f970'
+  FIRST_SEARCH_ARCHIVE_SHA256: '84c8e9218f22dbe795bf8b797246a16ee0a00e183d91415ef37515505b7b9dfa'
   FIRST_SEARCH_FIXTURE_SHA256: 'bd3bb8c680b1b7578d376583ab4b416c88ee47b66ae66b813bee455ca31ba3a1'
   FIRST_SEARCH_EDIT_BOUNDS: '411,294,501,52'
   FIRST_SEARCH_RESULT_BOUNDS: '433,671,201,31'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-d5b00b4-20261125' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-c81fda4-20261125' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
