@@ -6,7 +6,7 @@ use serde_json::{json, Map, Value};
 use std::sync::atomic::AtomicU64;
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io::{Read, Write},
     path::Path,
     sync::{
@@ -2190,7 +2190,15 @@ impl ManagerRuntime for WorkerHook {
             .ok_or("说明读取不能保存管理状态")?
             .lock()
             .map_err(|_| "Task merge lock failed")?;
-        validate_observations(&base.state, &worker.state, &self.action)?;
+        let history_changed =
+            worker.management_undo != base.undo || worker.management_redo != base.redo;
+        let summary_only = self.action == "check_now"
+            && !history_changed
+            && same_state_except_check_summary(&base.state, &worker.state)
+            && valid_summary_merge_state(&base.state);
+        if !summary_only {
+            validate_observations(&base.state, &worker.state, &self.action)?;
+        }
         let mut manager = service
             .manager
             .lock()
@@ -2209,12 +2217,28 @@ impl ManagerRuntime for WorkerHook {
                 .ok_or("来源预览已失效，请重新生成")?;
             crate::remote::association_guard(&manager.state, preview)?;
         }
-        let history_changed =
-            worker.management_undo != base.undo || worker.management_redo != base.redo;
         if history_changed
             && (manager.management_undo != base.undo || manager.management_redo != base.redo)
         {
             return Err("管理操作记录已变化，请重新读取后撤销或重做".into());
+        }
+        // A check can save discoveries and refreshed records before its final
+        // summary. At this point, only the summary may differ from the base of
+        // the most recent successful save. Keep every other live field in place.
+        if summary_only && valid_summary_merge_state(&manager.state) {
+            let summary = &worker.state.check_summary;
+            if base.state.check_summary == *summary {
+                return Ok(());
+            }
+            if manager.state.check_summary != *summary {
+                let previous = std::mem::replace(&mut manager.state.check_summary, summary.clone());
+                if let Err(error) = manager.save() {
+                    manager.state.check_summary = previous;
+                    return Err(error);
+                }
+            }
+            base.state.check_summary.clone_from(summary);
+            return Ok(());
         }
         let merged = if history_changed
             && matches!(self.action.as_str(), "undo_management" | "redo_management")
@@ -2477,6 +2501,49 @@ impl WorkerHook {
         );
         Ok(())
     }
+}
+
+fn same_state_except_check_summary(before: &State, after: &State) -> bool {
+    let State {
+        skills,
+        sources,
+        connections,
+        settings,
+        local_roots,
+        ignored_local_paths,
+        check_mode,
+        check_generation,
+        check_summary: _,
+    } = before;
+    skills == &after.skills
+        && sources == &after.sources
+        && connections == &after.connections
+        && settings == &after.settings
+        && local_roots == &after.local_roots
+        && ignored_local_paths == &after.ignored_local_paths
+        && check_mode == &after.check_mode
+        && *check_generation == after.check_generation
+}
+
+fn valid_summary_merge_state(state: &State) -> bool {
+    // Older data can contain missing or duplicate IDs. Use the general merge
+    // for those records so its existing conflict checks still apply.
+    state.settings.is_object()
+        && [
+            &state.skills,
+            &state.sources,
+            &state.connections,
+            &state.local_roots,
+        ]
+        .into_iter()
+        .all(|records| {
+            let mut ids = HashSet::with_capacity(records.len());
+            records.iter().all(|record| {
+                record["id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty() && ids.insert(id))
+            })
+        })
 }
 
 fn merge_state(
@@ -4334,6 +4401,103 @@ mod tests {
         assert_eq!(result["checkSummary"]["changed"], false);
         assert_eq!(service.snapshot().unwrap()["stateRevision"], revision);
         assert!(service.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn check_summary_save_keeps_concurrent_library_and_settings_in_place() {
+        fn summarize(manager: &mut Manager, request: &Value) -> Result<Value, String> {
+            hold(request["hold"].as_str().unwrap())?;
+            manager.state.check_summary = json!({"changed":true,"newLocal":1});
+            manager.save()?;
+            Ok(manager.snapshot())
+        }
+
+        let (dir, service) = fixture();
+        let (hold_id, latch) = new_latch();
+        let task = service
+            .start(
+                json!({"action":"check_now","skillId":"one","hold":hold_id}),
+                None,
+                None,
+                false,
+                false,
+                summarize,
+            )
+            .unwrap();
+        entered(&latch);
+        let (skills_address, expected_revision) = {
+            let mut manager = service.manager.lock().unwrap();
+            manager.state.skills[0]["favorite"] = json!(true);
+            manager.state.settings["editorPath"] = json!("alternative-editor");
+            manager.state.check_summary = json!({"changed":true,"newLocal":2});
+            manager.save().unwrap();
+            (
+                manager.state.skills.as_ptr() as usize,
+                manager.snapshot()["stateRevision"].as_u64().unwrap() + 1,
+            )
+        };
+        release(&latch);
+        let result = service.wait(task["id"].as_str().unwrap()).unwrap();
+        let manager = service.manager.lock().unwrap();
+        assert_eq!(manager.state.skills.as_ptr() as usize, skills_address);
+        assert_eq!(manager.state.skills[0]["favorite"], true);
+        assert_eq!(manager.state.settings["editorPath"], "alternative-editor");
+        assert_eq!(result["checkSummary"]["newLocal"], 1);
+        let reopened = Manager::new(dir.path().into()).unwrap();
+        assert!(reopened.state == manager.state);
+        assert_eq!(reopened.snapshot()["stateRevision"], expected_revision);
+    }
+
+    #[test]
+    fn failed_check_summary_save_preserves_already_committed_discovery() {
+        let (dir, service) = fixture();
+        let root = dir.path().join("auto-import");
+        std::fs::create_dir(&root).unwrap();
+        service
+            .execute(
+                json!({"action":"add_local_roots","paths":[root]}),
+                crate::dispatch,
+            )
+            .unwrap();
+        let new_skill = root.join("check-summary-fixture");
+        std::fs::create_dir(&new_skill).unwrap();
+        std::fs::write(
+            new_skill.join("SKILL.md"),
+            "---\nname: check-summary-fixture\ndescription: Synthetic fixture\n---\nRead it.\n",
+        )
+        .unwrap();
+        let before = service.snapshot().unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("manager.sqlite3")).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER reject_check_summary BEFORE UPDATE ON app_state
+             WHEN json_extract(NEW.payload, '$.checkSummary')
+             IS NOT json_extract(OLD.payload, '$.checkSummary')
+             BEGIN SELECT RAISE(ABORT, 'synthetic summary failure'); END;",
+        )
+        .unwrap();
+
+        let pending = service
+            .execute(
+                json!({"action":"start_task","statusOnly":true,"request":{"action":"check_now","localOnly":true}}),
+                crate::dispatch,
+            )
+            .unwrap();
+        let id = pending["task"]["id"].as_str().unwrap();
+        assert!(service
+            .wait(id)
+            .unwrap_err()
+            .contains("synthetic summary failure"));
+        let live = service.snapshot().unwrap();
+        assert_eq!(live["checkSummary"], before["checkSummary"]);
+        assert!(live["stateRevision"].as_u64() > before["stateRevision"].as_u64());
+        assert!(live["skills"].as_array().unwrap().iter().any(|skill| {
+            skill["name"] == "check-summary-fixture" && skill["localPath"].is_string()
+        }));
+        let reopened = Manager::new(dir.path().into()).unwrap().snapshot();
+        for field in ["skills", "settings", "checkSummary", "stateRevision"] {
+            assert_eq!(reopened[field], live[field], "{field}");
+        }
+        assert_eq!(service.get(id, false).unwrap()["status"], "failed");
     }
 
     #[test]

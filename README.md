@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 后台检查摘要保存（开发中） | 2026-11-25 | 1、仅摘要变更时省去重复合并及复制技能库。[详情](CHANGELOG.md#check-summary-write-20261125)<br>2、保留保存时机、修订及失败处理。[详情](CHANGELOG.md#check-summary-write-20261125) |
 | 操作菜单与快捷键（开发中） | 2026-11-25 | 1、统一菜单和快捷键浮层样式，限制极窄窗口下的菜单宽度。[详情](CHANGELOG.md#ios27-anchored-controls-20261125)<br>2、改善展开反馈，淡入遵循动效及对比偏好。[详情](CHANGELOG.md#ios27-anchored-controls-20261125) |
 | 本地检查与任务结果（开发中） | 2026-11-25 | 1、无仓库来源时复用成功读取的本地文件清单。[详情](CHANGELOG.md#check-inventory-and-result-memory-20261125)<br>2、生成完整检查结果前释放已用完的后台状态副本。[详情](CHANGELOG.md#check-inventory-and-result-memory-20261125) |
 | 自动检查的调度开销（开发中） | 2026-11-24 | 1、在 Skill 自动监视未生效时省去路径清单的定时组装。[详情](CHANGELOG.md#automatic-watch-projection-20261124)<br>2、保留独立的工具版本检查和监视恢复。[详情](CHANGELOG.md#automatic-watch-projection-20261124) |
