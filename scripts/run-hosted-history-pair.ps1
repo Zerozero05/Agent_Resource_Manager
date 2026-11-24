@@ -10,10 +10,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$referenceSource = '5480977711719efadcb79c322931b7d2066a6f84'
-$referenceCandidateRun = '44907287993'
-$referenceCandidateArtifact = '14708534135'
-$referenceCandidateSha256 = '09ab04ca510043aa38bba4fa398790b3212172699751a0920390190e4ba83274'
+$referenceSource = '660451977f924eead9b16ceff72f17c1c61d9497'
+$referenceCandidateRun = '45399676483'
+$referenceCandidateArtifact = '14924463108'
+$referenceCandidateSha256 = '51d077f6e87b565b8496cdca852aa80549921d74b63167bcbc102132fbf79a25'
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:GITHUB_REPOSITORY -ine 'Zerozero05/Agent_Resource_Manager' -or -not [Environment]::UserInteractive -or
     [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
@@ -35,7 +35,7 @@ function Save-Json([string]$path, $value) {
 
 $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).ProviderPath
 Set-Location -LiteralPath $workspace
-if ($env:GITHUB_REF_NAME -cne 'codex/hosted-check-only-pair-44d2f65-20261122' -or
+if ($env:GITHUB_REF_NAME -cne 'codex/hosted-check-crossover-0c0f447-20261125' -or
     (git rev-parse HEAD) -cne $env:GITHUB_SHA -or $LASTEXITCODE -ne 0) {
     throw 'The exact paired diagnostic checkout is required.'
 }
@@ -127,10 +127,10 @@ function Prepare-Arm($arm) {
     if (Get-Process -Name agent-resource-manager,skill-manager -ErrorAction SilentlyContinue) {
         throw 'An earlier manager still owns the isolated runner.'
     }
-    $candidate = Join-Path $env:RUNNER_TEMP "arm-retention-$($arm.name)"
+    $candidate = Join-Path $env:RUNNER_TEMP "arm-retention-$($arm.slot)"
     $exe = Join-Path $candidate 'agent-resource-manager.exe'
     $build = Join-Path $candidate 'BUILD_INFO.json'
-    $armValidation = Join-Path $candidate 'BUILD_INFO.native-validation.json'
+    $armValidation = Join-Path $candidate "BUILD_INFO.native-validation-$($arm.name).json"
     Assert-Digest $exe $arm.sha256
     Assert-Digest $build $arm.buildInfoSha256
     $info = Get-Content -Raw -LiteralPath $build | ConvertFrom-Json
@@ -141,6 +141,7 @@ function Prepare-Arm($arm) {
     }
     $info | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
     $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue $arm.buildInfoSha256
+    if (Test-Path -LiteralPath $armValidation) { throw 'An exact arm build record would be overwritten.' }
     Save-Json $armValidation $info
     $bindings = [ordered]@{ executable=$exe; buildInfo=$armValidation; candidateSha256=$arm.sha256
         buildInfoSha256=(Get-FileHash -LiteralPath $armValidation -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -223,11 +224,11 @@ function Run-Measurement($arm, $prepared) {
             $spec = [ordered]@{ pid=$identity.pid; creationFileTime=$identity.creationFileTime; windowHandle=$identity.windowHandle
                 executable=$executable; sha256=$candidateSha256 }
             $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($spec | ConvertTo-Json -Compress)))
-            $quitText = & pwsh.exe -NoProfile -NonInteractive -MTA -File $quitHelper -Spec $encoded -Arm $arm.name
+            $quitText = & pwsh.exe -NoProfile -NonInteractive -MTA -File $quitHelper -Spec $encoded -Arm $arm.slot
             if ($LASTEXITCODE -ne 0) { throw 'The exact normal quit did not complete.' }
             $quitProof = ($quitText -join "`n") | ConvertFrom-Json -ErrorAction Stop
             Save-Json $proofFile $quitProof
-            if ($quitProof.exited -ne $true -or $quitProof.exitCode -ne 0 -or $quitProof.pid -ne $identity.pid -or
+            if ($quitProof.exited -ne $true -or $quitProof.exitCode -ne 0 -or $quitProof.osInputSent -ne $false -or $quitProof.pid -ne $identity.pid -or
                 $quitProof.creationFileTime -cne $identity.creationFileTime -or $quitProof.windowHandle -ne $identity.windowHandle) {
                 throw 'The normal-exit receipt did not match the sampled owner.'
             }
@@ -252,36 +253,53 @@ function Run-Measurement($arm, $prepared) {
     }
 }
 
-$arms = @(
-    @{name='before'; source=$env:BEFORE_SOURCE; run=$env:BEFORE_RUN_ID; sha256=$env:BEFORE_EXE_SHA256; buildInfoSha256=$env:BEFORE_BUILD_INFO_SHA256},
-    @{name='after'; source=$env:AFTER_SOURCE; run=$env:AFTER_RUN_ID; sha256=$env:AFTER_EXE_SHA256; buildInfoSha256=$env:AFTER_BUILD_INFO_SHA256}
+$versions = @{
+    before=@{source=$env:BEFORE_SOURCE; run=$env:BEFORE_RUN_ID; sha256=$env:BEFORE_EXE_SHA256; buildInfoSha256=$env:BEFORE_BUILD_INFO_SHA256}
+    after=@{source=$env:AFTER_SOURCE; run=$env:AFTER_RUN_ID; sha256=$env:AFTER_EXE_SHA256; buildInfoSha256=$env:AFTER_BUILD_INFO_SHA256}
+}
+$sequence = @(
+    @{name='ab-before'; slot='before'}, @{name='ab-after'; slot='after'},
+    @{name='ba-after'; slot='after'}, @{name='ba-before'; slot='before'}
 )
 $reports = @{}
 $locations = @{}
+$identities = [System.Collections.Generic.HashSet[string]]::new()
+$lastReport = $null
 try {
-    foreach ($arm in $arms) {
+    foreach ($position in $sequence) {
+        $arm = $versions[$position.slot].Clone()
+        $arm.name = $position.name
+        $arm.slot = $position.slot
         if ($arm.source -cnotmatch '^[a-f0-9]{40}$' -or $arm.sha256 -cnotmatch '^[a-f0-9]{64}$' -or
             $arm.buildInfoSha256 -cnotmatch '^[a-f0-9]{64}$' -or $arm.run -cnotmatch '^[0-9]+$') {
             throw "Missing independently verified candidate pins for $($arm.name)."
         }
         $prepared = Prepare-Arm $arm
+        if ($prepared.root -iin $locations.Values) { throw 'Reused a fixture directory across runs.' }
         $locations[$arm.name] = $prepared.root
-        $reports[$arm.name] = Run-Measurement $arm $prepared
+        $report = Run-Measurement $arm $prepared
+        if (!$identities.Add("$($report.identity.pid):$($report.identity.creationFileTime)") -or
+            ($null -ne $lastReport -and [datetimeoffset]$lastReport.finishedAt -gt [datetimeoffset]$report.startedAt)) {
+            throw 'Runs must have distinct process identities without overlap.'
+        }
+        if ($null -ne $lastReport -and ($lastReport.history.normalizedKeySha256 -cne $report.history.normalizedKeySha256 -or
+            $lastReport.history.keysPerJob -ne $report.history.keysPerJob -or
+            ($lastReport.cycles.index -join ',') -cne ($report.cycles.index -join ','))) {
+            throw 'The crossover runs did not reproduce the same physical and durable workload.'
+        }
+        $reports[$arm.name] = $report
+        $lastReport = $report
     }
 } finally {
     [IO.File]::WriteAllText($module, $pristineModule, [Text.UTF8Encoding]::new($false))
 }
 
-$before = $reports.before
-$after = $reports.after
-if ($locations.before -ieq $locations.after -or $arms[0].sha256 -ceq $arms[1].sha256 -or
-    ($before.cycles.index -join ',') -cne ($after.cycles.index -join ',') -or
-    $before.history.normalizedKeySha256 -cnotmatch '^[a-f0-9]{64}$' -or
-    $before.history.normalizedKeySha256 -cne $after.history.normalizedKeySha256 -or
-    $before.history.keysPerJob -ne $after.history.keysPerJob -or
-    $before.finishedAt -gt $after.startedAt) {
-    throw 'The two completed arms did not reproduce the same independent physical workload and fixture.'
+function Summarize-Latency([double[]]$items) {
+    $ordered = @($items | Sort-Object)
+    if ($ordered.Count -ne 12) { throw 'Expected exactly twelve timing values.' }
+    return [ordered]@{count=$ordered.Count; minimumMs=$ordered[0]; medianMs=($ordered[5]+$ordered[6])/2; maximumMs=$ordered[-1]}
 }
+
 function Summarize-Arm($report) {
     if ($report.status -cne 'retention-short-check-only-completed' -or $report.scope -cne 'check-only' -or
         $report.normalExit -ne $true -or
@@ -291,6 +309,17 @@ function Summarize-Arm($report) {
         $report.actions.Count -ne 12 -or @($report.actions | Where-Object { $_.key -cne 'check' -or $_.result.clicked -ne $true }).Count -ne 0 -or
         $report.checks.Count -ne 12 -or $report.history.jobs -ne 12 -or $report.history.keysPerJob -ne 2002) {
         throw 'An arm was incomplete or escaped its explicit short scope.'
+    }
+    for ($index=0; $index -lt 12; $index++) {
+        $check=$report.checks[$index]
+        if ($check.index -ne ($index+1) -or $check.targetElapsedMs -ne (($index+1)*12000) -or
+            $null -eq $check.clickToObservedDurableMs -or $check.clickToObservedDurableMs -le 0 -or
+            $check.workerElapsedMs -lt 0 -or $check.observedDurableElapsedMs -lt $check.issuedElapsedMs -or
+            $check.observedDurableElapsedMs -gt $report.samples[$index+1].elapsedMs -or
+            $check.issuedElapsedMs -lt $check.targetElapsedMs -or
+            [Math]::Abs(($check.observedDurableElapsedMs - $check.issuedElapsedMs)-$check.clickToObservedDurableMs) -gt 0.01) {
+            throw 'The durable timing proof diverged from its exact physical check and idle sample.'
+        }
     }
     $first, $last = $report.samples[0], $report.samples[-1]
     $startKeys = $first.cache.taskRetention.byAction.check_now
@@ -319,30 +348,43 @@ function Summarize-Arm($report) {
         } else { $null }
         keyCapacityGrowthBytes=$growth; processFamilyPrivateStartBytes=$first.privateBytes
         processFamilyPrivateEndBytes=$last.privateBytes; processFamilyPrivateGrowthBytes=[long]$last.privateBytes - [long]$first.privateBytes
+        idleSamplePrivatePeakBytes=[long](($report.samples | Measure-Object -Property privateBytes -Maximum).Maximum)
         privateGrowthByRole=$roleDeltas; elapsedMs=$last.elapsedMs; checks=$report.history.jobs
+        clickToObservedDurable=(Summarize-Latency @($report.checks.clickToObservedDurableMs))
+        workerElapsed=(Summarize-Latency @($report.checks.workerElapsedMs))
     }
 }
-$beforeStats = Summarize-Arm $before
-$afterStats = Summarize-Arm $after
-$roleDifference = [ordered]@{}
-foreach ($role in $beforeStats.privateGrowthByRole.Keys) {
-    $roleDifference[$role] = $afterStats.privateGrowthByRole[$role] - $beforeStats.privateGrowthByRole[$role]
+$runSummaries = [ordered]@{}
+foreach ($position in $sequence) {
+    $report=$reports[$position.name]
+    $runSummaries[$position.name] = [ordered]@{
+        slot=$position.slot; sourceCommit=$versions[$position.slot].source; workflowRunId=$versions[$position.slot].run
+        startedAt=$report.startedAt; finishedAt=$report.finishedAt; identity=$report.identity
+        observations=(Summarize-Arm $report)
+    }
 }
-$sampleSkew = for ($index = 0; $index -lt $before.samples.Count; $index++) {
-    [Math]::Abs($after.samples[$index].elapsedMs - $before.samples[$index].elapsedMs)
+$contrasts = [ordered]@{}
+foreach ($pair in 'ab','ba') {
+    $a=$runSummaries["$pair-before"].observations
+    $b=$runSummaries["$pair-after"].observations
+    $roleDelta=[ordered]@{}
+    foreach ($role in $a.privateGrowthByRole.Keys) { $roleDelta[$role]=$b.privateGrowthByRole[$role]-$a.privateGrowthByRole[$role] }
+    $contrast=[ordered]@{
+        nativeWorkerMedianDifferenceMs=$b.workerElapsed.medianMs-$a.workerElapsed.medianMs
+        observedDurableMedianDifferenceMs=$b.clickToObservedDurable.medianMs-$a.clickToObservedDurable.medianMs
+        idlePrivateNetGrowthDifferenceBytes=$b.processFamilyPrivateGrowthBytes-$a.processFamilyPrivateGrowthBytes
+        idlePrivatePeakDifferenceBytes=$b.idleSamplePrivatePeakBytes-$a.idleSamplePrivatePeakBytes
+        idlePrivateNetGrowthByRoleDifferenceBytes=$roleDelta
+    }
+    $contrasts[$pair]=$contrast
 }
 Save-Json (Join-Path $measurements 'comparison.json') ([ordered]@{
-    status='paired-short-check-only-diagnostic-completed'; scope='check-only'
-    interpretation='Same-host 5480977 then 44d2f65, fixed order and fresh data. Twelve physical check clicks with the library held on All. Private-byte differences are observations.'
-    compactTransportObserved=$false
+    status='crossover-short-check-only-diagnostic-completed'; scope='check-only'
+    interpretation='Same-host before/after/after/before in four fresh synthetic fixtures. All pair differences are after minus before. The sampled private-byte peak covers idle samples only. The click-to-observed-durable metric includes read-only observation.'
     navigationGateEvaluated=$false; latencyGateEvaluated=$false
     convergenceGateEvaluated=$false; previousFailureReplaced=$false
     sameHost=[ordered]@{runnerImage=$env:ImageOS; runnerImageVersion=$env:ImageVersion; node=(& node --version); windows=[Environment]::OSVersion.Version.ToString()}
     referenceSha256=$receipt.referenceSha256; referenceSource=$referenceSource; approvalSha256=$ApprovalSha256
-    fixtureSha256=$reference.datasetFingerprint; checkKeySha256=$before.history.normalizedKeySha256
-    maximumObservedSampleSkewMs=($sampleSkew | Measure-Object -Maximum).Maximum
-    before=[ordered]@{sourceCommit=$arms[0].source; workflowRunId=$arms[0].run; observations=$beforeStats}
-    after=[ordered]@{sourceCommit=$arms[1].source; workflowRunId=$arms[1].run; observations=$afterStats}
-    afterMinusBeforeFamilyPrivateGrowthBytes=$afterStats.processFamilyPrivateGrowthBytes - $beforeStats.processFamilyPrivateGrowthBytes
-    afterMinusBeforePrivateGrowthByRole=$roleDifference
+    fixtureSha256=$reference.datasetFingerprint; checkKeySha256=$lastReport.history.normalizedKeySha256
+    runs=$runSummaries; pairDifferences=$contrasts
 })

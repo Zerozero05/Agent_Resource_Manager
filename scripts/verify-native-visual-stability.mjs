@@ -634,16 +634,41 @@ async function references(descriptor) {
             await writeFile(join(descriptor.root, 'reference-failure.json'), json({ status: 'failed-references', error: failure.message, referencePhase, lastRead, captureBounds: ref.frame?.captureBounds, documentReading: ref.documentReading, completedStates: Object.keys(ref.states), exitEvidence, cleanupErrors }), { flag: 'wx' });
     }
 }
+async function confirmDurableCheck(database, check) {
+    const deadline = performance.now() + 10000;
+    const lookup = database.prepare('SELECT payload FROM task_history WHERE id = ?');
+    for (;;) {
+        const row = JSON.parse(lookup.get(check.taskId)?.payload ?? 'null');
+        if (row && ['succeeded', 'failed', 'cancelled', 'interrupted', 'partial'].includes(row.status)) {
+            assert.equal(row.id, check.taskId);
+            assert.equal(row.action, 'check_now');
+            assert.equal(row.status, 'succeeded');
+            const started = Date.parse(row.startedAt), finished = Date.parse(row.finishedAt);
+            assert.ok(Number.isFinite(started) && Number.isFinite(finished) && started <= finished);
+            return {
+                taskStartedAt: row.startedAt,
+                taskFinishedAt: row.finishedAt,
+                workerElapsedMs: finished - started,
+                durableObservedAtMs: performance.now(),
+            };
+        }
+        assert.ok(performance.now() < deadline, 'The exact task was not durably successful within the history observation budget.');
+        await sleep(25);
+    }
+}
+
 function retainedCheckHistory(dataset, checks) {
     const db = new DatabaseSync(dataset.dbPath, { readOnly: true });
     try {
         const get = db.prepare('SELECT payload FROM task_history WHERE id = ?');
-        const keys = checks.map(({ taskId }) => {
+        const keys = checks.map(({ taskId, taskStartedAt, taskFinishedAt }) => {
             const row = JSON.parse(get.get(taskId)?.payload ?? 'null');
             assert.ok(row, 'One measured check was absent from durable history.');
             assert.equal(row.id, taskId);
             assert.equal(row.action, 'check_now');
             assert.equal(row.status, 'succeeded');
+            assert.equal(row.startedAt, taskStartedAt);
+            assert.equal(row.finishedAt, taskFinishedAt);
             assert.ok(Array.isArray(row.resources) && row.resources.length > 0);
             assert.ok(row.resources.every(key => typeof key === 'string'));
             return row.resources;
@@ -668,7 +693,7 @@ async function run(descriptor, pilot, shortRetention = false) {
     if (shortRetention) {
         assert.equal(process.env.GITHUB_ACTIONS, 'true');
         assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
-        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-check-only-pair-44d2f65-20261122');
+        assert.equal(process.env.GITHUB_REF_NAME, 'codex/hosted-check-crossover-0c0f447-20261125');
         assert.ok(hostedRetentionReference);
         assert.equal(hash(refBytes), hostedRetentionReference.sha256);
     }
@@ -786,12 +811,13 @@ async function run(descriptor, pilot, shortRetention = false) {
                 await waitState('closed');
             }
         } report.cycles.push({ index, completedAt: new Date().toISOString() }); }
-        async function check() { const before = await observe(descriptor, identity, env, 'tasks'), known = new Set(before.tasks.map(task => task.id)); await click('check'); const deadline = performance.now() + 20000; for (;;) {
+        async function check() { const before = await observe(descriptor, identity, env, 'tasks'), known = new Set(before.tasks.map(task => task.id)); const issuedAtMs = performance.now(); await click('check'); const deadline = performance.now() + 20000; for (;;) {
             const value = await observe(descriptor, identity, env, 'tasks'), added = value.tasks.filter(task => !known.has(task.id) && task.action === 'check_now');
             assert.ok(added.length <= 1, 'The check click created multiple matching tasks.');
             if (added.length === 1) {
-                report.checks.push({ taskId: added[0].id, action: added[0].action, initialStatus: added[0].status, observedAt: new Date().toISOString() });
-                return;
+                const observed = { taskId: added[0].id, action: added[0].action, initialStatus: added[0].status, observedAt: new Date().toISOString() };
+                report.checks.push(observed);
+                return { observed, issuedAtMs };
             }
             if (performance.now() >= deadline)
                 throw new Error('The check task was not observed. The click was not replayed.');
@@ -817,15 +843,32 @@ async function run(descriptor, pilot, shortRetention = false) {
             await verifyAll(0);
             const start = performance.now();
             report.samples.push(await sample(0));
-            for (let index = 1; index <= shortRetentionPolicy.cycles; index++) {
-                await sleep(start + index * shortRetentionPolicy.intervalMs - performance.now());
-                await check();
-                const value = await sample(0, () => verifyAll(index));
-                value.elapsedMs = performance.now() - start;
-                report.samples.push(value);
-                await save();
-                console.log(json({ phase: 'retention-short-check-only', sample: index, of: shortRetentionPolicy.cycles }).trim());
-            }
+            const history = new DatabaseSync(descriptor.dataset.dbPath, { readOnly: true });
+            try {
+                for (let index = 1; index <= shortRetentionPolicy.cycles; index++) {
+                    const targetElapsedMs = index * shortRetentionPolicy.intervalMs;
+                    const target = start + targetElapsedMs;
+                    assert.ok(performance.now() <= target, 'The previous idle sample overran the next scheduled check.');
+                    while (performance.now() < target) await sleep(Math.ceil(target - performance.now()));
+                    const { observed, issuedAtMs } = await check();
+                    const durable = await confirmDurableCheck(history, observed);
+                    Object.assign(observed, {
+                        index,
+                        targetElapsedMs,
+                        issuedElapsedMs: issuedAtMs - start,
+                        observedDurableElapsedMs: durable.durableObservedAtMs - start,
+                        clickToObservedDurableMs: durable.durableObservedAtMs - issuedAtMs,
+                        workerElapsedMs: durable.workerElapsedMs,
+                        taskStartedAt: durable.taskStartedAt,
+                        taskFinishedAt: durable.taskFinishedAt,
+                    });
+                    const value = await sample(0, () => verifyAll(index));
+                    value.elapsedMs = performance.now() - start;
+                    report.samples.push(value);
+                    await save();
+                    console.log(json({ phase: 'retention-short-check-only', sample: index, of: shortRetentionPolicy.cycles }).trim());
+                }
+            } finally { history.close(); }
             await sleep(shortRetentionPolicy.cooldownMs);
             const tail = await sample(0);
             tail.elapsedMs = performance.now() - start;

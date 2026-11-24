@@ -1,7 +1,7 @@
 {
   "reviewedBy": "root",
   "visualReviewConfirmed": true,
-  "referenceSha256": "009cf13d1c301a4144f4520fa3842df8d44fd6f432c4231fa07a647c780d366c",
+  "referenceSha256": "156c9f6d67f9217cfcf328e20351a2c28e4c4b2c3cf9ca8eef365b68b76886bf",
   "reviewedStates": [
     "search-0000",
     "search-0001",
@@ -76,6 +76,6 @@
     "documentTab",
     "closed"
   ],
-  "reviewScope": "Same 5480977 build. Verified all 210 crop digests and full-client containment. All nine rendered montages are byte-identical to the previously reviewed complete set.",
-  "notes": "Independently observed check_now before the first search and the frozen GitHub box [530,253,151,36]. All 210 image bytes match the prior review. Only the fixed GitHub crop moved from y252 to y253. The original exact pixel matcher, visual deadline, pilot, and 61-sample stability procedure remain unchanged."
+  "reviewScope": "Exact native 6604519, 72 states and 210 verified crops in the owned compact frame. Eight of nine contact sheets match their previously reviewed bytes. Manually inspected the only changed contact sheet, review-09.png.",
+  "notes": "Only the active document tab crops for document and documentTab differ from the prior approved R2. Their coordinates remain [194,38,165,47]. The selected text and new rounded upper accent are visible. GitHub empty state, first search and other controls retain their approved crop bytes. The 61-sample native test, pilot and statistical gates remain unchanged."
 }
