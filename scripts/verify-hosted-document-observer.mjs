@@ -9,9 +9,9 @@ import { assertNoUserManager, NativeUiaSession } from './native-uia-client.mjs';
 import { createPerformanceFixture } from './performance-fixture.mjs';
 import { ownedForeground } from './performance-policy.mjs';
 
-const sourceCommit = 'd5b00b4d5bcbc86c83e8612594ba21fe187d4700';
-const candidateRunId = '45448781321';
-const branch = 'codex/hosted-document-observer-d5b00b4-20261125';
+const sourceCommit = 'c81fda47073b92938a45da1bfd5afd8b6e8fa4ce';
+const candidateRunId = '45459930763';
+const branch = 'codex/hosted-document-observer-c81fda4-20261125';
 const fixtureParent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
 const maxTrials = 20;
 const samplesPerArm = 6;
