@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 操作菜单与快捷键（开发中） | 2026-11-25 | 1、统一菜单和快捷键浮层样式，限制极窄窗口下的菜单宽度。[详情](CHANGELOG.md#ios27-anchored-controls-20261125)<br>2、改善展开反馈，淡入遵循动效及对比偏好。[详情](CHANGELOG.md#ios27-anchored-controls-20261125) |
 | 本地检查与任务结果（开发中） | 2026-11-25 | 1、无仓库来源时复用成功读取的本地文件清单。[详情](CHANGELOG.md#check-inventory-and-result-memory-20261125)<br>2、生成完整检查结果前释放已用完的后台状态副本。[详情](CHANGELOG.md#check-inventory-and-result-memory-20261125) |
 | 自动检查的调度开销（开发中） | 2026-11-24 | 1、在 Skill 自动监视未生效时省去路径清单的定时组装。[详情](CHANGELOG.md#automatic-watch-projection-20261124)<br>2、保留独立的工具版本检查和监视恢复。[详情](CHANGELOG.md#automatic-watch-projection-20261124) |
 | 桌面材质与操作反馈（开发中） | 2026-11-24 | 1、调整工具栏、浮层与内容的材质和圆角层次。[详情](CHANGELOG.md#ios27-desktop-material-20261124)<br>2、增加短促且可关闭的操作反馈，保留键盘焦点与高对比显示。[详情](CHANGELOG.md#ios27-desktop-material-20261124) |

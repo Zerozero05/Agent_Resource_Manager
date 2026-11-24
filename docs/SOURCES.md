@@ -11,6 +11,7 @@
 - [材质](https://developer.apple.com/design/human-interface-guidelines/materials?changes=l_8_1)与[适配方法](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass?changes=_3)：功能层与内容层分开，文字浮层倾向更实的材质，内外圆角协调，控件之间保留空间。管理器用 CSS 在顶栏、快捷入口及浮层加细边缘，透明和模糊只用于快捷入口且按显示偏好回退，内容区为实色。
 - [动效](https://developer.apple.com/design/human-interface-guidelines/motion.md)与[iPhone 动效辅助设置](https://support.apple.com/en-mide/guide/iphone/iph0b691d3ed/27/ios/27)：反馈轻量、立即可用，可以中断，状态可通过文字或焦点辨认。管理器沿用既有动效策略，加 150 ms 快捷入口轻入场、目录箭头旋转和工具图标按压反馈；时间及距离为本项目设计选择。
 - [可访问性](https://developer.apple.com/design/human-interface-guidelines/accessibility.md)：保留键盘、对比度和辅助设置。样式由项目自身实现，未复制苹果界面、素材、图标或 SDK。
+- 2026-11-25 补读 [WWDC26 iOS 27 材质更新](https://developer.apple.com/videos/play/wwdc2026/102/?time=1363)、[侧栏](https://developer.apple.com/design/human-interface-guidelines/sidebars.md)、[设置](https://developer.apple.com/design/human-interface-guidelines/settings.md)、[自适应布局](https://developer.apple.com/design/human-interface-guidelines/layout.md)及[反馈](https://developer.apple.com/design/human-interface-guidelines/feedback.md)。应用到操作菜单和快捷键浮层的实色边缘、菜单入场反馈与展开状态。Windows 版本保留鼠标、键盘和原有布局，以现有主题及辅助显示设置控制效果。
 
 <a id="desktop-design-refresh-20261124"></a>
 

@@ -49,7 +49,7 @@ export function FloatingMenu({ menu, onClose }: { menu: OpenMenu; onClose: (rest
     (menu.last ? items.at(-1) : items[0])?.focus({ preventScroll: true });
     if (menu.last && panel.current) panel.current.scrollTop = panel.current.scrollHeight;
   }, [menu, position.ready]);
-  return createPortal(<div ref={panel} className="floating-menu" role="menu" aria-label={menu.label} style={{ position: 'fixed', left: position.left, top: position.top, maxHeight: position.maxHeight, visibility: position.ready ? 'visible' : 'hidden' }} onKeyDown={event => {
+  return createPortal(<div ref={panel} className="floating-menu" role="menu" aria-label={menu.label} data-ready={position.ready || undefined} style={{ position: 'fixed', left: position.left, top: position.top, maxHeight: position.maxHeight, visibility: position.ready ? 'visible' : 'hidden' }} onKeyDown={event => {
     const items = Array.from(panel.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') || []);
     const index = items.indexOf(document.activeElement as HTMLButtonElement);
     if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
