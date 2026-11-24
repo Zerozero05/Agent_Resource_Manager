@@ -21,7 +21,7 @@ env:
   FIRST_SEARCH_RESULT_BOUNDS: '433,671,201,31'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-c81fda4-20261125' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-c81fda4-20261125-r2' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
@@ -107,6 +107,7 @@ jobs:
           $desktop = $null
           $referenceFrame = $null
           $referenceError = $null
+          $driverFailure = $null
           try {
             Add-Type -TypeDefinition @'
           using System;
@@ -216,6 +217,16 @@ jobs:
               $detail = Join-Path $referenceRoot 'reference-failure.json'
               if (Test-Path -LiteralPath $detail -PathType Leaf) {
                 $referenceError = Get-Content -LiteralPath $detail -Raw | ConvertFrom-Json
+              }
+              $driverFile = Get-Item -LiteralPath (Join-Path $referenceRoot 'reference-driver.json') -ErrorAction SilentlyContinue
+              if ($driverFile -is [IO.FileInfo] -and $driverFile.Length -le 1MB -and
+                  ($driverFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                try {
+                  $native = Get-Content -LiteralPath $driverFile.FullName -Raw | ConvertFrom-Json -ErrorAction Stop
+                  $driverFailure = $native | Select-Object status,error,errorType,errorCode,lastOperation,readinessMode,closedNormally,ownedProcessStillRunning,closeError
+                } catch {
+                  $driverFailure = @{status='driver-receipt-unreadable'}
+                }
               }
               throw 'The original reference generation did not complete.'
             }
@@ -343,7 +354,7 @@ jobs:
             $receipt | ConvertTo-Json -Depth 5 -Compress
           } catch {
             [ordered]@{status='reference-preflight-failed'; stage=$stage; candidateSource=$env:CANDIDATE_SOURCE;
-              candidateSha256=$env:CANDIDATE_SHA256; message=$_.Exception.Message; referenceError=$referenceError;
+              candidateSha256=$env:CANDIDATE_SHA256; message=$_.Exception.Message; referenceError=$referenceError; driverFailure=$driverFailure;
               desktop=$desktop; referenceFrame=$referenceFrame} |
               ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $failure -Encoding utf8NoBOM
             throw
