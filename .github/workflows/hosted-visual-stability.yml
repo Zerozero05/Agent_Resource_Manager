@@ -4,22 +4,22 @@ permissions:
   contents: read
   actions: read
 env:
-  REFERENCE_BRANCH: 'codex/hosted-visual-references-r2-5480977-20261122'
-  REFERENCE_RUN_ID: '45016707033'
-  REFERENCE_COMMIT: 'd3d71a378926236f9c27a836abe29cef88958c80'
-  REFERENCE_REVIEW_ARTIFACT_ID: '14752341208'
-  REFERENCE_ROI_ARTIFACT_ID: '14751971997'
-  REFERENCE_RECEIPT_SHA256: '4507ba75d753196af85798cdde035b4116927ab61257f7e2bd90f970958cedf5'
-  CANDIDATE_ARTIFACT_ID: '14708534135'
-  CANDIDATE_SHA256: '09ab04ca510043aa38bba4fa398790b3212172699751a0920390190e4ba83274'
-  CANDIDATE_ARCHIVE_SHA256: 'f45e69c72adb72cfcd7e506e3f9082e31d59de38824bdd12aa856b5a6a0049e0'
-  CANDIDATE_BUILD_INFO_SHA256: 'd7f9ae18dcc542477967d7ab2248b76356e971b179cc19e0c86e3b19d8329c52'
-  REFERENCE_REVIEW_ARCHIVE_SHA256: '54fabfb449b7581cc9644ff41fb6dfd80fd102663c3cd47c2e581538adb28d1c'
-  REFERENCE_ROI_ARCHIVE_SHA256: '1620e60cb4d34a6885256261defb7a9ac5dc7846732350777a3533f0ff25e462'
-  APPROVAL_SHA256: '6650dfded09dac3e9301a6bf716e12973ff01c47a902e98b9e7dbc63af8d31a2'
+  REFERENCE_BRANCH: 'codex/hosted-visual-references-6604519-20261124'
+  REFERENCE_RUN_ID: '45406865614'
+  REFERENCE_COMMIT: 'c49385ce3917a93f3fd02adfde4ab7e16168bab2'
+  REFERENCE_REVIEW_ARTIFACT_ID: '14926885876'
+  REFERENCE_ROI_ARTIFACT_ID: '14926821008'
+  REFERENCE_RECEIPT_SHA256: '20498a54837864ddf59fd4119603c3cf13c73d7bfd9bcf51cbd26aa69e33ba4f'
+  CANDIDATE_ARTIFACT_ID: '14924463108'
+  CANDIDATE_SHA256: '51d077f6e87b565b8496cdca852aa80549921d74b63167bcbc102132fbf79a25'
+  CANDIDATE_ARCHIVE_SHA256: '35f1cff4f8991262c82ce99313452e68c4c822a3db5711925ceb11d48da82d0f'
+  CANDIDATE_BUILD_INFO_SHA256: 'a14841439708890bf287157e4da59d52325a4619c8d02277aa1f461cd3a675e5'
+  REFERENCE_REVIEW_ARCHIVE_SHA256: '2bf01f842c5f5d2a71d93d974f82cdd4851b947b4571dd18d2806244a633d0da'
+  REFERENCE_ROI_ARCHIVE_SHA256: 'd48e1978db5cf383c3960efe0eca6419519202ad5feed5f36289c76abe28ec25'
+  APPROVAL_SHA256: 'ccdb102ef019cb5ecca4e357e3e41744f8f1497eeaca28b856697d81d3001aa9'
 jobs:
   stability:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-stability-r2-5480977-20261122' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-stability-6604519-20261124' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -31,7 +31,7 @@ jobs:
           persist-credentials: false
       - name: Require frozen references and the recorded visual review
         run: |
-          if ($env:REFERENCE_BRANCH -cnotmatch '^codex/hosted-visual-references-r2-5480977-20261122$' -or
+          if ($env:REFERENCE_BRANCH -cnotmatch '^codex/hosted-visual-references-6604519-20261124$' -or
               $env:REFERENCE_RUN_ID -cnotmatch '^[0-9]+$' -or
               $env:REFERENCE_COMMIT -cnotmatch '^[0-9a-f]{40}$' -or
               $env:REFERENCE_REVIEW_ARTIFACT_ID -cnotmatch '^[0-9]+$' -or
@@ -46,7 +46,7 @@ jobs:
               $env:APPROVAL_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'Pin candidate and reference provenance and complete a review of the rendered screenshots before any retrieval.'
           }
-          $approvalPath = 'outputs/v1-validation/hosted-visual-approval-5480977.json'
+          $approvalPath = 'outputs/v1-validation/hosted-visual-approval-6604519.json'
           if (-not (Test-Path -LiteralPath $approvalPath -PathType Leaf)) { throw 'The exact visual review file is required.' }
           $approval = Get-Item -LiteralPath $approvalPath
           if ($approval.PSIsContainer -or ($approval.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
@@ -72,8 +72,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $candidateRun = '44907287993'
-          $candidateCommit = '5480977711719efadcb79c322931b7d2066a6f84'
+          $candidateRun = '45399676483'
+          $candidateCommit = '660451977f924eead9b16ceff72f17c1c61d9497'
           $candidateSha = $env:CANDIDATE_SHA256
           $candidateArchiveSha = $env:CANDIDATE_ARCHIVE_SHA256
           function Read-Run([string]$id, [string]$commit, [string]$workflow, [string]$event) {
