@@ -1,20 +1,20 @@
-name: Verify three native workloads on one hosted Windows machine (6604519)
+name: Verify three native workloads on one hosted Windows machine (d5b00b4)
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '45399676483'
-  CANDIDATE_JOB_ID: '138464655518'
-  CANDIDATE_SOURCE: 660451977f924eead9b16ceff72f17c1c61d9497
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_660451977f924eead9b16ceff72f17c1c61d9497
-  CANDIDATE_ARTIFACT_ID: '14924463108'
-  CANDIDATE_SHA256: '51d077f6e87b565b8496cdca852aa80549921d74b63167bcbc102132fbf79a25'
-  CANDIDATE_ARCHIVE_SHA256: '35f1cff4f8991262c82ce99313452e68c4c822a3db5711925ceb11d48da82d0f'
-  CANDIDATE_BUILD_INFO_SHA256: 'a14841439708890bf287157e4da59d52325a4619c8d02277aa1f461cd3a675e5'
+  CANDIDATE_RUN_ID: '45448781321'
+  CANDIDATE_JOB_ID: '138639792694'
+  CANDIDATE_SOURCE: d5b00b4d5bcbc86c83e8612594ba21fe187d4700
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_d5b00b4d5bcbc86c83e8612594ba21fe187d4700
+  CANDIDATE_ARTIFACT_ID: '14948808321'
+  CANDIDATE_SHA256: '683a6a54414f3582aae02125290e4f8957f4aca6b923b88effd9188160c57af7'
+  CANDIDATE_ARCHIVE_SHA256: '3904bbefde135d87eec58282782ebce7abdf4784b112decf671d3ef5a097d38c'
+  CANDIDATE_BUILD_INFO_SHA256: 'ccb64061a3a6335d319870750ae7bc08fd1ce0a08bb2e19c67d9d44920d18686'
 jobs:
   measure:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-combined-6604519-20261124' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-combined-d5b00b4-20261125' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 50
     defaults:
@@ -45,7 +45,7 @@ jobs:
           if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) { throw 'Expected no existing manager in the isolated runner.' }
           $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $run.head_sha -cne $env:CANDIDATE_SOURCE -or $run.run_attempt -ne 1 -or
-              $run.head_branch -cne 'codex/check-watcher-projection-20261124' -or
+              $run.head_branch -cne 'codex/check-and-detail-20261125' -or
               $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push' -or
               $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Wrong or unsuccessful candidate build identity.' }
           $job = gh api "repos/$env:GITHUB_REPOSITORY/actions/jobs/$env:CANDIDATE_JOB_ID" | ConvertFrom-Json
