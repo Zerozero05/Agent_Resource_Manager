@@ -1,4 +1,4 @@
-name: Verify three native workloads on one hosted Windows machine (6604519)
+name: Compare native document timing observers (6604519)
 on: create
 permissions:
   contents: read
@@ -14,9 +14,9 @@ env:
   CANDIDATE_BUILD_INFO_SHA256: 'a14841439708890bf287157e4da59d52325a4619c8d02277aa1f461cd3a675e5'
 jobs:
   measure:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-combined-6604519-20261124' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-document-observer-6604519-20261124' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
-    timeout-minutes: 50
+    timeout-minutes: 15
     defaults:
       run:
         shell: pwsh
@@ -73,110 +73,18 @@ jobs:
           $info | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue $originalBuildInfoSha256
           $info | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidate 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
           Write-Output "Verified $($info.sourceCommit) $digest in run $($info.workflowRunId), job $($job.id)"
-      - name: Measure check, download, and update in separate native sessions
-        timeout-minutes: 45
+      - name: Measure one document under an actual local check with each observer
+        timeout-minutes: 10
         run: |
           $candidate = Join-Path $env:RUNNER_TEMP 'arm-native-performance'
-          $root = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
-          $resourceRoot = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\resources'
-          if ((Test-Path -LiteralPath $root) -or (Test-Path -LiteralPath $resourceRoot)) {
-            throw 'Expected fresh native measurement and resource directories.'
-          }
-          New-Item -ItemType Directory -Path $resourceRoot | Out-Null
-          $audit = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-native-performance-evidence')
-          $sequence = @()
-          foreach ($kind in @('check','download','update')) {
-            $out = New-Item -ItemType Directory -Path (Join-Path $audit.FullName $kind)
-            $record = [ordered]@{ workload=$kind; nativeExitCode=$null; normalExits=$null; reportReady=$false; error=$null }
-            try {
-              if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) {
-                throw 'A previous manager process still exists. No new native session was started.'
-              }
-              $arguments = @('--suite', 'loads', '--load-kind', $kind, '--sample-overlap', 'true', '--accessibility-input',
-                '--candidate', (Join-Path $candidate 'agent-resource-manager.exe'),
-                '--candidate-build-info', (Join-Path $candidate 'BUILD_INFO.native-validation.json'))
-              if ($kind -ceq 'download') {
-                $specification = Join-Path $env:RUNNER_TEMP 'pinned-agent-reach-download.json'
-                [ordered]@{repository='Panniantong/Agent-Reach'; tag='v1.6.0'; releaseId=421526768; assetId=668240314;
-                  assetName='agent-reach.zip'; assetBytes=676536} | ConvertTo-Json -Compress |
-                  Set-Content -LiteralPath $specification -Encoding utf8NoBOM
-                $arguments += @('--download-spec', $specification, '--popup-select', 'true')
-              }
-              if ($kind -ceq 'update') {
-                $generated = & node --input-type=module -e "import {createNativeLoadFixture, MAX_NATIVE_UPDATE_FIXTURES} from './scripts/performance-load-fixture.mjs'; import {join} from 'node:path'; const manifestPaths=[]; for(let index=0;index<MAX_NATIVE_UPDATE_FIXTURES;index++){ const f=await createNativeLoadFixture(); manifestPaths.push(join(f.root,'load-fixture.json')); } console.log(JSON.stringify(manifestPaths));"
-                if ($LASTEXITCODE -ne 0) { throw 'Could not prepare independent synthetic update fixtures.' }
-                $manifests = @($generated | ConvertFrom-Json)
-                if ($manifests.Count -ne 36 -or @($manifests | Sort-Object -Unique).Count -ne 36) { throw 'The exact update fixture count was not created.' }
-                foreach ($manifest in $manifests) { $arguments += @('--stage-fixture', $manifest) }
-              }
-              $before = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-              $PSNativeCommandUseErrorActionPreference = $false
-              & node scripts/verify-uia-performance.mjs @arguments
-              $record.nativeExitCode = $LASTEXITCODE
-              $new = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'uia-performance-*' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notin $before })
-              if ($new.Count -ne 1) { throw 'Expected one new isolated measurement directory for this workload.' }
-              $record['rawDirectory'] = $new[0].Name
-              foreach ($name in @('report.json','observations.jsonl','policy-before-run.json','candidate-mixed-1000-100-driver.json')) {
-                $source = Join-Path $new[0].FullName $name
-                if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $out.FullName }
-              }
-              $descriptor = Join-Path $new[0].FullName 'mixed-native-fixture/dataset.json'
-              if (Test-Path -LiteralPath $descriptor -PathType Leaf) {
-                $datasetDir = New-Item -ItemType Directory -Path (Join-Path $out.FullName 'mixed-native-fixture')
-                Copy-Item -LiteralPath $descriptor -Destination $datasetDir.FullName
-              }
-              $report = Get-Content -LiteralPath (Join-Path $out.FullName 'report.json') -Raw | ConvertFrom-Json
-              $driver = Get-Content -LiteralPath (Join-Path $out.FullName 'candidate-mixed-1000-100-driver.json') -Raw | ConvertFrom-Json
-              $record['startupMs'] = $driver.startupMs
-              $record['readinessBudgetMs'] = $driver.strictReadinessTimeoutMs
-              $dataDir = Join-Path $new[0].FullName 'mixed-native-fixture\data'
-              if ($driver.executableSha256 -cne $env:CANDIDATE_SHA256 -or $driver.strictReadinessTimeoutMs -ne 30000 -or
-                  $report.loadSelection.kind -cne $kind -or $report.candidate.source -cne $env:CANDIDATE_SOURCE -or
-                  $report.candidate.sha256 -cne $env:CANDIDATE_SHA256) { throw 'The workload does not bind the exact candidate and strict UI readiness with the 30-second load setup budget.' }
-              if ($driver.dataDirectory -ne $dataDir -or $report.dataset.dataDir -ne $dataDir) {
-                throw 'The workload did not use its own fresh synthetic dataset.'
-              }
-              $events = Get-Content -LiteralPath (Join-Path $out.FullName 'observations.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
-              $record.normalExits = @($events | Where-Object { $_.kind -ceq 'native-normal-exit' -and $_.closedNormally -eq $true }).Count
-              if ($record.normalExits -ne 1 -or $driver.closedNormally -ne $true -or $record.nativeExitCode -notin @(0,1)) {
-                throw 'The pinned native session did not exit normally with a measurement result.'
-              }
-              $record.reportReady = $true
-            } catch {
-              $record.error = $_.Exception.Message
-            }
-            $sequence += $record
-            ConvertTo-Json -InputObject $sequence -Depth 5 | Set-Content -LiteralPath (Join-Path $audit.FullName 'sequence.json') -Encoding utf8NoBOM
-            $record | ConvertTo-Json -Compress
-          }
-          exit 0
-      - name: Recompute original P95 and bounded tolerance from raw evidence
-        if: ${{ always() }}
-        run: |
-          $audit = Join-Path $env:RUNNER_TEMP 'arm-native-performance-evidence'
-          $sequencePath = Join-Path $audit 'sequence.json'
-          if (-not (Test-Path -LiteralPath $sequencePath -PathType Leaf)) { throw 'No hosted native workload evidence was taken.' }
-          $sequence = Get-Content -LiteralPath $sequencePath -Raw | ConvertFrom-Json
-          $reports = @($sequence | Where-Object reportReady | ForEach-Object { Join-Path $audit "$($_.workload)/report.json" })
-          $PSNativeCommandUseErrorActionPreference = $false
-          $combined = & node scripts/verify-sampled-load-evidence.mjs $env:CANDIDATE_SHA256 @reports
-          $verifierExit = $LASTEXITCODE
-          $combined | Set-Content -LiteralPath (Join-Path $audit 'combined-report.json') -Encoding utf8NoBOM
-          $result = $combined | ConvertFrom-Json
-          Write-Output "Original P95: $($result.originalP95). Limited tolerance: $($result.limitedTolerance)."
-          foreach ($kind in @('check','download','update')) {
-            $workload = $result.workloads.$kind
-            if ($workload.sampleOverlap.acceptedInputs -ne 400) { throw "Expected 400 verified overlap inputs for $kind." }
-            foreach ($category in @('search','filter','tab','document')) {
-              if ($workload.sampleOverlap.categories.$category.count -ne 100) { throw "Expected 100 verified $category overlap inputs for $kind." }
-            }
-          }
-          if ($verifierExit -ne 0 -or $result.status -cne 'passed') { throw 'The combined native results did not pass both existing thresholds. See combined-report.json.' }
-      - name: Upload only synthetic measurement audit evidence
+          $evidence = Join-Path $env:RUNNER_TEMP 'arm-native-document-observer'
+          node scripts/verify-hosted-document-observer.mjs (Join-Path $candidate 'agent-resource-manager.exe') (Join-Path $candidate 'BUILD_INFO.native-validation.json') $evidence
+          if ($LASTEXITCODE -ne 0) { throw 'The bounded observer diagnostic did not finish; see its evidence.' }
+      - name: Upload only synthetic diagnostic evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_native_combined_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arm-native-performance-evidence/
+          name: Agent_Resource_Manager_document_observer_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-native-document-observer/
           if-no-files-found: warn
           retention-days: 14
