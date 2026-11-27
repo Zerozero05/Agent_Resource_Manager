@@ -6,17 +6,22 @@ export type ClientConnection = {
   autoRepairable?: boolean; repairReason?: string;
   usageConfirmation?: ClientUsageConfirmation; usageStatus?: 'current' | 'stale' | 'unconfirmed' | 'unavailable';
 };
-export type ClientConnectDraft = { query: string; selectedIds: string[]; anchorId?: string; results?: ConnectionResult[]; batchClient?: string };
+export type ClientConnectDraft = { query: string; selectedIds: string[]; anchorId?: string; results?: ConnectionResult[]; batchClient?: string; resultSelectionApplied?: true };
 export type ClientManagementMode = 'disconnect' | 'stop';
 export const CLIENT_MANAGEMENT_COPY = {
   disconnect: { label: '断开连接', description: '仅解除客户端目录链接，Skill 原文件保留在原目录。' },
   stop: { label: '忽略此连接，客户端继续可用', description: '只从管理器中忽略此连接，不移除客户端入口或 Skill 原文件。' },
 } as const;
 export type ConnectionResult = { id: string; label: string; success?: boolean; error?: string };
+export function clientConnectionResultStatus(result: ConnectionResult): 'failed' | 'succeeded' | 'unknown' {
+  if (result.error || result.success === false) return 'failed';
+  return result.success === true ? 'succeeded' : 'unknown';
+}
 export function clientConnectionResultText(result: ConnectionResult, mode?: 'connect' | ClientManagementMode): string {
   if (result.error) return result.error;
-  if (result.success === false) return '操作未完成';
-  if (result.success !== true) return '结果待核对';
+  const status = clientConnectionResultStatus(result);
+  if (status === 'failed') return '操作未完成';
+  if (status === 'unknown') return '结果待核对';
   switch (mode) {
     case 'connect': return '连接成功';
     case 'disconnect': return '已断开';
@@ -58,7 +63,7 @@ export function selectFilteredClientItems(selected: readonly string[], filteredI
 export function clientConnectDraft(value: unknown): ClientConnectDraft {
   const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {};
   const results = Array.isArray(raw.results) ? raw.results.filter((item): item is ConnectionResult => !!item && typeof item === 'object' && typeof item.id === 'string' && typeof item.label === 'string').map(item => ({ id: item.id, label: item.label, ...(typeof item.success === 'boolean' ? { success: item.success } : {}), ...(typeof item.error === 'string' ? { error: item.error } : {}) })) : undefined;
-  return { query: typeof raw.query === 'string' ? raw.query : '', selectedIds: Array.isArray(raw.selectedIds) ? [...new Set(raw.selectedIds.filter((id): id is string => typeof id === 'string' && !!id))] : [], ...(typeof raw.anchorId === 'string' && raw.anchorId ? { anchorId: raw.anchorId } : {}), ...(results ? { results } : {}), ...(typeof raw.batchClient === 'string' ? { batchClient: raw.batchClient } : {}) };
+  return { query: typeof raw.query === 'string' ? raw.query : '', selectedIds: Array.isArray(raw.selectedIds) ? [...new Set(raw.selectedIds.filter((id): id is string => typeof id === 'string' && !!id))] : [], ...(typeof raw.anchorId === 'string' && raw.anchorId ? { anchorId: raw.anchorId } : {}), ...(results ? { results } : {}), ...(typeof raw.batchClient === 'string' ? { batchClient: raw.batchClient } : {}), ...(raw.resultSelectionApplied === true ? { resultSelectionApplied: true } : {}) };
 }
 export function clientUsageText(connection: ClientConnection): string {
   if (!connection.usageConfirmation) return '未记录使用';
@@ -66,10 +71,10 @@ export function clientUsageText(connection: ClientConnection): string {
   if (connection.usageStatus === 'stale') return '使用记录已过期';
   return '使用记录待核对';
 }
-export function completedClientBatchDraft(draft: ClientConnectDraft, client: string, batch: ClientBatchCompletion): ClientConnectDraft | undefined {
+export function completedClientBatchDraft(draft: ClientConnectDraft, client: string, batch: Pick<ClientBatchCompletion, 'client' | 'results'>): ClientConnectDraft | undefined {
   if (batch.client !== client) return undefined;
-  const successful = new Set(batch.results.filter(item => item.success && !item.error).map(item => item.id));
-  return { ...draft, selectedIds: draft.selectedIds.filter(id => !successful.has(id)), results: batch.results, batchClient: client };
+  const deselected = new Set(batch.results.filter(item => clientConnectionResultStatus(item) !== 'failed').map(item => item.id));
+  return { ...draft, selectedIds: draft.selectedIds.filter(id => !deselected.has(id)), results: batch.results, batchClient: client, resultSelectionApplied: true };
 }
 export function clientSelectionShortcut(event: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; isComposing?: boolean; defaultPrevented?: boolean }, editable = false): 'all' | undefined {
   return !editable && !event.defaultPrevented && !event.isComposing && event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === 'a' ? 'all' : undefined;

@@ -50,14 +50,14 @@ test('Ctrl+A only selects inside the owning list, preserving editing and other m
   for (const patch of [{ key: ' ' }, { ctrlKey: false }, { metaKey: true }, { altKey: true }, { isComposing: true }, { defaultPrevented: true }]) assert.equal(clientSelectionShortcut({ ...key, ...patch }), undefined);
 });
 
-test('transferred batch results retain failed and hidden selections and reject another client context', () => {
-  const draft = { query: 'only currently visible', selectedIds: ['success', 'failure', 'hidden'], anchorId: 'failure' };
-  const batch = { taskId: 'actual-background-task', client: 'codex', results: [{ id: 'success', label: '成功项', success: true }, { id: 'failure', label: '失败项', success: false, error: '冲突原件已保留' }] };
+test('transferred batch results retain failed and unrelated selections and reject another client context', () => {
+  const draft = { query: 'only currently visible', selectedIds: ['success', 'failure', 'unknown', 'hidden'], anchorId: 'failure' };
+  const batch = { taskId: 'actual-background-task', client: 'codex', results: [{ id: 'success', label: '成功项', success: true }, { id: 'failure', label: '失败项', success: false, error: '冲突原件已保留' }, { id: 'unknown', label: '待核对项' }] };
   assert.equal(completedClientBatchDraft(draft, 'cursor', batch), undefined);
   const next = completedClientBatchDraft(draft, 'codex', batch)!;
   assert.deepEqual(next.selectedIds, ['failure', 'hidden']); assert.equal(next.query, draft.query);
   assert.deepEqual(clientConnectDraft(next).results, batch.results); assert.equal(clientConnectDraft(next).batchClient, 'codex');
-  assert.deepEqual(draft.selectedIds, ['success', 'failure', 'hidden']);
+  assert.deepEqual(draft.selectedIds, ['success', 'failure', 'unknown', 'hidden']);
 });
 
 // Render the actual component without a browser; the native acceptance suite measures geometry and clicks.

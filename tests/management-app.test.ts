@@ -374,6 +374,139 @@ test('connection task history labels the actual operation and exposes failed or 
   }
 });
 
+test('the restored connect form renders mixed results and retries only currently connectable failures', async () => {
+  const current = snapshot();
+  const state = {
+    ...current,
+    skills: [...current.skills, ...['旧失败', '未知项', '已连项', '其他已选'].map(name => ({ id: name, name, localPath: 'D:/synthetic/' + name }))],
+    connections: [{ id: 'ready', skillId: '已连项', client: 'codex', path: 'D:/synthetic/codex/ready', target: 'D:/synthetic/已连项', health: 'ready', linked: true }],
+  } as unknown as ReturnType<typeof snapshot>;
+  const sharedError = '同一客户端目录不可写';
+  const f = await fixture({ operation: true, state, draft: {
+    modal: { kind: 'client-connect', client: 'codex' },
+    clientConnectDraft: { query: 'beta', selectedIds: ['alpha', 'beta', '旧失败', '未知项', '已连项', '其他已选'], batchClient: 'codex', results: [
+      { id: 'alpha', label: '成功连接', success: true },
+      { id: 'beta', label: '明确失败', success: false },
+      { id: '旧失败', label: '旧失败', error: '原件仍存在' },
+      { id: '未知项', label: '未知项' },
+      { id: '已连项', label: '已连项', success: false },
+      { id: '已删除', label: '已删除', error: '先前失败' },
+    ] },
+  }, read: (action, args) => {
+    assert.equal(action, 'connect_batch');
+    assert.deepEqual(args, { skillIds: ['beta', '旧失败'], client: 'codex' });
+    return { ...state, connectionResults: ['beta', '旧失败'].map(id => ({ id, label: id, success: false, error: sharedError })) };
+  } });
+  const page = f.pane().querySelector('.client-connect-page')!;
+  const rows = () => [...page.querySelectorAll('.client-batch-results p')].map(row => row.textContent);
+  assert.equal(page.querySelector('.client-batch-results h3')?.textContent, '本批结果 · 成功 1／共 6 项');
+  assert.deepEqual(rows(), ['成功连接：连接成功', '明确失败：操作未完成', '旧失败：原件仍存在', '未知项：结果待核对', '已连项：操作未完成', '已删除：先前失败']);
+  assert(button(page, '连接所选（3）'));
+  assert(!f.calls.some(call => call.action === 'connect_batch'));
+  await click(button(page, '仅重试失败项'));
+  assert.equal(f.calls.filter(call => call.action === 'connect_batch').length, 1);
+  assert.equal(page.querySelector('[role="alert"]')?.textContent, sharedError);
+  assert.deepEqual(rows(), ['beta：未连接', '旧失败：未连接']);
+  assert.deepEqual(f.bridges.get('home-0')!.capture().clientConnectDraft.selectedIds, ['beta', '旧失败', '其他已选']);
+  await change(page.querySelector<HTMLInputElement>('[aria-label="搜索可连接 Skill"]')!, '');
+  const unknown = page.querySelector<HTMLInputElement>('input[aria-label="选择 未知项"]')!;
+  assert.equal(unknown.checked, false);
+  await act(async () => { unknown.click(); });
+  assert.equal(unknown.checked, true);
+  assert.equal(f.calls.filter(call => call.action === 'connect_batch').length, 1);
+});
+
+test('a missing or interrupted connect receipt leaves items unconfirmed and out of automatic retries', async () => {
+  for (const rejected of [false, true]) {
+    const state = snapshot();
+    const f = await fixture({ operation: true, state, draft: {
+      modal: { kind: 'client-connect', client: 'codex' },
+      clientConnectDraft: { query: '', selectedIds: ['alpha', 'beta'] },
+    }, read: (action, args) => {
+      assert.equal(action, 'connect_batch');
+      assert.deepEqual(args, { skillIds: ['alpha', 'beta'], client: 'codex' });
+      if (rejected) throw new Error('连接回执中断');
+      return { ...state, connectionResults: [{ id: 'beta', label: 'beta-original', success: true }] };
+    } });
+    const page = f.pane().querySelector('.client-connect-page')!;
+    await click(button(page, '连接所选（2）'));
+    assert.equal(f.calls.filter(call => call.action === 'connect_batch').length, 1);
+    assert.deepEqual([...page.querySelectorAll('.client-batch-results p')].map(row => row.textContent), [
+      'alpha-original：结果待核对', rejected ? 'beta-original：结果待核对' : 'beta-original：连接成功',
+    ]);
+    assert.equal(button(page, '仅重试失败项'), undefined);
+    assert.equal(button(page, '连接所选（0）').disabled, true);
+    if (rejected) assert.match(page.querySelector('[role="alert"]')!.textContent!, /操作记录/);
+    await f.dispose();
+  }
+});
+
+test('an in-flight connection draft can be restored without replaying the submitted item', async () => {
+  const state = snapshot(), response = deferred<unknown>();
+  const f = await fixture({ operation: true, state, draft: {
+    modal: { kind: 'client-connect', client: 'codex' },
+    clientConnectDraft: { query: '', selectedIds: ['alpha', 'beta'], batchClient: 'codex', results: [{ id: 'alpha', label: 'alpha-original', success: false }] },
+  }, read: (action, args) => {
+    assert.equal(action, 'connect_batch');
+    assert.deepEqual(args, { skillIds: ['alpha'], client: 'codex' });
+    return response.promise;
+  } });
+  await click(button(f.pane(), '仅重试失败项'));
+  assert(button(f.pane(), '正在逐项连接…'));
+  assert.equal(f.pane().querySelector('.client-batch-results'), null);
+  const captured = f.bridges.get('home-0')!.capture();
+  assert.deepEqual(captured.clientConnectDraft.results, [{ id: 'alpha', label: 'alpha-original' }]);
+  await f.dispose();
+  await act(async () => response.resolve({ ...state, connectionResults: [] }));
+
+  const resumed = await fixture({ operation: true, state, draft: captured });
+  const page = resumed.pane().querySelector('.client-connect-page')!;
+  assert.equal(page.querySelector('.client-batch-results p')?.textContent, 'alpha-original：结果待核对');
+  assert.equal(page.querySelector<HTMLInputElement>('[aria-label="选择 alpha-original"]')?.checked, false);
+  assert.equal(page.querySelector<HTMLInputElement>('[aria-label="选择 beta-original"]')?.checked, true);
+  assert.equal(button(page, '仅重试失败项'), undefined);
+  assert(!resumed.calls.some(call => call.action === 'connect_batch'));
+  const unconfirmed = page.querySelector<HTMLInputElement>('[aria-label="选择 alpha-original"]')!;
+  await act(async () => { unconfirmed.click(); });
+  assert.equal(unconfirmed.checked, true);
+  const selectedAgain = resumed.bridges.get('home-0')!.capture();
+  await resumed.dispose();
+
+  const moved = await fixture({ operation: true, state, draft: selectedAgain });
+  assert(moved.pane().textContent?.includes('alpha-original：结果待核对'));
+  assert.equal(moved.pane().querySelector<HTMLInputElement>('[aria-label="选择 alpha-original"]')?.checked, true);
+  assert.equal(moved.pane().querySelector<HTMLInputElement>('[aria-label="选择 beta-original"]')?.checked, true);
+  assert(!moved.calls.some(call => call.action === 'connect_batch'));
+});
+
+test('disconnect and stop receipts re-preview only existing failures, with no empty preview action', async () => {
+  for (const mode of ['disconnect', 'stop'] as const) {
+    const state = { ...snapshot(), connections: ['failed', 'old-error', 'unknown', 'succeeded'].map(id => ({ id, client: 'codex', skillId: 'alpha', path: 'D:/synthetic/codex/' + id, target: 'D:/synthetic/alpha' })) } as unknown as ReturnType<typeof snapshot>;
+    const f = await fixture({ operation: true, state, draft: { modal: { kind: 'client-result', mode, results: [
+      { id: 'failed', label: '失败项', success: false },
+      { id: 'old-error', label: '旧失败项', error: '入口变动' },
+      { id: 'unknown', label: '未知项' },
+      { id: 'succeeded', label: '完成项', success: true },
+      { id: 'missing', label: '已消失项', success: false, error: '原入口已不存在' },
+    ] } }, read: (action, args) => {
+      assert.equal(action, 'preview_disconnect');
+      assert.deepEqual(args, { connectionIds: ['failed', 'old-error'], mode, client: 'codex' });
+      throw new Error('当前入口又有变化');
+    } });
+    const modal = f.pane().querySelector('.connection-preview-list')!;
+    assert.deepEqual([...modal.querySelectorAll('p')].map(row => row.textContent), ['操作未完成', '入口变动', '结果待核对', mode === 'stop' ? '已停止管理' : '已断开', '原入口已不存在']);
+    await f.updateSnapshot({ ...state, stateRevision: 2, connections: state.connections.filter((_, index) => index >= 2) });
+    assert.equal(button(f.pane(), '重新预览失败项'), undefined);
+    assert(!f.calls.some(call => call.action === 'preview_disconnect'));
+    await f.updateSnapshot({ ...state, stateRevision: 3 });
+    await click(button(f.pane(), '重新预览失败项'));
+    assert.equal(f.calls.filter(call => call.action === 'preview_disconnect').length, 1);
+    assert.match(f.pane().textContent!, /当前入口又有变化/);
+    assert(!f.calls.some(call => call.action === 'apply_disconnect'));
+    await f.dispose();
+  }
+});
+
 test('actual App keeps its original sidebar when the outer host is not ready', async () => {
   const f = await fixture(); assert.equal(f.pane().querySelectorAll('aside.sidebar').length, 1); assert(f.pane().querySelector('button.nav-item[aria-label="Skills"]')); assert(f.pane().querySelector('[aria-label="调整侧栏宽度"]'));
 });
