@@ -1,4 +1,4 @@
-name: Verify isolated native SQLite migration and recovery
+name: Verify native SQLite migration and persisted settings
 on: create
 permissions:
   contents: read
@@ -21,7 +21,7 @@ env:
   LEGACY_EXE_SHA256: '1ca90747eca2ac3229762928d05036724229e910463c28be40925e9b2fb2092f'
 jobs:
   migration:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-sqlite-settings-roundtrip-bc89a61-20261127' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-sqlite-settings-core-bc89a61-20261127' }}
     runs-on: windows-latest
     timeout-minutes: 20
     defaults:
@@ -164,16 +164,29 @@ jobs:
           $buildInfo = Join-Path $owned 'BUILD_INFO.native-validation.json'
           $receipt = [ordered]@{
             status = 'failed'; syntheticOnly = $true; stages = @()
-            scope = 'Synthetic old schema and native upgrade or recovery on a separate Windows runner. No installer execution, downgrade, or production data.'
+            scope = 'Synthetic old schema and native upgrade on a separate Windows runner. No installer execution or production data.'
           }
           function Invoke-MigrationPhase([string]$Phase, [string[]]$Options) {
             Write-Output "Running migration phase $Phase"
+            $timer = [Diagnostics.Stopwatch]::StartNew()
             & node ./scripts/verify-native-migration.mjs --phase $Phase --variant recovery-downgrade @Options
-            if ($LASTEXITCODE -ne 0) { throw "Native SQLite migration phase failed: $Phase." }
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) {
+              $driverPath = Join-Path $fixture "$Phase-driver.json"
+              if (Test-Path -LiteralPath $driverPath -PathType Leaf) {
+                $driver = Get-Content -LiteralPath $driverPath -Raw | ConvertFrom-Json
+                [ordered]@{ phase = $Phase; status = $driver.status; type = $driver.errorType; code = $driver.errorCode; operation = $driver.lastOperation; closedNormally = $driver.closedNormally } | ConvertTo-Json -Compress | Write-Output
+              }
+              throw "Native SQLite migration phase $Phase exited $exitCode after $($timer.ElapsedMilliseconds) ms."
+            }
           }
 
           $phase = 'prepare'
           try {
+            $cimTimer = [Diagnostics.Stopwatch]::StartNew()
+            $existing = @(Get-CimInstance Win32_Process -Filter "Name='agent-resource-manager.exe' OR Name='skill-manager.exe'" -Property ProcessId -OperationTimeoutSec 20 -ErrorAction Stop)
+            if ($existing.Count -ne 0) { throw 'An existing manager process was detected before the migration fixture was created.' }
+            Write-Output "Empty CIM manager inventory checked in $($cimTimer.ElapsedMilliseconds) ms. Each native launch will run its own ownership guard."
             Invoke-MigrationPhase $phase @('--name', $name)
             $receipt.stages += $phase
             $fixtureOption = @('--fixture', $fixture)
@@ -183,9 +196,7 @@ jobs:
                 @{ phase = 'initialize'; options = $legacyOptions; sha = $env:LEGACY_EXE_SHA256 },
                 @{ phase = 'seed'; options = $fixtureOption },
                 @{ phase = 'legacy'; options = $legacyOptions; sha = $env:LEGACY_EXE_SHA256 },
-                @{ phase = 'candidate'; options = $candidateOptions; sha = $env:CANDIDATE_SHA256 },
-                @{ phase = 'recovery-seed'; options = $fixtureOption },
-                @{ phase = 'recovery'; options = $candidateOptions; sha = $env:CANDIDATE_SHA256 })) {
+                @{ phase = 'candidate'; options = $candidateOptions; sha = $env:CANDIDATE_SHA256 })) {
               $phase = $item.phase
               Invoke-MigrationPhase $phase $item.options
               if ($item.sha) {
@@ -199,24 +210,19 @@ jobs:
             }
             $phase = 'check-comparisons'
             $migration = Get-Content -LiteralPath (Join-Path $fixture 'native-migration-comparison.json') -Raw | ConvertFrom-Json
-            $recovery = Get-Content -LiteralPath (Join-Path $fixture 'recovery-comparison.json') -Raw | ConvertFrom-Json
             if ($migration.passed -ne $true -or $migration.syntheticOnly -ne $true -or
                 $migration.oldExecutableSha256 -cne $env:LEGACY_EXE_SHA256 -or
                 $migration.candidateExecutableSha256 -cne $env:CANDIDATE_SHA256 -or
                 $migration.candidateSourceIdentity -cne $env:CANDIDATE_SOURCE -or
-                $recovery.passed -ne $true -or $recovery.syntheticOnly -ne $true -or
-                $recovery.candidateExecutableSha256 -cne $env:CANDIDATE_SHA256 -or
-                $recovery.candidateSourceIdentity -cne $env:CANDIDATE_SOURCE -or
-                $recovery.seededCandidateSha256 -cne $env:CANDIDATE_SHA256 -or
-                $recovery.observedBackend.mcpBridgeNormalExit -ne $true) {
-              throw 'The native SQLite comparisons do not prove both migration and recovery for the exact candidate.'
+                $migration.candidateNativeNormalExit -ne $true) {
+              throw 'The native SQLite comparison does not prove migration for the exact candidate.'
             }
             $receipt.status = 'passed'
           } finally {
             $receipt.lastPhase = $phase
             $receipt.reports = @(foreach ($name in @(
                 'initialize-driver.json', 'legacy-seed-provenance.json', 'legacy-driver.json',
-                'candidate-driver.json', 'native-migration-comparison.json', 'recovery-driver.json', 'recovery-comparison.json')) {
+                'candidate-driver.json', 'native-migration-comparison.json')) {
               $path = Join-Path $fixture $name
               if (Test-Path -LiteralPath $path -PathType Leaf) {
                 $details = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
@@ -248,7 +254,7 @@ jobs:
           import { promisify } from 'node:util';
           import { setTimeout as wait } from 'node:timers/promises';
           import { NativeUiaSession } from './scripts/native-uia-client.mjs';
-          import { compareMigrationState, compareRecoveryMigrationState, readMigrationState, readRecoveryMigrationState } from './scripts/migration-fixture.mjs';
+          import { compareMigrationState, readMigrationState } from './scripts/migration-fixture.mjs';
 
           const root = process.env.ARM_ROUNDTRIP_FIXTURE;
           const executable = process.env.ARM_ROUNDTRIP_EXE;
@@ -297,6 +303,21 @@ jobs:
             } finally { db.close(); }
           }
 
+          function readPersistedData() {
+            const db = new DatabaseSync(dbPath, { readOnly: true });
+            try {
+              assert.deepEqual(db.prepare('PRAGMA quick_check').all().map(row => Object.values(row)[0]), ['ok']);
+              const { stateRevision, ...appState } = JSON.parse(db.prepare('SELECT payload FROM app_state WHERE id=1').get().payload);
+              const tasks = db.prepare('SELECT id, payload FROM task_history ORDER BY id').all()
+                .map(row => ({ id: row.id, payload: JSON.parse(row.payload) }));
+              return { appState, stateRevision: stateRevision ?? 0, tasks };
+            } finally { db.close(); }
+          }
+
+          function stableTask({ id, payload: { result, cancellable, resultAvailable, resultExpired, ...payload } }) {
+            return { id, payload };
+          }
+
           async function restoreLibrary(app) {
             await app.call('invokeName', { name: 'Skills', scope: '主要导航' });
             await observe('library before normal quit', async remaining =>
@@ -338,7 +359,14 @@ jobs:
 
           async function runCandidate(phase, body) {
             const reportPath = join(root, 'candidate-settings-' + phase + '-driver.json');
-            const app = await NativeUiaSession.launch({ executable, dataDir, reportPath, sha256, accessibilityInput: true });
+            let app;
+            try {
+              app = await NativeUiaSession.launch({ executable, dataDir, reportPath, sha256, accessibilityInput: true });
+            } catch (error) {
+              const report = await readJson(reportPath).catch(() => null);
+              if (report) receipt[phase] = { status: report.status, type: report.errorType, code: report.errorCode, operation: report.lastOperation, closedNormally: report.closedNormally };
+              throw error;
+            }
             const { pid, creationFileTime } = app.identity;
             receipt[phase] = { pid, creationFileTime };
             try {
@@ -359,43 +387,42 @@ jobs:
             const priorSummary = join(auditDir, 'migration-summary.json');
             assert.equal((await readJson(priorSummary)).status, 'passed');
             assert.equal(await digest(executable), sha256);
-            const recoveryPath = join(root, 'recovery-comparison.json');
-            const recovery = await readJson(recoveryPath);
-            assert.equal(recovery.passed, true);
-            assert.equal(recovery.candidateExecutableSha256, sha256);
-            assert.equal(recovery.candidateSourceIdentity, source);
-            assert.equal(recovery.candidateNativeNormalExit, true);
+            const migrationPath = join(root, 'native-migration-comparison.json');
+            const migration = await readJson(migrationPath);
+            assert.equal(migration.passed, true);
+            assert.equal(migration.candidateExecutableSha256, sha256);
+            assert.equal(migration.candidateSourceIdentity, source);
+            assert.equal(migration.candidateNativeNormalExit, true);
             receipt.migrationSummarySha256 = await digest(priorSummary);
-            receipt.recoveryReportSha256 = await digest(recoveryPath);
+            receipt.migrationReportSha256 = await digest(migrationPath);
             for (const path of [root, dataDir, dbPath]) assert.ok(samePath(await realpath(path), path), 'Unexpected fixture redirection.');
             const baseline = await readMigrationState(root);
-            const recoveryBaseline = await readRecoveryMigrationState(root);
-            const recoverySeed = await readJson(join(root, 'recovery-seed.json'));
-            assert.deepEqual(recoveryBaseline.files, recovery.state.files);
+            assert.deepEqual(baseline, migration.state);
+            const persisted = readPersistedData();
             assert.equal(baseline.settings.editorPath, '');
             assert.equal(baseline.ignoredLocalPaths.length, 1);
-            const originals = [...recoveryBaseline.files];
+            const originals = [...baseline.originalFiles];
             const ignoredPath = join(baseline.ignoredLocalPaths[0], 'SKILL.md');
             originals.push({ path: ignoredPath, sha256: await digest(ignoredPath) });
             const editorPath = join(root, 'synthetic-editor-setting.exe');
             const expected = { ...baseline, settings: { ...baseline.settings, editorPath } };
-            const expectedRecovery = { ...recoveryBaseline, appState: { ...recoveryBaseline.appState, settings: { ...recoveryBaseline.appState.settings, editorPath } } };
-            const priorTaskIds = new Set(recoveryBaseline.tables.task_history.map(task => task.id));
-            let savedRow;
-            const verifyDb = async phase => {
+            const expectedAppState = { ...persisted.appState, settings: { ...persisted.appState.settings, editorPath } };
+            const priorTaskIds = new Set(persisted.tasks.map(task => task.id));
+            const verifyDb = async () => {
               const compared = compareMigrationState(expected, await readMigrationState(root));
               assert.ok(compared.passed, 'Unexpected migrated fields changed: ' + compared.differences.map(item => item.field).join(', '));
-              const state = await readRecoveryMigrationState(root);
+              const state = readPersistedData();
+              assert.deepEqual(state.appState, expectedAppState, 'Migrated application data changed beyond the chosen setting.');
+              assert.ok(Number.isSafeInteger(state.stateRevision) && state.stateRevision >= persisted.stateRevision);
+              assert.equal(storedHomeView(), 'skills');
               for (const original of originals) {
                 assert.ok(samePath(await realpath(original.path), original.path), 'Unexpected fixture file redirection.');
                 assert.equal(await digest(original.path), original.sha256);
               }
-              const saves = state.tables.task_history.filter(row => row.payload.action === 'set_settings' && !priorTaskIds.has(row.id));
+              const saves = state.tasks.filter(row => row.payload.action === 'set_settings' && !priorTaskIds.has(row.id));
               assert.deepEqual(saves.map(row => [row.id, row.payload.status]), [[receipt.saveTaskId, 'succeeded']]);
-              if (phase === 'save') savedRow = saves[0];
-              const recoveryComparison = compareRecoveryMigrationState(expectedRecovery, state, recoverySeed, recoveryBaseline, { row: savedRow, restored: phase === 'reopen' });
-              assert.ok(recoveryComparison.passed, 'Unexpected recovered data changed: ' + recoveryComparison.differences.map(item => item.field).join(', '));
-              return { migratedFields: compared.verifiedFields, recoveryTables: recoveryComparison.comparedTables };
+              assert.deepEqual(state.tasks.filter(row => priorTaskIds.has(row.id)).map(stableTask), persisted.tasks.map(stableTask));
+              return { migratedFields: compared.verifiedFields, originalTaskRows: persisted.tasks.length, sqliteQuickCheck: 'ok' };
             };
 
             await runCandidate('save', async app => {
@@ -414,7 +441,7 @@ jobs:
               });
               await restoreLibrary(app);
             });
-            receipt.verifiedAfterSave = await verifyDb('save');
+            receipt.verifiedAfterSave = await verifyDb();
 
             await runCandidate('reopen', async app => {
               assert.notDeepEqual([app.identity.pid, app.identity.creationFileTime], [receipt.save.pid, receipt.save.creationFileTime]);
@@ -423,7 +450,7 @@ jobs:
               receipt.reopenedSettingMatches = true;
               await restoreLibrary(app);
             });
-            receipt.verifiedAfterReopen = await verifyDb('reopen');
+            receipt.verifiedAfterReopen = await verifyDb();
             receipt.originalFixtureFilesVerified = originals.length;
             receipt.status = 'passed';
           } catch (error) {
@@ -431,8 +458,8 @@ jobs:
             throw error;
           } finally {
             await writeFile(join(auditDir, 'settings-roundtrip-summary.json'), JSON.stringify(receipt, null, 2), { flag: 'wx' });
+            console.log(JSON.stringify({ ...receipt, error: undefined }));
           }
-          console.log(JSON.stringify(receipt));
           '@ | node --input-type=module -
           if ($LASTEXITCODE -ne 0) { throw 'The native migrated settings round trip failed.' }
       - name: Upload only synthetic audit summaries
