@@ -548,8 +548,74 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover, RowMethod method) 
 }
 }
 
+#pragma comment(lib, "gdi32.lib")
+
+int patternLevel = 0;
+
+LRESULT CALLBACK PatternProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_MOUSEMOVE: {
+        const int x = static_cast<short>(LOWORD(lParam));
+        const int y = static_cast<short>(HIWORD(lParam));
+        if (x >= 70 && x <= 270 && y >= 45 && y <= 120) {
+            if (patternLevel < 9) SetTimer(window, 1, 15, nullptr);
+        } else {
+            KillTimer(window, 1);
+            patternLevel = 0;
+            InvalidateRect(window, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_TIMER:
+        if (patternLevel < 9) {
+            ++patternLevel;
+            InvalidateRect(window, nullptr, FALSE);
+            UpdateWindow(window);
+        }
+        if (patternLevel == 9) KillTimer(window, 1);
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(window, &paint);
+        const int k = 5 * patternLevel;
+        SetDCBrushColor(dc, RGB(23 + k, 24 + k, 27 + k));
+        FillRect(dc, &paint.rcPaint, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        EndPaint(window, &paint);
+        return 0;
+    }
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    default:
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+}
+
+int RunHostedPattern() {
+    if (!EnvEquals(L"GITHUB_ACTIONS", L"true") || !EnvEquals(L"RUNNER_ENVIRONMENT", L"github-hosted") ||
+        !EnvEquals(L"RUNNER_OS", L"Windows") || !SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+        throw std::runtime_error("the pattern window requires an isolated hosted Windows runner");
+    const wchar_t* name = L"ARMClippedRowMotionPattern";
+    WNDCLASSW wc{};
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpfnWndProc = PatternProcedure;
+    wc.lpszClassName = name;
+    if (!RegisterClassW(&wc)) throw std::runtime_error("pattern window class registration failed");
+    HWND own = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, name, L"ARM isolated row pattern",
+        WS_POPUP, 150, 130, 360, 160, nullptr, nullptr, wc.hInstance, nullptr);
+    if (!own) throw std::runtime_error("pattern window creation failed");
+    ShowWindow(own, SW_SHOWNORMAL);
+    ShowWindow(own, SW_SHOW);
+    SetForegroundWindow(own);
+    UpdateWindow(own);
+    MSG message{};
+    while (GetMessageW(&message, nullptr, 0, 0) > 0) DispatchMessageW(&message);
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 2 && std::wcscmp(argv[1], L"--hosted-pattern") == 0) return RunHostedPattern();
         if (argc == 2 && std::wcscmp(argv[1], L"--synthetic") == 0) return RunSynthetic();
         const bool row = argc == 8 && std::wcscmp(argv[1], L"--hosted") == 0;
         const bool hoverMap = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover-map") == 0;
