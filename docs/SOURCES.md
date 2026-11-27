@@ -15,6 +15,16 @@
 - 2026-11-25 复核 Apple 正式版记录（27.2.1），在线阅读 [分段控件](https://developer.apple.com/design/human-interface-guidelines/segmented-controls.md)、[材质](https://developer.apple.com/design/human-interface-guidelines/materials.md)、[动效](https://developer.apple.com/design/human-interface-guidelines/motion.md)与 [Meet Liquid Glass](https://developer.apple.com/videos/play/wwdc2025/219/) 的相关章节。沿用同组选择的一致选中态、内容与操作层分离、短促可中断的反馈。在管理器原有导航、对话框和快捷键面板中以 CSS 实现，未采用 Apple 代码、素材或平台专属交互。
 - 2026-11-27 再次核对正式版 27.2.1，补读 [侧栏](https://developer.apple.com/design/human-interface-guidelines/sidebars?changes=_6_7)、[分栏](https://developer.apple.com/design/human-interface-guidelines/split-views)、[工具栏](https://developer.apple.com/design/human-interface-guidelines/toolbars?changes=_2) 和 [动效](https://developer.apple.com/design/human-interface-guidelines/motion?changes=l_9_3)。窄窗设置沿用固定入口、清楚的当前分类和短促淡入。项目原有主题、键盘操作及访问设置继续决定实际显示。
 
+<a id="cc-switch-local-resource-management-20261127"></a>
+
+## CC Switch 的 Skill 接入与工具信息 — 2026-11-27
+
+本机目录保存的是 Windows x64 便携版。按本地交接核对 [v4.0.40 正式版](https://github.com/farion1231/cc-switch/releases/tag/v4.0.40) 和 [固定源码 f19a9d4](https://github.com/farion1231/cc-switch/commit/f19a9d4f4f08bda03106a7be87c77cbcdf55b019)。GitHub 查询时为 157,603 Stars、MIT、未归档。主分支 Skills 组件 11 月 24 日有相关提交，Apps 页面 11 月 27 日仍有代码更新。参考版使用 React、TypeScript、Tauri 与 Rust。
+
+- 在线查阅 [Skills 指南](https://github.com/farion1231/cc-switch/blob/f19a9d4f4f08bda03106a7be87c77cbcdf55b019/docs/user-manual/zh/3-extensions/3.3-skills.md)、[MCP 指南](https://github.com/farion1231/cc-switch/blob/f19a9d4f4f08bda03106a7be87c77cbcdf55b019/docs/user-manual/zh/3-extensions/3.1-mcp.md)、[客户端状态单元](https://github.com/farion1231/cc-switch/blob/f19a9d4f4f08bda03106a7be87c77cbcdf55b019/src/components/mcp/AppMatrix.tsx#L95-L153) 与 [逐项同步结果](https://github.com/farion1231/cc-switch/blob/f19a9d4f4f08bda03106a7be87c77cbcdf55b019/src-tauri/src/services/skill/sync.rs#L489-L507)。管理器根据已读取的连接记录显示每个客户端的入口状态，并把连接、断开和停止管理的成功结果分别写清。查阅具体客户端沿用工作区导航。
+- 对照 [Apps 页面](https://github.com/farion1231/cc-switch/blob/f19a9d4f4f08bda03106a7be87c77cbcdf55b019/src/components/apps/AppsPage.tsx) 中版本、来源和安装位置的展示。管理器用已有目录数据展示工具的位置和登记版本，并区分管理入口启用与能力验证。
+- 本轮采用信息组织方式，保留管理器原位登记、来源与内容核验、客户端变更预览及工具调用权限。只读本地交接和在线源码，未运行 CC Switch 或其检查器，未采用其代码、素材和运行依赖。
+
 <a id="desktop-design-refresh-20261124"></a>
 
 ## 桌面管理界面参考 — 2026-11-24

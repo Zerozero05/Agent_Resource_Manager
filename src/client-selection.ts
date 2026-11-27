@@ -13,6 +13,17 @@ export const CLIENT_MANAGEMENT_COPY = {
   stop: { label: '忽略此连接，客户端继续可用', description: '只从管理器中忽略此连接，不移除客户端入口或 Skill 原文件。' },
 } as const;
 export type ConnectionResult = { id: string; label: string; success?: boolean; error?: string };
+export function clientConnectionResultText(result: ConnectionResult, mode?: 'connect' | ClientManagementMode): string {
+  if (result.error) return result.error;
+  if (result.success === false) return '操作未完成';
+  if (result.success !== true) return '结果待核对';
+  switch (mode) {
+    case 'connect': return '连接成功';
+    case 'disconnect': return '已断开';
+    case 'stop': return '已停止管理';
+    default: return '已完成';
+  }
+}
 export type ClientBatchCompletion = { taskId: string; client: string; results: ConnectionResult[] };
 export const CLIENT_OPTIONS = [{ id: 'codex', name: 'Codex', folder: '~/.agents/skills' }, { id: 'claude', name: 'Claude Code', folder: '~/.claude/skills' }, { id: 'cursor', name: 'Cursor', folder: '~/.cursor/skills' }];
 export const clientSkillName = (skill?: ClientSkill) => skill?.displayName || skill?.name || '已移除的 Skill';

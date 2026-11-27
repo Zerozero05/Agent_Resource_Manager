@@ -331,6 +331,49 @@ test('actual task details prefer a live result, retain an inspected result acros
   assert(!f.calls.some(call => /start_task|apply_|download|install|cancel_task/.test(call.action)));
 });
 
+test('Skill source rows use entry health and navigate to the chosen client without changing the connection', async () => {
+  const current = snapshot();
+  const state = { ...current, connections: [
+    { id: 'direct', skillId: 'alpha', client: 'claude', path: 'D:/synthetic/claude/alpha', health: 'ready', linked: false },
+    { id: 'broken', skillId: 'alpha', client: 'codex', path: 'D:/synthetic/codex/alpha', health: 'missing', linked: true },
+  ] } as unknown as ReturnType<typeof snapshot>;
+  const f = await fixture({ state, detailSkillId: 'alpha', draft: { tab: 'source' } });
+  const claude = f.pane().querySelector<HTMLButtonElement>('button[aria-label="查看 Claude Code 的连接"]')!;
+  const codex = f.pane().querySelector<HTMLButtonElement>('button[aria-label="查看 Codex 的连接"]')!;
+  assert.equal(claude.closest('.connection-summary')?.querySelector('.badge.green')?.textContent, '入口正常');
+  assert.equal(codex.closest('.connection-summary')?.querySelector('.badge.amber')?.textContent, '入口待处理');
+  const calls = f.calls.length;
+  await click(claude);
+  assert.deepEqual(f.homeNavigation, [['clients', 'claude']]);
+  assert.equal(f.calls.length, calls);
+  assert.equal(JSON.stringify(f.state), f.original);
+});
+
+test('connection task history labels the actual operation and exposes failed or unconfirmed entries', async () => {
+  for (const [action, mode, expected] of [
+    ['connect_batch', undefined, '连接成功'],
+    ['apply_disconnect', 'disconnect', '已断开'],
+    ['apply_disconnect', 'stop', '已停止管理'],
+    ['apply_disconnect', undefined, '已完成'],
+  ] as const) {
+    const task = {
+      id: 'client-task', action, label: '客户端操作', status: 'succeeded', stage: '操作完成',
+      createdAt: '2026-11-01T00:00:00Z', origin: { view: 'clients' },
+      result: { mode, connectionResults: [
+        { id: 'one', label: '独立入口', success: true },
+        { id: 'two', label: '失败入口', success: false },
+        { id: 'three', label: '旧入口' },
+        { id: 'four', label: '已变动入口', success: false, error: '入口已变化，请重新预览' },
+      ] },
+    };
+    const f = await fixture({ operation: true, draft: { modal: { kind: 'task', task } } });
+    const entries = [...f.pane().querySelectorAll('.client-batch-results p')].map(row => row.textContent);
+    assert.deepEqual(entries, [`独立入口：${expected}`, '失败入口：操作未完成', '旧入口：结果待核对', '已变动入口：入口已变化，请重新预览']);
+    assert(f.calls.every(call => call.action === 'management_data'));
+    await f.dispose();
+  }
+});
+
 test('actual App keeps its original sidebar when the outer host is not ready', async () => {
   const f = await fixture(); assert.equal(f.pane().querySelectorAll('aside.sidebar').length, 1); assert(f.pane().querySelector('button.nav-item[aria-label="Skills"]')); assert(f.pane().querySelector('[aria-label="调整侧栏宽度"]'));
 });

@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| Skill 客户端与工具目录（开发中） | 2026-11-27 | 1、按客户端显示并定位 Skill 入口。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127)<br>2、回执标明实际操作及逐项结果。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127)<br>3、工具列表显示原目录，区分管理入口和能力验证。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127) |
 | 窄窗设置分类（开发中） | 2026-11-27 | 1、目录固定在按钮下方，保持表单位置。[详情](CHANGELOG.md#ios27-settings-navigation-20261127)<br>2、保留键盘焦点、轻动效及高对比选中轮廓。[详情](CHANGELOG.md#ios27-settings-navigation-20261127) |
 | 浮层与 Skill 阅读（开发中） | 2026-11-25 | 1、统一工作区快捷键、对话框和分段控件的视觉层次。[详情](CHANGELOG.md#ios27-panels-and-skill-reading-20261125)<br>2、Skill 原始元数据可按需展开，正文和目录独立显示。[详情](CHANGELOG.md#ios27-panels-and-skill-reading-20261125) |
 | Skill 详情打开（开发中） | 2026-11-25 | 1、本窗口新建详情省去读取空草稿的一次往返。[详情](CHANGELOG.md#fresh-detail-runtime-20261125)<br>2、保留草稿恢复、聚焦与跨窗口转移。[详情](CHANGELOG.md#fresh-detail-runtime-20261125) |

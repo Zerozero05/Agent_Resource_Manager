@@ -84,6 +84,37 @@ const change = async (input: HTMLInputElement, value: string) => act(async () =>
 const select = async (element: HTMLSelectElement, value: string) => act(async () => { Object.getOwnPropertyDescriptor(dom.window.HTMLSelectElement.prototype, 'value')!.set!.call(element, value); element.dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
 const item = (id: string) => ({ id, name: id, kind: 'cli', rootPath: `D:/synthetic/${id}`, repository: null, version: null, alias: '', notes: '', enabled: true, revision: 4, ownership: 'external', managementScope: 'register', actions: [], capabilities: [], createdAt: '', updatedAt: '' });
 
+test('same-name installations expose distinct original paths and separate management from verification', async () => {
+  const first = { ...item('one'), name: '同名工具', rootPath: 'D:\\synthetic\\工具\\stable\\same-tool' };
+  const second = { ...item('two'), name: first.name, rootPath: 'D:\\synthetic\\工具\\preview\\same-tool', enabled: false, version: '2.0-preview',
+    capabilities: [{ id: 'execution', label: '统一调用', status: 'configured', verifiedAt: null, reason: '动作已保存' }] };
+  const third = { ...item('three'), effectiveEnabled: false, sceneReason: '当前场景未包含此资源', ownership: 'managed' };
+  const calls: string[] = [];
+  const action = async (_label: string, command: string) => {
+    calls.push(command);
+    if (command === 'resource_list') return { resources: [first, second, third] };
+    assert.equal(command, 'resource_runtime');
+    return { runs: [] };
+  };
+  await act(async () => root().render(createElement(ResourcePanel, { action })));
+  const rows = [...host.querySelectorAll('.resource-row')];
+  assert.deepEqual(rows.slice(0, 2).map(row => row.querySelector('.resource-directory')!.textContent), [first.rootPath, second.rootPath]);
+  assert.deepEqual(rows.slice(0, 2).map(row => row.querySelector('.resource-directory')!.getAttribute('title')), [first.rootPath, second.rootPath]);
+  assert.deepEqual(rows.map(row => row.querySelector('.resource-state')!.textContent), ['管理入口已启用', '管理入口已停用', '场景未启用']);
+  assert.equal(rows[2].querySelector('.resource-state')!.getAttribute('title'), third.sceneReason);
+  assert.equal(rows[2].querySelector('.resource-row-actions button:last-child')!.textContent, '停用');
+  assert.deepEqual(calls, ['resource_list']);
+  const disclosure = rows[1].querySelector<HTMLButtonElement>('.resource-name-button')!;
+  assert(disclosure.title.includes(second.rootPath));
+  await click(disclosure);
+  const detail = host.querySelector('.resource-detail')!;
+  assert.equal(detail.querySelector('.resource-path')!.textContent, second.rootPath);
+  assert(detail.textContent!.includes('登记版本' + second.version));
+  assert(detail.textContent!.includes('外部安装 · 原位置保留'));
+  assert.equal(detail.querySelector('.resource-capabilities li span')!.textContent, '已配置，待验证');
+  assert.deepEqual(calls, ['resource_list', 'resource_runtime']);
+});
+
 test('tool detail wires lazy relation reads to its identity, Basic mode and visibility', async () => {
   const calls: { command: string; args: any }[] = [], resource = item('one');
   const action = async (_label: string, command: string, args: any) => {
