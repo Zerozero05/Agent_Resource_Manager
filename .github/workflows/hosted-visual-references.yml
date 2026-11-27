@@ -4,24 +4,24 @@ permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '45459930763'
+  CANDIDATE_RUN_ID: '46078368860'
   CANDIDATE_BRANCH: 'codex/skill-document-presentation-20261125'
-  CANDIDATE_SOURCE: 'c81fda47073b92938a45da1bfd5afd8b6e8fa4ce'
-  CANDIDATE_ARTIFACT: 'Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_c81fda47073b92938a45da1bfd5afd8b6e8fa4ce'
-  CANDIDATE_ARTIFACT_ID: '14954871336'
-  CANDIDATE_SHA256: '1b882dd3021cfc8075e3ede312e17c545223ced4498e80692ca706b8b2f872c7'
-  CANDIDATE_ARCHIVE_SHA256: 'cabe04552e9d1f1aeb13c438713d4c30e01a74feda484b9fba7bd91cbbb96d62'
-  CANDIDATE_BUILD_INFO_SHA256: 'b95b7bce39d11803fd2b6c0a1ae273e485b2eba4a0d243aac735113455ecf3dd'
-  FIRST_SEARCH_RUN_ID: '45464633279'
-  FIRST_SEARCH_ARTIFACT_ID: '14955390374'
-  FIRST_SEARCH_SHA256: '8157f80bd5ae49df3bd9a9bb67578fc0ff9fa1fb96a17269dcbe8b8cc1f7f970'
-  FIRST_SEARCH_ARCHIVE_SHA256: '84c8e9218f22dbe795bf8b797246a16ee0a00e183d91415ef37515505b7b9dfa'
+  CANDIDATE_SOURCE: '6239e8ed54714105cc5da455a3c0d2be1cd9eed2'
+  CANDIDATE_ARTIFACT: 'Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_6239e8ed54714105cc5da455a3c0d2be1cd9eed2'
+  CANDIDATE_ARTIFACT_ID: '15236642433'
+  CANDIDATE_SHA256: 'eb3793edb58330369059705d7c3c57fdc22dce09fad0da840a94411f10ba5692'
+  CANDIDATE_ARCHIVE_SHA256: '7bc6a8884b90d2a7712c48083c0d81cab88a1ea42f841e2afd11faa9490d5c43'
+  CANDIDATE_BUILD_INFO_SHA256: '341c450380b378b005bf0d769fb90d9ecb30434cc21ef4e8d0a16cea1fb11493'
+  FIRST_SEARCH_RUN_ID: '46080681756'
+  FIRST_SEARCH_ARTIFACT_ID: '15237486276'
+  FIRST_SEARCH_SHA256: 'f256393c90c8684a05aead972b1728e158804af19bcf84c51f8957a2b998f05d'
+  FIRST_SEARCH_ARCHIVE_SHA256: '0dd1fe64e539d71a9d194ac2179312e4e7c670206fcf2fe558172bdac24b0501'
   FIRST_SEARCH_FIXTURE_SHA256: 'bd3bb8c680b1b7578d376583ab4b416c88ee47b66ae66b813bee455ca31ba3a1'
   FIRST_SEARCH_EDIT_BOUNDS: '411,294,501,52'
   FIRST_SEARCH_RESULT_BOUNDS: '433,671,201,31'
 jobs:
   references:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-c81fda4-20261125-r2' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-visual-references-6239e8e-20261128' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
