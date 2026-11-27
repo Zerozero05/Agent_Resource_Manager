@@ -1,6 +1,8 @@
 # Sources and dependencies
 
+## Windows 后台检查内存 — 2026-11-28
 
+管理器通过现有 Windows 接口，请系统在大结果检查后的空闲时机整理本进程默认堆，调用时传入当前堆的句柄。参数版本、适用平台和内存回收语义依据微软官方文档，在 Windows 上用真实 Skill 检查与独立合成库对照核验。[HeapSetInformation](https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapsetinformation) · [HEAP_OPTIMIZE_RESOURCES_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-heap_optimize_resources_information)
 
 <a id="ios27-desktop-material-20261124"></a>
 
