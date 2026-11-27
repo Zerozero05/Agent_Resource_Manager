@@ -194,8 +194,9 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 退出时记住位置（开发中） | 2026-11-27 | 1、切换页面、客户端或说明文档后立即退出，会保存刚刚看到的位置。[详情](CHANGELOG.md#restore-window-navigation-20261127)<br>2、多窗口分别保存各自的布局和草稿。[详情](CHANGELOG.md#restore-window-navigation-20261127) |
 | 后台任务内存（开发中） | 2026-11-27 | 1、连续检查大量 Skill 时，压缩结果写入任务历史后释放缓冲区预留空间。[详情](CHANGELOG.md#completed-task-buffer-20261127) |
-| Skill 客户端与工具目录（开发中） | 2026-11-27 | 1、按客户端显示并定位 Skill 入口。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127)<br>2、回执区分成功、失败和待核对，重试限于当前可用的失败项。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127)<br>3、工具列表显示原目录，区分管理入口和能力验证。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127) |
+| Skill 客户端与工具目录（开发中） | 2026-11-27 | 1、按客户端显示并定位 Skill 入口。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127)<br>2、回执区分成功、失败和待核对，重试限于当前可用的失败项。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127)<br>3、工具列表显示原目录，区分管理入口和能力验证。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127)<br>4、说明目录改名后如何只移除旧客户端登记。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127) |
 | 窄窗设置分类（开发中） | 2026-11-27 | 1、目录固定在按钮下方，保持表单位置。[详情](CHANGELOG.md#ios27-settings-navigation-20261127)<br>2、保留键盘焦点、轻动效及高对比选中轮廓。[详情](CHANGELOG.md#ios27-settings-navigation-20261127) |
 | 浮层与 Skill 阅读（开发中） | 2026-11-25 | 1、统一工作区快捷键、对话框和分段控件的视觉层次。[详情](CHANGELOG.md#ios27-panels-and-skill-reading-20261125)<br>2、Skill 原始元数据可按需展开，正文和目录独立显示。[详情](CHANGELOG.md#ios27-panels-and-skill-reading-20261125) |
 | Skill 详情打开（开发中） | 2026-11-25 | 1、本窗口新建详情省去读取空草稿的一次往返。[详情](CHANGELOG.md#fresh-detail-runtime-20261125)<br>2、保留草稿恢复、聚焦与跨窗口转移。[详情](CHANGELOG.md#fresh-detail-runtime-20261125) |

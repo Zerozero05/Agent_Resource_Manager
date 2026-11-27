@@ -42,6 +42,29 @@ struct WindowRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     split_view: Option<Value>,
 }
+
+// JSON positions from the webview can represent the same number as an integer.
+fn same_window_snapshot(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, value)| {
+                    right
+                        .get(key)
+                        .is_some_and(|other| same_window_snapshot(value, other))
+                })
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(a, b)| same_window_snapshot(a, b))
+        }
+        (Value::Number(left), Value::Number(right)) => left.as_f64() == right.as_f64(),
+        _ => left == right,
+    }
+}
 fn split_view(value: &Value, window: &WindowRecord) -> Result<Option<Value>, String> {
     if value.is_null() {
         return Ok(None);
@@ -771,6 +794,12 @@ impl Registry {
         serde_json::to_value(&self.layout).expect("layout serializable")
     }
     fn replace_window(&mut self, label: &str, request: &Value) -> Result<(), String> {
+        if let Some(expected) = request.get("expectedWindow") {
+            let current = serde_json::to_value(self.window(label)?).expect("window serializable");
+            if !same_window_snapshot(expected, &current) {
+                return Err("窗口布局已变化，请刷新后重新保存".into());
+            }
+        }
         let values = request["panes"]
             .as_array()
             .ok_or("panes must be an array")?;
@@ -2277,6 +2306,54 @@ mod tests {
             .split_view
             .is_none());
     }
+    #[test]
+    fn closing_saves_compare_only_the_current_window_after_json_round_trip() {
+        let mut registry = Registry::new(None).unwrap();
+        let main = registry.window_mut("main").unwrap();
+        main.panes[0]["state"]["scrollTop"] = json!(20.0);
+        main.bounds =
+            Some(json!({"x":60.0,"y":60.0,"width":1084.0,"height":741.0,"maximized":false}));
+        registry.layout.windows.push(WindowRecord {
+            label: "workspace-child".into(),
+            panes: vec![home("workspace-child")],
+            active_pane_id: home_id("workspace-child"),
+            bounds: None,
+            split_view: None,
+        });
+        let mut old_main = registry.payload("main")["workspace"]["windows"][0].clone();
+        let old_child = registry.payload("workspace-child")["workspace"]["windows"][1].clone();
+        old_main["panes"][0]["state"]["scrollTop"] = json!(20);
+        old_main["bounds"] = json!({"x":60,"y":60,"width":1084,"height":741,"maximized":false});
+        let request = |old: &Value, view| {
+            let mut panes = old["panes"].clone();
+            panes[0]["state"]["view"] = json!(view);
+            json!({"expectedWindow":old,"panes":panes,"activePaneId":old["activePaneId"]})
+        };
+
+        registry
+            .replace_window("main", &request(&old_main, "clients"))
+            .unwrap();
+        registry.layout.revision += 1;
+        registry
+            .replace_window("workspace-child", &request(&old_child, "settings"))
+            .unwrap();
+        registry.layout.revision += 1;
+        assert_eq!(
+            registry.window("main").unwrap().panes[0]["state"]["view"],
+            "clients"
+        );
+        assert_eq!(
+            registry.window("workspace-child").unwrap().panes[0]["state"]["view"],
+            "settings"
+        );
+        let result = registry.replace_window("main", &request(&old_main, "dashboard"));
+        assert_eq!(result.unwrap_err(), "窗口布局已变化，请刷新后重新保存");
+        assert_eq!(
+            registry.window("main").unwrap().panes[0]["state"]["view"],
+            "clients"
+        );
+    }
+
     fn fixture() -> (tempfile::TempDir, Arc<WorkspaceSystem>) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

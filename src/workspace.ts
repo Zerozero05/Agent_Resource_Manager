@@ -7,6 +7,7 @@ export type PaneNavigationState = {
   focusRevision?: number;
   scrollTop?: number; outlineExpanded?: boolean; expandedSections?: string[]; reviewRequired?: boolean;
 };
+export type PaneNavigationPatch = Omit<PaneNavigationState, 'documentPath'> & { documentPath?: string | null };
 export type WorkspacePane = { id: string; kind: PaneKind; title?: string; skillId?: string; state: PaneNavigationState };
 export type WindowBounds = { x?: number; y?: number; width: number; height: number; maximized?: boolean };
 export type SplitView = { rightPaneId: string; ratio: number };

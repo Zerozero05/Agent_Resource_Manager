@@ -411,6 +411,39 @@ test('native window close retains its current-window gesture and uses background
   assert(fixture.calls.some(call => call.action === 'workspace_finish_close'));
 });
 
+test('native close saves just-rendered routes before the navigation timer and preserves untouched panes', async () => {
+  const home: WorkspacePane = { id: 'home', kind: 'home', state: { view: 'skills', clientId: 'codex', section: 'files', focusRevision: 1 } };
+  const detail: WorkspacePane = { id: 'detail', kind: 'detail', state: { section: 'docs', documentPath: 'references/previous.md' } };
+  const hidden: WorkspacePane = { id: 'hidden', kind: 'detail', state: { section: 'source', scrollTop: 300 } };
+  const externallyFocused: WorkspacePane = { id: 'focused-elsewhere', kind: 'detail', state: { section: 'source', focusRevision: 2 } };
+  const owner: WindowWorkspace = { label: 'main', activePaneId: detail.id, panes: [home, detail, hidden, externallyFocused] };
+  const fixture = await mount(false, { workspace: owner });
+  const register = (fixture.session() as unknown as { register: (id: string, bridge: unknown) => void }).register;
+  const bridge = (state: Record<string, unknown>, focusRevision = 0) => ({
+    capture: () => ({ query: 'private search', selectedFiles: ['private draft'], tab: state.section, ...state }),
+    captureNavigation: () => ({ focusRevision, state }),
+    flush: async () => true,
+  });
+  register(home.id, bridge({ view: 'clients', clientId: 'claude', scrollTop: 25 }, 1));
+  register(detail.id, bridge({ section: 'docs', documentPath: null, documentVersion: 'installed' }));
+  register(externallyFocused.id, bridge({ section: 'files', scrollTop: 25 }, 1));
+  register('incoming-foreign', bridge({ section: 'docs' }));
+  await act(async () => fixture.nativeClose());
+  const saved = fixture.calls.find(call => call.action === 'workspace_save');
+  assert.deepEqual(saved?.panes, [
+    { ...home, state: { ...home.state, view: 'clients', clientId: 'claude', scrollTop: 25 } },
+    { ...detail, state: { ...detail.state, documentPath: null, documentVersion: 'installed' } },
+    hidden,
+    externallyFocused,
+  ]);
+  assert.deepEqual(saved?.expectedWindow, owner, 'a newer authoritative window record must not be replaced');
+  assert(!fixture.calls.some(call => call.action === 'workspace_update_pane' || call.paneId === 'incoming-foreign'));
+  const pending = fixture.calls.find(call => call.action === 'workspace_set_pane_runtime' && call.paneId === externallyFocused.id)?.runtime as Record<string, unknown>;
+  assert.equal(pending.tab, undefined, 'the runtime draft takes the newer stored detail section');
+  assert.deepEqual(pending.selectedFiles, ['private draft']);
+  assert(fixture.calls.indexOf(saved) < fixture.calls.findIndex(call => call.action === 'workspace_close_intent'));
+});
+
 test('storage restart binds its preview at the initial intent and cannot change it on finish', async () => {
   const fixture = await mount();
   await act(async () => fixture.session().requestStorageRestart('fixed-storage-preview'));

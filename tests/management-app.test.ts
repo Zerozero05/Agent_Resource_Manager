@@ -6,6 +6,8 @@ import { createElement, act } from 'react';
 import { JSDOM } from 'jsdom';
 import ts from 'typescript';
 import type { LibraryItem } from '../src/library.ts';
+import type { SessionBridge } from '../src/session.tsx';
+import type { PaneNavigationState } from '../src/workspace.ts';
 
 // Load the real App and its components, replacing only native IPC. Fixture query strings
 // isolate the window-scoped caches without adding a reset API to production code.
@@ -74,7 +76,7 @@ const snapshot = () => freeze({ stateRevision: 1, managementRevision: 1, skills:
   { id: 'beta', name: 'beta-original', description: '其他说明', localPath: 'D:/synthetic/beta' },
 ] as LibraryItem[], sources: [], connections: [], settings: { libraryMode: 'list', librarySort: 'name', libraryPageSize: 20 } });
 
-async function fixture(options: { panes?: number; operation?: boolean; detailSkillId?: string; active?: boolean; visible?: boolean; sidebarHost?: HTMLElement; actualTasks?: boolean; state?: ReturnType<typeof snapshot>; draft?: Record<string, unknown>; load?: () => Promise<ReturnType<typeof metadata>>; read?: (action: string, args: unknown) => unknown; nativeRead?: (action: string, args: unknown) => unknown } = {}) {
+async function fixture(options: { panes?: number; operation?: boolean; detailSkillId?: string; paneState?: PaneNavigationState; active?: boolean; visible?: boolean; sidebarHost?: HTMLElement; actualTasks?: boolean; state?: ReturnType<typeof snapshot>; draft?: Record<string, unknown>; load?: () => Promise<ReturnType<typeof metadata>>; read?: (action: string, args: unknown) => unknown; nativeRead?: (action: string, args: unknown) => unknown } = {}) {
   const query = `?managementAppFixture=${++fixtureId}`;
   const { default: App } = await import(new URL('../src/App.tsx' + query, import.meta.url).href);
   const { WorkspaceSessionContext } = await import(new URL('../src/session.tsx' + query, import.meta.url).href);
@@ -83,7 +85,7 @@ async function fixture(options: { panes?: number; operation?: boolean; detailSki
   const calls: { action: string; args: unknown }[] = [], accepted: unknown[] = [];
   const opened: { modal: unknown; draft: Record<string, unknown> }[] = [];
   const homeNavigation: unknown[][] = [];
-  const bridges = new Map<string, { capture: () => any; flush: () => Promise<boolean> }>();
+  const bridges = new Map<string, Omit<SessionBridge, 'capture'> & { capture: () => any }>();
   const listeners = new Map<string, Set<(event: { payload: unknown }) => void>>();
   let inspectActualTask: ((id: string) => Promise<unknown>) | undefined;
   const run = async (_label: string, action: string, args: unknown) => {
@@ -98,7 +100,7 @@ async function fixture(options: { panes?: number; operation?: boolean; detailSki
     listen: (name: string, listener: (event: { payload: unknown }) => void) => { const handlers = listeners.get(name) || new Set(); handlers.add(listener); listeners.set(name, handlers); return () => { handlers.delete(listener); }; },
   } });
   let sessions = Array.from({ length: options.panes || 1 }, (_, index) => ({
-    pane: { id: `home-${index}`, kind: options.operation ? 'operation' : options.detailSkillId ? 'detail' : 'home', skillId: options.detailSkillId, state: { view: 'skills' } }, active: options.active ?? index === 0, visible: options.visible ?? true, sidebarHost: options.sidebarHost, owned: true, closing: false,
+    pane: { id: `home-${index}`, kind: options.operation ? 'operation' : options.detailSkillId ? 'detail' : 'home', skillId: options.detailSkillId, state: { view: 'skills', ...options.paneState } }, active: options.active ?? index === 0, visible: options.visible ?? true, sidebarHost: options.sidebarHost, owned: true, closing: false,
     isTransferring: () => false, initialDraft: options.draft || {}, managerSnapshot: state,
     tasks: { tasks: [], run, inspect: async () => undefined, cancel: async () => undefined, clear: async () => undefined },
     acceptSnapshot: (value: unknown) => { accepted.push(value); },
@@ -133,6 +135,27 @@ const choose = async (select: HTMLSelectElement, value: string) => act(async () 
 const click = async (button: Element) => act(async () => { button.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true })); });
 const button = (scope: Element, label: string) => [...scope.querySelectorAll('button')].find(item => item.textContent === label)!;
 const results = (scope: Element) => [...scope.querySelectorAll('[data-skill-id]')].map(item => item.getAttribute('data-skill-id'));
+
+test('a shared workbench captures only the current client or inline detail navigation', async () => {
+  const f = await fixture({ draft: { libraryMode: 'details', selectedId: 'alpha', tab: 'source' }, read: () => ({}) });
+  const bridge = f.bridges.get('home-0')!;
+  const current = () => {
+    const { expandedSections, ...navigation } = bridge.captureNavigation?.()?.state ?? {};
+    return navigation;
+  };
+  assert.deepEqual(current(), { view: 'skills', section: 'source', scrollTop: 0 });
+  await click(f.pane().querySelector('[data-detail-section="files"]')!);
+  assert.deepEqual(current(), { view: 'skills', section: 'files', scrollTop: 0 });
+  await click(f.pane().querySelector('button.nav-item[aria-label="客户端"]')!);
+  await click([...f.pane().querySelectorAll('.client-tabs button')].find(item => item.textContent?.startsWith('Claude Code'))!);
+  assert.deepEqual(current(), { view: 'clients', clientId: 'claude', scrollTop: 0 });
+  assert.equal(bridge.capture().tab, 'files', 'the inline detail remains in the window runtime draft');
+});
+
+test('an unpresented detail leaves its stored route untouched', async () => {
+  const f = await fixture({ detailSkillId: 'alpha', visible: false, read: () => ({}) });
+  assert.equal(f.bridges.get('home-0')!.captureNavigation?.(), undefined);
+});
 
 test('Skill management record removal is discoverable in details and keeps client connections out of the request', async () => {
   const current = snapshot();
@@ -947,6 +970,27 @@ test('standalone Skill documentation defers export selection until needed and ke
   await f.dispose();
   const restored = await fixture({ detailSkillId: 'alpha', draft: handoff, nativeRead });
   assert.equal(restored.calls.filter(call => call.action === 'workspace_get_export_selection').length, 1, 'restoring an active draft in the description tab resumes its lease');
+});
+
+test('a cleared document subpath survives the window handoff while older drafts still use the stored path', async () => {
+  const paneState = { documentPath: 'references/notes.md' };
+  const nativeRead = (action: string, args: unknown) => {
+    assert.equal(action, 'get_document');
+    const path = (args as { path?: string }).path;
+    return { markdown: path ? '# 参考说明' : '# Skill 首页', documentPath: path || 'SKILL.md', source: '本地运行文件' };
+  };
+  const options = { detailSkillId: 'alpha', paneState, nativeRead };
+  const source = await fixture({ ...options, draft: {} });
+  assert.equal((source.calls.find(call => call.action === 'get_document')?.args as { path?: string }).path, paneState.documentPath);
+  await click(button(source.pane(), '返回首页'));
+  assert.equal(source.pane().querySelector('article.markdown')?.textContent, 'Skill 首页');
+  const draft = JSON.parse(JSON.stringify(source.bridges.get('home-0')!.capture()));
+  await source.dispose();
+  const target = await fixture({ ...options, draft });
+  assert.equal(draft.documentPath, null);
+  assert.equal(button(target.pane(), '返回首页'), undefined);
+  assert.equal(target.pane().querySelector('article.markdown')?.textContent, 'Skill 首页');
+  assert(!target.calls.some(call => call.action === 'get_document' && (call.args as { path?: string }).path));
 });
 
 test('unchanged Skill documentation keeps focused links, images and code across workspace renders', async () => {

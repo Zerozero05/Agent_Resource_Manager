@@ -28,7 +28,7 @@ import { FloatingMenu, type OpenMenu } from './FloatingMenu';
 import { RuntimeChecks } from './RuntimeChecks';
 import { requiredExportPaths, runtimeAttentionCount, type RuntimeIssue } from './runtime';
 import { terminalTask, taskStatus, type ManagerTask } from './tasks';
-import { WorkspaceSessionContext, useWorkspaceSession, type SessionDraft } from './session';
+import { WorkspaceSessionContext, useWorkspaceSession, type SessionDraft, type SessionNavigation } from './session';
 import { PaneFrame, WorkspaceFeedback, scrollToPaneAnchor } from './WorkspaceShell';
 import { ClientPanel, ClientConnectPage, type ClientConnection, type ClientConnectDraft, type ClientManagementMode, type ConnectionResult } from './ClientPanel';
 import { NetworkSettings, type NetworkSettingsDraft } from './NetworkSettings';
@@ -50,7 +50,7 @@ import { DestinationChoice } from './DestinationChoice';
 import { destinationAfterPicker, destinationDraft, destinationReady, type DestinationDraft } from './destination';
 import { CLIENT_MANAGEMENT_COPY, clientConnectionResultStatus, clientConnectionResultText } from './client-selection';
 import { captureSectionFolds, restoreSectionFolds } from './folds';
-import { paneScrollScale, type WorkspaceNavigation } from './workspace';
+import { paneScrollScale, type PaneNavigationPatch, type WorkspaceNavigation } from './workspace';
 import { useExportSelection, type ExportSelectionDraft } from './useExportSelection';
 import { bridgeMessage } from './bridge-recovery';
 import { useExportPlan } from './useExportPlan';
@@ -290,6 +290,7 @@ export default function SessionApp() {
   const isHome = pane.kind === 'home';
   const seed = <T,>(key: string, fallback: T): T => (session.initialDraft[key] ?? fallback) as T;
   const captureRef = useRef<() => SessionDraft>(() => ({}));
+  const captureNavigationRef = useRef<() => SessionNavigation | undefined>(() => undefined);
   const historyDraft = useRef<OperationHistoryDraft>(operationHistoryDraft(session.initialDraft.historyDraft));
   const exportFlushRef = useRef<(() => Promise<unknown>) | undefined>(undefined);
   const paneRoot = useRef<HTMLDivElement>(null);
@@ -392,7 +393,7 @@ export default function SessionApp() {
   const [selectedId, setSelectedId] = useState<string>(seed('selectedId', pane.skillId || ''));
   const [tab, setTab] = useState<'docs' | 'files' | 'source'>(seed('tab', (['docs', 'files', 'source'].includes(pane.state.section || '') ? pane.state.section : 'docs') as 'docs' | 'files' | 'source'));
   const [version, setVersion] = useState<'installed' | 'latest'>(seed('version', pane.state.documentVersion || 'latest'));
-  const [documentPath, setDocumentPath] = useState<string | undefined>(seed('documentPath', pane.state.documentPath));
+  const [documentPath, setDocumentPath] = useState<string | undefined>(session.initialDraft.documentPath === null ? undefined : seed('documentPath', pane.state.documentPath));
   const [documentCommit, setDocumentCommit] = useState<string | undefined>(seed('documentCommit', undefined));
   const [documentLocal, setDocumentLocal] = useState(seed('documentLocal', false));
   const [files, setFiles] = useState<FileResult | null>(seed('files', null));
@@ -726,7 +727,7 @@ export default function SessionApp() {
   const compactSidebar = sidebarCollapsed || effectiveWidth < 720;
   const expandedSidebarWidth = Math.min(sidebarWidth, Math.max(200, effectiveWidth - 520));
   useEffect(() => { if (compactSidebar && resizeStart.current) cancelSidebarResize(); }, [compactSidebar]);
-  useEffect(() => sessionRef.current.register(pane.id, { capture: () => captureRef.current(), flush: async () => { await Promise.all([...registrationAcks.current]); try { await exportFlushRef.current?.(); } catch (cause) { setLayoutError(errText(cause)); return false; } return flushLayout(); }, sidebar: isHome ? { expanded: !compactSidebar || sidebarFlyout, toggle: () => { if (sessionRef.current.closing) return; if (effectiveWidth < 720) setSidebarFlyout(value => !value); else toggleSidebar(); } } : undefined }), [pane.id, flushLayout, isHome, compactSidebar, sidebarFlyout, effectiveWidth, sidebarCollapsed, queueLayout]);
+  useEffect(() => sessionRef.current.register(pane.id, { capture: () => captureRef.current(), captureNavigation: () => captureNavigationRef.current(), flush: async () => { await Promise.all([...registrationAcks.current]); try { await exportFlushRef.current?.(); } catch (cause) { setLayoutError(errText(cause)); return false; } return flushLayout(); }, sidebar: isHome ? { expanded: !compactSidebar || sidebarFlyout, toggle: () => { if (sessionRef.current.closing) return; if (effectiveWidth < 720) setSidebarFlyout(value => !value); else toggleSidebar(); } } : undefined }), [pane.id, flushLayout, isHome, compactSidebar, sidebarFlyout, effectiveWidth, sidebarCollapsed, queueLayout]);
   useEffect(() => { const resize = () => setViewportWidth(window.innerWidth); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize); }, []);
   useEffect(() => {
     if (!zoomFeedback) return;
@@ -1524,12 +1525,26 @@ export default function SessionApp() {
     const restore = () => restoreSectionFolds(root, initialFolds.current, foldsRestored.current);
     restore(); const observer = new MutationObserver(restore); observer.observe(root, { childList: true, subtree: true }); return () => observer.disconnect();
   }, []);
-  captureRef.current = () => ({ view, toolsVisited, commandResourceRequest, toolPanelDraft: toolPanelDraft.current, resourceLibraryDraft: resourceLibraryDraftRef.current, sceneDraft: sceneDraft.current, viewScrollPositions: { ...viewScrollPositions.current }, filter, query, libraryPage, libraryMode, librarySort, libraryPageSize, readingRefresh, libraryReading: readingRef.current, statusFilter, categoryFilter, categoryName, categoryDraftColor, checkedSkills, detailOpen, selectedId, tab, version, documentPath, documentCommit, documentLocal, documentCacheKey: docKey, documentValue: doc, files, runtimeFiles, fileContent, inventoryFailed, uploadSource, uploadBranch, uploadPath, trimOptional, transferResult, localImportDraft: localImportDraft.current, skillRelocationDraft: skillRelocationDraft.current, scanPath, scanResult, scanSelected, githubUrl, associateSource, associateSkill, targetPath, destinationChoice, selectedFiles, runtimeConsent, commitMessage, previewFile, activeClient, modal, exportLeaseSkillId: exportLeaseSkillId.current, inFlightExportSelection: inFlightExportSelection.current, originPaneId: session.initialDraft.originPaneId || pane.id, expandedSections: captureFolds(), historyDraft: historyDraft.current, externalManagementDraft: externalManagementDraft.current, clientConnectDraft: clientConnectDraft.current, storageDraft: storageDraft.current, networkDraft: networkDraft.current, settingsOutline, settingsSection, autoMatchFeedback, deferredModal: deferredModal.current, pendingTaskIntents: Object.fromEntries(pendingTaskIntents.current), pendingTaskIds: [...startedTasks.current], scrollTop: scrollTop.current, outlineExpanded });
+  captureRef.current = () => ({ view, toolsVisited, commandResourceRequest, toolPanelDraft: toolPanelDraft.current, resourceLibraryDraft: resourceLibraryDraftRef.current, sceneDraft: sceneDraft.current, viewScrollPositions: { ...viewScrollPositions.current }, filter, query, libraryPage, libraryMode, librarySort, libraryPageSize, readingRefresh, libraryReading: readingRef.current, statusFilter, categoryFilter, categoryName, categoryDraftColor, checkedSkills, detailOpen, selectedId, tab, version, documentPath: documentPath ?? null, documentCommit, documentLocal, documentCacheKey: docKey, documentValue: doc, files, runtimeFiles, fileContent, inventoryFailed, uploadSource, uploadBranch, uploadPath, trimOptional, transferResult, localImportDraft: localImportDraft.current, skillRelocationDraft: skillRelocationDraft.current, scanPath, scanResult, scanSelected, githubUrl, associateSource, associateSkill, targetPath, destinationChoice, selectedFiles, runtimeConsent, commitMessage, previewFile, activeClient, modal, exportLeaseSkillId: exportLeaseSkillId.current, inFlightExportSelection: inFlightExportSelection.current, originPaneId: session.initialDraft.originPaneId || pane.id, expandedSections: captureFolds(), historyDraft: historyDraft.current, externalManagementDraft: externalManagementDraft.current, clientConnectDraft: clientConnectDraft.current, storageDraft: storageDraft.current, networkDraft: networkDraft.current, settingsOutline, settingsSection, autoMatchFeedback, deferredModal: deferredModal.current, pendingTaskIntents: Object.fromEntries(pendingTaskIntents.current), pendingTaskIds: [...startedTasks.current], scrollTop: scrollTop.current, outlineExpanded });
+  const hasDetailNavigation = detailVisible && !!selected;
+  const navigation = useMemo<PaneNavigationPatch>(() => ({
+    ...(isHome ? { view, ...(view === 'clients' ? { clientId: activeClient } : {}) } : pane.kind !== 'history' ? { outlineExpanded } : {}),
+    ...(hasDetailNavigation ? { section: tab, ...(tab === 'docs' ? { documentPath: documentPath ?? null, documentVersion: version } : {}) } : {}),
+  }), [isHome, pane.kind, view, activeClient, outlineExpanded, hasDetailNavigation, tab, documentPath, version]);
+  const renderedFocusRevision = lastFocusRevision.current;
+  const canCaptureNavigation = ready && visited && session.owned;
+  useLayoutEffect(() => {
+    captureNavigationRef.current = () => {
+      if (!canCaptureNavigation || !paneRoot.current) return undefined;
+      const expandedSections = captureSectionFolds(paneRoot.current);
+      return { focusRevision: renderedFocusRevision, state: { ...navigation, scrollTop: scrollTop.current, ...(expandedSections.length ? { expandedSections } : {}) } };
+    };
+  }, [canCaptureNavigation, navigation, renderedFocusRevision]);
   useEffect(() => {
-    if (!ready) return;
-    const timer = setTimeout(() => sessionRef.current.updateNavigation(pane.id, { view, clientId: activeClient, section: tab, documentPath, documentVersion: version, outlineExpanded }), 250);
+    if (!canCaptureNavigation || !Object.keys(navigation).length) return;
+    const timer = setTimeout(() => sessionRef.current.updateNavigation(pane.id, navigation), 250);
     return () => clearTimeout(timer);
-  }, [ready, pane.id, view, activeClient, tab, documentPath, version, outlineExpanded]);
+  }, [canCaptureNavigation, pane.id, navigation]);
   useEffect(() => {
     if (!session.owned) return;
     let cancelled = false;

@@ -1,9 +1,10 @@
 import { createContext, useContext } from 'react';
 import type { useTasks } from './tasks';
-import type { WorkspacePane } from './workspace';
+import type { PaneNavigationPatch, WorkspacePane } from './workspace';
 
 export type SessionDraft = Record<string, unknown>;
-export type SessionBridge = { capture: () => SessionDraft; flush: () => Promise<boolean>; sidebar?: { expanded: boolean; toggle: () => void } };
+export type SessionNavigation = { focusRevision: number; state: PaneNavigationPatch };
+export type SessionBridge = { capture: () => SessionDraft; captureNavigation: () => SessionNavigation | undefined; flush: () => Promise<boolean>; sidebar?: { expanded: boolean; toggle: () => void } };
 export type PaneFocusNavigation = { view?: string; clientId?: string; section?: string };
 export type WorkspaceSession = {
   pane: WorkspacePane;
@@ -21,7 +22,7 @@ export type WorkspaceSession = {
   openDetail: (skill: { id: string; name: string; displayName?: string }, section: 'docs' | 'files' | 'source') => void;
   openHistory: () => void;
   openOperation: (modal: unknown, draft: SessionDraft, title: string, skillId?: string) => void;
-  updateNavigation: (id: string, patch: Record<string, unknown>) => void;
+  updateNavigation: (id: string, patch: PaneNavigationPatch) => void;
   goHome: (view?: string, clientId?: string) => void;
   closePane: (id: string) => void;
   focusPane: (id: string, navigation?: PaneFocusNavigation) => void;

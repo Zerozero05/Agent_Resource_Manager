@@ -6,7 +6,7 @@ import SessionApp from './App';
 import { useTasks, terminalTask, type CheckCompletionStamp } from './tasks';
 import { WorkspaceShell } from './WorkspaceShell';
 import { CheckControl } from './CheckControl';
-import { createHomePane, localHistoryPane, reorderWorkspacePanes, type WorkspaceNavigation, type WorkspacePane, type ScreenPoint, type PaneTaskBadge } from './workspace';
+import { createHomePane, localHistoryPane, reorderWorkspacePanes, type PaneNavigationPatch, type WorkspaceNavigation, type WorkspacePane, type ScreenPoint, type PaneTaskBadge } from './workspace';
 import { WorkspaceSessionContext, type PaneFocusNavigation, type SessionBridge, type SessionDraft } from './session';
 import './session.css';
 import { isStaleReadSnapshot } from './snapshot-clock';
@@ -290,7 +290,7 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
     if (bridge.sidebar) setSidebarControl(bridge.sidebar);
     return () => { if (bridges.current.get(id) === bridge) { bridges.current.delete(id); if (bridge.sidebar) setSidebarControl(current => current === bridge.sidebar ? undefined : current); } };
   }, []);
-  const updateNavigation = useCallback((id: string, patch: Record<string, unknown>) => {
+  const updateNavigation = useCallback((id: string, patch: PaneNavigationPatch) => {
     if (!ready.current || closingRef.current) return;
     void applyReply(api('workspace_update_pane', { paneId: id, state: patch }));
   }, [applyReply]);
@@ -353,19 +353,42 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
     finally { moving.current.delete(id); setMovingIds(new Set(moving.current)); }
   }, [applyReply]);
   const flush = useCallback(async (preserveRuntime = false) => {
-    for (const bridge of bridges.current.values()) if (!await bridge.flush()) return false;
+    const currentWindowRecord = () => current.current.windows.find(item => item.label === label);
+    for (const pane of currentWindowRecord()?.panes || []) {
+      const bridge = bridges.current.get(pane.id);
+      if (bridge && !await bridge.flush()) return false;
+    }
     await Promise.all([...pendingSaves.current]);
-    // Keep drafts in the shared process for reopening the UI or a failed migration.
-    if (preserveRuntime) for (const [paneId, bridge] of bridges.current) await api('workspace_set_pane_runtime', { paneId, runtime: bridge.capture() });
+    await accepting.current;
     if (isTauri()) {
       const window = getCurrentWindow();
       const bounds = await readCloseBounds(async () => {
         const scale = await window.scaleFactor(), position = await window.outerPosition(), size = await window.innerSize();
         return { x: position.x / scale, y: position.y / scale, width: size.width / scale, height: size.height / scale, maximized: await window.isMaximized() };
       }, { active: () => mounted.current });
-      const owner = current.current.windows.find(item => item.label === label);
-      // Omitting bounds preserves the backend's last known position; pane saves still must succeed.
-      if (owner) await api('workspace_save', { panes: owner.panes.map(pane => { const draft = bridges.current.get(pane.id)?.capture(); return draft ? { ...pane, state: { ...pane.state, scrollTop: draft.scrollTop, outlineExpanded: draft.outlineExpanded, expandedSections: draft.expandedSections } } : pane; }), activePaneId: owner.activePaneId, ...(bounds ? { bounds } : {}) });
+      const owner = currentWindowRecord();
+      if (owner) {
+        const runtime = new Map<string, SessionDraft>();
+        const panes = owner.panes.map(pane => {
+          const bridge = bridges.current.get(pane.id);
+          if (!bridge) return pane;
+          const navigation = bridge.captureNavigation();
+          const staleFocus = navigation && navigation.focusRevision !== (pane.state.focusRevision ?? 0);
+          if (preserveRuntime) {
+            const draft = bridge.capture();
+            // An explicit focus received during close still controls the restored route.
+            if (staleFocus && pane.kind === 'home') runtime.set(pane.id, { ...draft, view: undefined, activeClient: undefined });
+            else if (staleFocus && pane.kind === 'detail') runtime.set(pane.id, { ...draft, tab: undefined });
+            else runtime.set(pane.id, draft);
+          }
+          if (!navigation || staleFocus) return pane;
+          return { ...pane, state: { ...pane.state, ...navigation.state } };
+        });
+        // Compare this window's authoritative record. Saves in other windows can run in the same close round.
+        await api('workspace_save', { panes, activePaneId: owner.activePaneId, expectedWindow: owner, ...(bounds ? { bounds } : {}) });
+        // Drafts remain in the shared process for reopening the UI or a failed migration.
+        for (const [paneId, draft] of runtime) await api('workspace_set_pane_runtime', { paneId, runtime: draft });
+      }
     }
     return true;
   }, [label]);
