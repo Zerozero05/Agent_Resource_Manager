@@ -1518,7 +1518,7 @@ fn refresh_and_save(m: &mut Manager, req: &Value) -> Result<Option<Vec<Value>>, 
             };
         }
     }
-    if automatic && semantic_state(&m.state)? == semantic_state(&previous)? {
+    if automatic && same_check_state(&m.state, &previous) {
         m.state = previous;
         return Ok(None);
     }
@@ -1572,37 +1572,61 @@ fn preserve_unselected(
         .collect();
 }
 
-fn semantic_state(state: &crate::model::State) -> Result<Value, String> {
-    fn strip(value: &mut Value) {
-        match value {
-            Value::Object(map) => {
-                for key in [
-                    "lastChecked",
-                    "lastLocalChecked",
-                    "lastLocalCheckedAt",
-                    "lastRemoteCheckedAt",
-                    "checkedAt",
-                    "baselineVerifiedAt",
-                    "associationBaselineVerifiedAt",
-                    "comparisonObservedAt",
-                ] {
-                    map.remove(key);
-                }
-                for item in map.values_mut() {
-                    strip(item);
-                }
+fn same_check_state(current: &crate::model::State, previous: &crate::model::State) -> bool {
+    use crate::model::State;
+
+    fn observation_time(key: &str) -> bool {
+        matches!(
+            key,
+            "lastChecked"
+                | "lastLocalChecked"
+                | "lastLocalCheckedAt"
+                | "lastRemoteCheckedAt"
+                | "checkedAt"
+                | "baselineVerifiedAt"
+                | "associationBaselineVerifiedAt"
+                | "comparisonObservedAt"
+        )
+    }
+    fn same_value(left: &Value, right: &Value) -> bool {
+        match (left, right) {
+            (Value::Object(left), Value::Object(right)) => {
+                left.iter().all(|(key, value)| {
+                    observation_time(key)
+                        || right.get(key).is_some_and(|other| same_value(value, other))
+                }) && right
+                    .keys()
+                    .all(|key| observation_time(key) || left.contains_key(key))
             }
-            Value::Array(items) => {
-                for item in items {
-                    strip(item);
-                }
-            }
-            _ => {}
+            (Value::Array(left), Value::Array(right)) => same_items(left, right),
+            _ => left == right,
         }
     }
-    let mut value = serde_json::to_value(state).map_err(|e| e.to_string())?;
-    strip(&mut value);
-    Ok(value)
+    fn same_items(left: &[Value], right: &[Value]) -> bool {
+        left.len() == right.len() && left.iter().zip(right).all(|(a, b)| same_value(a, b))
+    }
+
+    // Account for every persisted field, without building two disposable copies of the library.
+    let State {
+        skills,
+        sources,
+        connections,
+        settings,
+        local_roots,
+        ignored_local_paths,
+        check_mode,
+        check_generation,
+        check_summary,
+    } = current;
+    check_mode == &previous.check_mode
+        && *check_generation == previous.check_generation
+        && ignored_local_paths == &previous.ignored_local_paths
+        && same_value(settings, &previous.settings)
+        && same_value(check_summary, &previous.check_summary)
+        && same_items(local_roots, &previous.local_roots)
+        && same_items(connections, &previous.connections)
+        && same_items(sources, &previous.sources)
+        && same_items(skills, &previous.skills)
 }
 
 pub(crate) fn check(m: &mut Manager, req: &Value) -> Result<Value, String> {
@@ -3349,6 +3373,31 @@ mod association_behavior_tests {
         assert!(skill_needs_attention(&updated));
         updated["error"] = json!("offline");
         assert_eq!(documentation_updates(&[old], &[updated]), 0);
+    }
+
+    #[test]
+    fn check_comparison_preserves_nested_content_and_ignores_only_observation_times() {
+        let d = fixture();
+        let mut first = Manager::new(d.path().join("data")).unwrap().state;
+        first.skills = vec![json!({"id":"one","files":[{"path":"a","checkedAt":"old"}, null]})];
+        let mut next = first.clone();
+        let file = next.skills[0]["files"][0].as_object_mut().unwrap();
+        file.remove("checkedAt");
+        file.insert("lastChecked".into(), json!("new"));
+        next.settings["policy"] = json!({"revision":1});
+        assert!(!same_check_state(&first, &next));
+        first.settings = next.settings.clone();
+        assert!(same_check_state(&first, &next));
+        assert!(same_check_state(&next, &first));
+        next.skills[0]["files"][0]["optional"] = Value::Null;
+        assert!(!same_check_state(&first, &next));
+        assert!(!same_check_state(&next, &first));
+        next.skills = first.skills.clone();
+        next.skills[0]["files"].as_array_mut().unwrap().reverse();
+        assert!(!same_check_state(&first, &next));
+        next.skills = first.skills.clone();
+        next.check_generation += 1;
+        assert!(!same_check_state(&first, &next));
     }
 
     #[test]
