@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| Skill 详情与本地检查（开发中） | 2026-11-28 | 1、在独立 Skill 详情中首次打开「来源与连接」时才加载管理面板，切换标签时保留未保存的别名。[详情](CHANGELOG.md#skill-detail-and-local-checks-20261128)<br>2、说明正文与附图读取当前 Skill 和所需来源，避免复制整个技能库。[详情](CHANGELOG.md#skill-detail-and-local-checks-20261128)<br>3、打开文件和定位外部依赖映射时，滚动遵循当前动效设置。[详情](CHANGELOG.md#skill-detail-and-local-checks-20261128)<br>4、重复核对本地 Skill 时，已有审计仍有效即可复用，减少临时内存分配。[详情](CHANGELOG.md#skill-detail-and-local-checks-20261128) |
 | 退出时记住位置（开发中） | 2026-11-27 | 1、切换页面、客户端或说明文档后立即退出，会保存刚刚看到的位置。[详情](CHANGELOG.md#restore-window-navigation-20261127)<br>2、多窗口分别保存各自的布局和草稿。[详情](CHANGELOG.md#restore-window-navigation-20261127) |
 | 后台任务内存（开发中） | 2026-11-27 | 1、连续检查大量 Skill 时，压缩结果写入任务历史后释放缓冲区预留空间。[详情](CHANGELOG.md#completed-task-buffer-20261127) |
 | Skill 客户端与工具目录（开发中） | 2026-11-27 | 1、按客户端显示并定位 Skill 入口。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127)<br>2、回执区分成功、失败和待核对，重试限于当前可用的失败项。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127)<br>3、工具列表显示原目录，区分管理入口和能力验证。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127)<br>4、说明目录改名后如何只移除旧客户端登记。[详情](CHANGELOG.md#cc-switch-client-results-and-tool-paths-20261127) |

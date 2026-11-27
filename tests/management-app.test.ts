@@ -972,6 +972,30 @@ test('standalone Skill documentation defers export selection until needed and ke
   assert.equal(restored.calls.filter(call => call.action === 'workspace_get_export_selection').length, 1, 'restoring an active draft in the description tab resumes its lease');
 });
 
+test('standalone documents leave source tools unmounted until visited, then preserve their draft across tabs', async () => {
+  const f = await fixture({ detailSkillId: 'alpha', read: () => ({}), nativeRead: action => {
+    assert.equal(action, 'get_document');
+    return { markdown: '# 本地说明', documentPath: 'SKILL.md', source: '本地运行文件' };
+  } });
+  const pane = f.pane();
+  assert.equal(pane.querySelector('.detail-management'), null);
+  assert.equal(f.calls.filter(call => call.action === 'get_document').length, 1);
+  await click(button(pane, '来源与连接'));
+  const source = pane.querySelector<HTMLElement>('.detail-management')!;
+  assert(source && !source.hidden);
+  const openEditor = button(source, '别名与备注');
+  assert(openEditor);
+  await click(openEditor);
+  const alias = source.querySelector<HTMLInputElement>('input[aria-label="Skill 别名"]')!;
+  await change(alias, '未提交的别名');
+  await click(button(pane, '说明'));
+  assert(source.hidden);
+  await click(button(pane, '来源与连接'));
+  assert.equal(source, pane.querySelector('.detail-management'));
+  assert.equal(alias.value, '未提交的别名');
+  assert.deepEqual(f.calls.filter(call => ['skill_annotation_set', 'resource_relations_set'].includes(call.action)), []);
+});
+
 test('a cleared document subpath survives the window handoff while older drafts still use the stored path', async () => {
   const paneState = { documentPath: 'references/notes.md' };
   const nativeRead = (action: string, args: unknown) => {

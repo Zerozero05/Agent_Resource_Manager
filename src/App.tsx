@@ -64,7 +64,7 @@ import { buildCommands, resourceCommandCatalogue, type Command } from './command
 import type { Resource } from './resources';
 import type { ResourcePanelDraft } from './resource-panel-state';
 import { SourceMapping, SkillSourceHealth, type SkillSourceMapping } from './SkillSource';
-import { ACCENTS, DEFAULT_APPEARANCE, applyAppearance, normalizeAppearance, observeMotion, type Appearance } from './appearance';
+import { ACCENTS, DEFAULT_APPEARANCE, applyAppearance, normalizeAppearance, observeMotion, revealNearest, type Appearance } from './appearance';
 import './updates.css';
 import './tasks.css';
 import {
@@ -392,6 +392,8 @@ export default function SessionApp() {
   const requestedDetailSkill = useRef<string | null>(null);
   const [selectedId, setSelectedId] = useState<string>(seed('selectedId', pane.skillId || ''));
   const [tab, setTab] = useState<'docs' | 'files' | 'source'>(seed('tab', (['docs', 'files', 'source'].includes(pane.state.section || '') ? pane.state.section : 'docs') as 'docs' | 'files' | 'source'));
+  const [sourceVisited, setSourceVisited] = useState(tab === 'source');
+  useEffect(() => { if (pane.kind === 'detail' && tab === 'source') setSourceVisited(true); }, [pane.kind, tab]);
   const [version, setVersion] = useState<'installed' | 'latest'>(seed('version', pane.state.documentVersion || 'latest'));
   const [documentPath, setDocumentPath] = useState<string | undefined>(session.initialDraft.documentPath === null ? undefined : seed('documentPath', pane.state.documentPath));
   const [documentCommit, setDocumentCommit] = useState<string | undefined>(seed('documentCommit', undefined));
@@ -1380,7 +1382,9 @@ export default function SessionApp() {
       if (fileRequestId.current === requestId && selectedIdRef.current === skillId) {
         const remoteCommit = from === 'github' ? result.remoteCommit || requestedCommit : undefined;
         setFileContent({ path, content: result.content, source: from, remoteCommit });
-        if (sessionRef.current.active && Math.abs(scrollTop.current - scrollAtRequest) < 24) requestAnimationFrame(() => { if (sessionRef.current.active && fileRequestId.current === requestId) paneRoot.current?.querySelector('.file-reader')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); });
+        if (sessionRef.current.active && Math.abs(scrollTop.current - scrollAtRequest) < 24) requestAnimationFrame(() => {
+          if (sessionRef.current.active && fileRequestId.current === requestId) revealNearest(paneRoot.current?.querySelector('.file-reader'));
+        });
         if (from === 'github' && result.hash && entry?.localHash) setFiles(previous => previous && previous.remoteCommit === remoteCommit ? { ...previous, files: previous.files.map(file => file.path === path && file.localHash === entry.localHash ? { ...file, contentDifferent: file.localHash !== result.hash } : file) } : previous);
       }
     } catch (error) { if (fileRequestId.current === requestId && selectedIdRef.current === skillId) { setFileContent(null); setFileError(`读取${from === 'github' ? ' GitHub ' : '本地'}文件失败：${errText(error)}`); } }
@@ -1642,7 +1646,7 @@ export default function SessionApp() {
             </div>
             {!standaloneSkillDetail && skillDetailTabs}
             <div className="detail-content">
-              {standaloneSkillDetail && <div className="detail-management" hidden={tab !== 'source'}>{skillMetadata}{skillManagement}</div>}
+              {standaloneSkillDetail && (tab === 'source' || sourceVisited) && <div className="detail-management" hidden={tab !== 'source'}>{skillMetadata}{skillManagement}</div>}
               {tab === 'docs' && <><div className="document-toolbar"><div className="segmented small"><button className={version === 'latest' ? 'selected' : ''} onClick={() => { setVersion('latest'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>最新说明</button><button disabled={!selected.localPath || !!selected.sourceId && !selected.installedCommit} title={!selected.installedCommit && selected.sourceId ? '没有可核实的历史安装记录' : undefined} className={version === 'installed' ? 'selected' : ''} onClick={() => { setVersion('installed'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>安装版本</button></div><Button variant="ghost" aria-label="刷新说明" disabled={docBusy || documentState.refreshing} onClick={refreshDocument}><RefreshCw size={14} className={documentState.refreshing ? 'spin' : ''} />{documentState.refreshing ? '正在刷新' : '刷新说明'}</Button>{documentPath && <Button variant="ghost" onClick={() => { setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>返回首页</Button>}</div>
               {selected.localPath && selected.sourceId && !selected.installedCommit && <div className="helper-note document-baseline-note"><CircleHelp size={14} /><span>历史安装版本未知。当前比较基准只说明文件匹配，不代表当初的安装版本。</span><button className="text-button" onClick={() => { setVersion('latest'); setDocumentPath(undefined); setDocumentCommit(undefined); setDocumentLocal(false); }}>阅读最新说明<ArrowUpRight size={12} /></button></div>}
               {documentState.refreshing && <p className="document-read-status" role="status"><LoaderCircle size={14} className="spin" />正在刷新，当前显示已读取版本。</p>}

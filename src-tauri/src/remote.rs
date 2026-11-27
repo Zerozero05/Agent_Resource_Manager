@@ -619,9 +619,20 @@ fn local_document_requested(skill: &Value, req: &Value) -> bool {
                 && (!skill["installedProvenance"].is_null()
                     || skill["installedCommit"].is_string()))
 }
-pub(crate) fn local_document_skill(m: &Manager, req: &Value) -> Option<Value> {
-    let skill = m.skill_entry(req["skillId"].as_str()?).ok()?;
-    local_document_requested(skill, req).then(|| skill.clone())
+pub(crate) fn document_inputs(m: &Manager, req: &Value) -> (Vec<Value>, Vec<Value>) {
+    let Some(skill) = req["skillId"]
+        .as_str()
+        .and_then(|id| m.skill_entry(id).ok())
+    else {
+        // The dispatcher supplies the normal missing/invalid Skill error.
+        return (Vec::new(), Vec::new());
+    };
+    let source = if local_document_requested(skill, req) {
+        None
+    } else {
+        source_for(m, skill).ok()
+    };
+    (vec![skill.clone()], source.into_iter().collect())
 }
 
 // The reader keeps the raw Markdown. This boundary lets it present the

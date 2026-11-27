@@ -1110,7 +1110,11 @@ impl TaskSystem {
         // The local dispatcher reads documentation without saving state or
         // touching approvals. Other dispatchers retain their merge semantics.
         let local_dispatch = std::ptr::fn_addr_eq(dispatch, crate::dispatch_local as Dispatch);
-        let local_document_read = request["action"] == "get_document" && local_dispatch;
+        let document_read = local_dispatch
+            && matches!(
+                request["action"].as_str(),
+                Some("get_document" | "get_doc_asset")
+            );
         let defer_check_snapshot = request["action"] == "check_now"
             && (local_dispatch || std::ptr::fn_addr_eq(dispatch, crate::dispatch as Dispatch));
         let outcome =
@@ -1176,10 +1180,10 @@ impl TaskSystem {
                         .map_err(|_| "Manager state lock failed")?;
                     // Document reads never use approvals; keep large unrelated update
                     // previews out of both snapshots without changing other tasks.
-                    let include_previews = request["action"] != "get_document";
+                    let include_previews = request["action"] != "get_document" && !document_read;
                     let hook = Arc::new(WorkerHook {
                         service: Arc::downgrade(&self),
-                        base: (!local_document_read).then(|| {
+                        base: (!document_read).then(|| {
                             Mutex::new(WorkerBase {
                                 state: manager.state.clone(),
                                 previews: if include_previews {
@@ -1199,15 +1203,10 @@ impl TaskSystem {
                         internal_resource_automation,
                         check_summary: defer_check_snapshot.then(|| Mutex::new(None)),
                     });
-                    let local_skill = if local_document_read && request["automatic"] != true {
-                        crate::remote::local_document_skill(&manager, &request)
-                    } else {
-                        None
-                    };
                     // This read only needs its target at the point the resource lock is held.
                     // The original dispatcher still owns validation, I/O, and the result.
-                    let worker = if let Some(skill) = local_skill {
-                        manager.detached_for_local_document(hook.clone(), skill)
+                    let worker = if document_read && request["automatic"] != true {
+                        manager.detached_for_document(hook.clone(), &request)
                     } else {
                         manager.detached(hook.clone(), include_previews)
                     };
@@ -1250,7 +1249,7 @@ impl TaskSystem {
                 );
                 // A consumed preview stays consumed on failure. Management history
                 // is already committed with its state by the writer.
-                if !local_document_read {
+                if !document_read {
                     hook.publish_ephemeral(&worker)?;
                 }
                 let mut value = result?;
@@ -6256,7 +6255,7 @@ mod tests {
 
     #[test]
     fn local_document_read_does_not_trim_unrelated_previews() {
-        let (_dir, service, markdown) = document_fixture_with_large_preview();
+        let (dir, service, markdown) = document_fixture_with_large_preview();
         let before = {
             let mut manager = service.manager.lock().unwrap();
             for index in 0..33 {
@@ -6275,6 +6274,15 @@ mod tests {
             .unwrap();
         assert_eq!(result["markdown"], markdown);
         assert!(result["readGeneration"].is_u64());
+        std::fs::write(dir.path().join("local-document/figure.png"), b"asset").unwrap();
+        let image = service
+            .execute(
+                json!({"action":"get_doc_asset","skillId":"one","path":"figure.png"}),
+                crate::dispatch_local,
+            )
+            .unwrap();
+        assert_eq!(image["dataUrl"], "data:image/png;base64,YXNzZXQ=");
+        assert_eq!(service.manager.lock().unwrap().previews, before);
         let outside = service.execute(
             json!({"action":"get_document","skillId":"one","path":"../outside.md"}),
             crate::dispatch_local,
@@ -6289,7 +6297,13 @@ mod tests {
             let mut manager = service.manager.lock().unwrap();
             manager.state.skills[0]["sourceId"] = json!("linked");
             let latest = json!({"action":"get_document","skillId":"one","version":"latest"});
-            assert!(crate::remote::local_document_skill(&manager, &latest).is_none());
+            manager
+                .state
+                .sources
+                .push(json!({"id":"linked","repo":"example/docs","branch":"main"}));
+            let (skills, sources) = crate::remote::document_inputs(&manager, &latest);
+            assert_eq!(skills, [manager.state.skills[0].clone()]);
+            assert_eq!(sources, [manager.state.sources.last().unwrap().clone()]);
         }
         let linked_local = service
             .execute(

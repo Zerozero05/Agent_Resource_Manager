@@ -29,6 +29,12 @@ export function applyAppearance(root: HTMLElement, value: Appearance) {
   root.dataset.density = value.uiDensity;
 }
 
+export function revealNearest(element: Element | null | undefined) {
+  if (!element) return;
+  const motion = element.ownerDocument.documentElement.dataset.motion;
+  element.scrollIntoView({ block: 'nearest', behavior: motion === 'light' ? 'smooth' : 'instant' });
+}
+
 // One subscription per window; no polling or per-resource animation work.
 export function observeMotion(doc: Document, win: Window, choice: UiMotion): () => void {
   const query = win.matchMedia('(prefers-reduced-motion: reduce)');

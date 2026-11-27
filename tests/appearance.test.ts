@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyAppearance, DEFAULT_APPEARANCE, effectiveMotion, normalizeAppearance, observeMotion } from '../src/appearance.ts';
+import { applyAppearance, DEFAULT_APPEARANCE, effectiveMotion, normalizeAppearance, observeMotion, revealNearest } from '../src/appearance.ts';
 
 test('legacy and invalid settings get appearance defaults without changing saved typography', () => {
   const legacy = { uiTheme: 'eye', uiFontSize: 20, uiZoom: 125 };
@@ -46,4 +46,24 @@ test('appearance changes only its root attributes and motion subscriptions clean
   stop();
   doc.hidden = false; doc.dispatchEvent(new Event('visibilitychange')); win.dispatchEvent(new Event('focus'));
   assert.equal(motion(), 'none', 'unmounted settings must not leave active window listeners');
+});
+
+test('revealing a target uses the current motion of its own window on each invocation', () => {
+  const dataset: { motion?: string } = {};
+  const calls: ScrollIntoViewOptions[] = [];
+  const element = {
+    ownerDocument: { documentElement: { dataset } },
+    scrollIntoView: (options: ScrollIntoViewOptions) => calls.push(options),
+  } as unknown as Element;
+  revealNearest(null);
+  revealNearest(element);
+  dataset.motion = effectiveMotion('light', true, true);
+  revealNearest(element);
+  dataset.motion = effectiveMotion('system', true, true);
+  revealNearest(element);
+  assert.deepEqual(calls, [
+    { block: 'nearest', behavior: 'instant' },
+    { block: 'nearest', behavior: 'smooth' },
+    { block: 'nearest', behavior: 'instant' },
+  ]);
 });

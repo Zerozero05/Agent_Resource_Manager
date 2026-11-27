@@ -155,9 +155,8 @@ pub(crate) fn refresh_local_audit(
     skill: &mut Value,
     inventory: Option<&BTreeMap<String, String>>,
 ) -> bool {
-    let before = skill.clone();
+    // Unchanged inventories normally reuse the existing audit without a write.
     if let Some(inventory) = inventory {
-        local::invalidate_runtime_audit(skill, inventory);
         let audit = &skill["runtimeAudit"];
         let recorded_scope = if !preserves_manual_scope(skill)
             && audit["canAutoConfirm"] == true
@@ -168,13 +167,23 @@ pub(crate) fn refresh_local_audit(
             &audit["preservedScope"]
         };
         if audit["analyzerVersion"] == local::RUNTIME_ANALYZER_VERSION
-            && audit["inventoryHashes"] == json!(inventory)
+            && audit["inventoryHashes"].as_object().is_some_and(|hashes| {
+                hashes.len() == inventory.len()
+                    && inventory.iter().all(|(path, sha)| {
+                        hashes.get(path).and_then(Value::as_str) == Some(sha.as_str())
+                    })
+            })
             && paths(recorded_scope) == paths(&skill["runtimeFiles"])
             && audit["externalBindingStamp"] == binding_stamp(skill)
             && audit["manifestStamp"] == manifest_stamp(skill)
+            && !local::runtime_audit_needs_invalidation(skill, inventory)
         {
             return false;
         }
+    }
+    let before = skill.clone();
+    if let Some(inventory) = inventory {
+        local::invalidate_runtime_audit(skill, inventory);
     }
     if let Err(error) = apply_local_audit_with_inventory(skill, inventory) {
         if skill["runtimeConfirmationKind"] == "automatic" {
@@ -273,6 +282,18 @@ mod tests {
         record["catalogMetadata"] = json!({"runtime_files":["SKILL.md"]});
         let inventory = local::files(&root).unwrap();
         assert!(refresh_local_audit(&mut record, Some(&inventory)));
+        assert!(!refresh_local_audit(&mut record, Some(&inventory)));
+        let exact_inventory = record["runtimeAudit"]["inventoryHashes"].clone();
+        record["runtimeAudit"]["inventoryHashes"]["README.md"] = Value::Null;
+        assert!(refresh_local_audit(&mut record, Some(&inventory)));
+        assert_eq!(record["runtimeAudit"]["inventoryHashes"], exact_inventory);
+        // Imported evidence can disagree with itself even if its full inventory matches.
+        record["runtimeAudit"]["scopeHashes"]["SKILL.md"] = json!("stale");
+        assert!(refresh_local_audit(&mut record, Some(&inventory)));
+        assert_eq!(
+            record["runtimeAudit"]["scopeHashes"]["SKILL.md"],
+            inventory["SKILL.md"]
+        );
         assert!(!refresh_local_audit(&mut record, Some(&inventory)));
         let first = record["runtimeAudit"]["manifestStamp"].clone();
         record["catalogMetadata"]["runtime_files"] = json!(["README.md", "SKILL.md"]);

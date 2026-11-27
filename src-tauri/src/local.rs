@@ -1990,7 +1990,10 @@ pub fn runtime_audit_with_inventory(
 
 /// Refresh callers must invalidate old automatic evidence when its selected
 /// bytes or scope change. Manual choices are retained as choices, not proof.
-pub fn invalidate_runtime_audit(skill: &mut Value, current: &BTreeMap<String, String>) -> bool {
+pub(crate) fn runtime_audit_needs_invalidation(
+    skill: &Value,
+    current: &BTreeMap<String, String>,
+) -> bool {
     if skill["runtimeAudit"]["status"] != "passed" {
         return false;
     }
@@ -2006,12 +2009,16 @@ pub fn invalidate_runtime_audit(skill: &mut Value, current: &BTreeMap<String, St
         .flatten()
         .filter_map(|path| path.as_str())
         .collect();
-    let changed = skill["runtimeAudit"]["analyzerVersion"] != RUNTIME_ANALYZER_VERSION
+    skill["runtimeAudit"]["analyzerVersion"] != RUNTIME_ANALYZER_VERSION
         || scope != audited
         || scope.iter().any(|path| {
             current.get(*path).map(String::as_str)
                 != skill["runtimeAudit"]["scopeHashes"][*path].as_str()
-        });
+        })
+}
+
+pub fn invalidate_runtime_audit(skill: &mut Value, current: &BTreeMap<String, String>) -> bool {
+    let changed = runtime_audit_needs_invalidation(skill, current);
     if changed {
         skill["runtimeAudit"]["status"] = json!("needs_review");
         skill["runtimeAudit"]["canAutoConfirm"] = json!(false);

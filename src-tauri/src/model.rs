@@ -944,16 +944,17 @@ impl Manager {
         worker.management_redo = self.management_redo.clone();
         worker
     }
-    pub(crate) fn detached_for_local_document(
+    pub(crate) fn detached_for_document(
         &self,
         runtime: Arc<dyn ManagerRuntime>,
-        skill: Value,
+        request: &Value,
     ) -> Self {
+        let (skills, sources) = crate::remote::document_inputs(self, request);
         self.detached_with_state(
             runtime,
             State {
-                skills: vec![skill],
-                sources: Vec::new(),
+                skills,
+                sources,
                 connections: Vec::new(),
                 settings: Value::Null,
                 local_roots: Vec::new(),

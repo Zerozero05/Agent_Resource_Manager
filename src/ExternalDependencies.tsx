@@ -10,6 +10,7 @@ import { FileResourceRow } from './FileResourceRow';
 import { ExportResourceRow } from './ExportSelection';
 import { runtimeIssuesForReference } from './runtime-presentation';
 import { runtimeAttentionCount, type RuntimeIssue } from './runtime';
+import { revealNearest } from './appearance';
 
 export type ExternalRole = 'required' | 'optional' | 'environment' | 'history';
 export type ExternalSourceEvidence = { status: string; path?: string | null; repositoryPath?: string; repo?: string; commit?: string; hash?: string; checkedAt?: string; readable?: boolean; error?: string; matchKind?: string; candidateCount?: number; candidatesTruncated?: boolean };
@@ -83,7 +84,7 @@ export function ExternalDependencies({ items, selectedIds, onSelectionChange, on
       const row = rowRefs.current.get(mappingFocus); if (!row || row.closest('[hidden]')) { setMappingFocus(undefined); return; }
       for (let parent = row.parentElement; parent; parent = parent.parentElement) if (parent instanceof HTMLDetailsElement) parent.open = true;
       row.querySelector<HTMLElement>('.external-mapping input')?.focus({ preventScroll: true });
-      row.querySelector<HTMLElement>('.external-mapping')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      revealNearest(row.querySelector('.external-mapping'));
       setMappingFocus(undefined);
     });
     return () => cancelAnimationFrame(frame);
