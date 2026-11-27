@@ -1,4 +1,4 @@
-import { createContext, useContext, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingsSectionKey } from './settings-sections.ts';
 import { outlineId } from './workspace';
@@ -9,25 +9,27 @@ const SettingsContext = createContext<{ paneId: string; activeSection: SettingsS
 const panelId = (paneId: string, key: SettingsSectionKey) => `settings-${encodeURIComponent(paneId)}-${encodeURIComponent(key)}`;
 
 /** One functional group at a time, using the existing Home scroller. */
-export function SettingsLayout({ paneId, scopeRef, expanded, onExpandedChange, activeSection, onActiveSectionChange, children }: {
-  paneId: string; scopeRef: RefObject<HTMLElement | null>; expanded: boolean;
+export function SettingsLayout({ paneId, expanded, onExpandedChange, activeSection, onActiveSectionChange, children }: {
+  paneId: string; expanded: boolean;
   onExpandedChange: (expanded: boolean) => void; activeSection: SettingsSectionKey;
   onActiveSectionChange: (section: SettingsSectionKey) => void; children: ReactNode;
 }) {
   const current = SETTINGS_SECTIONS[activeSection];
   const [narrow, setNarrow] = useState(false);
   const shell = useRef<HTMLElement>(null), navigation = useRef<HTMLElement>(null), controls = useRef<HTMLElement>(null), toggle = useRef<HTMLButtonElement>(null);
+  const directory = useRef<HTMLDivElement>(null);
   const navigationId = useId(), scrollPositions = useRef(new Map<SettingsSectionKey, number>()), previousSection = useRef(activeSection);
 
   useLayoutEffect(() => {
     const root = shell.current, nav = navigation.current, header = controls.current;
-    const scroll = scopeRef.current?.querySelector<HTMLElement>('[data-pane-scroll]') || scopeRef.current;
+    const scroll = root?.closest<HTMLElement>('[data-pane-scroll]');
     if (!root || !nav || !header || !scroll) return;
     let frame = 0;
     const measure = () => {
       const padding = Number.parseFloat(getComputedStyle(scroll).paddingTop) || 0;
       root.style.setProperty('--settings-scroll-padding', `${padding}px`);
       root.style.setProperty('--settings-navigation-height', `${header.offsetHeight}px`);
+      root.style.setProperty('--settings-viewport-height', `${scroll.clientHeight}px`);
       root.dataset.navigationFits = String(nav.offsetHeight + header.offsetHeight + 16 <= scroll.clientHeight - padding * 2);
       if (root.clientWidth > 0) setNarrow(root.clientWidth < 720);
     };
@@ -37,36 +39,59 @@ export function SettingsLayout({ paneId, scopeRef, expanded, onExpandedChange, a
     appearance.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'data-theme'] });
     measure();
     return () => { cancelAnimationFrame(frame); resize.disconnect(); appearance.disconnect(); };
-  }, [scopeRef]);
+  }, []);
 
   useLayoutEffect(() => {
-    const scroll = scopeRef.current?.querySelector<HTMLElement>('[data-pane-scroll]') || scopeRef.current;
+    const scroll = shell.current?.closest<HTMLElement>('[data-pane-scroll]');
     if (!scroll) return;
     if (previousSection.current !== activeSection) scroll.scrollTop = scrollPositions.current.get(activeSection) || 0;
     previousSection.current = activeSection;
     const remember = () => scrollPositions.current.set(activeSection, scroll.scrollTop);
     scroll.addEventListener('scroll', remember, { passive: true });
     return () => scroll.removeEventListener('scroll', remember);
-  }, [scopeRef, activeSection]);
+  }, [activeSection]);
+
+  useEffect(() => {
+    if (!narrow || !expanded) return;
+    const dismissOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !directory.current?.contains(event.target)) onExpandedChange(false);
+    };
+    document.addEventListener('pointerdown', dismissOutside, true);
+    return () => document.removeEventListener('pointerdown', dismissOutside, true);
+  }, [narrow, expanded, onExpandedChange]);
+
+  function dismissDirectory() {
+    onExpandedChange(false);
+    toggle.current?.focus({ preventScroll: true });
+  }
 
   function activate(key: SettingsSectionKey) {
-    const scroll = scopeRef.current?.querySelector<HTMLElement>('[data-pane-scroll]') || scopeRef.current;
+    const scroll = shell.current?.closest<HTMLElement>('[data-pane-scroll]');
     if (scroll) scrollPositions.current.set(activeSection, scroll.scrollTop);
     onActiveSectionChange(key);
-    if (narrow) { onExpandedChange(false); toggle.current?.focus({ preventScroll: true }); }
+    if (narrow) dismissDirectory();
   }
 
   return <SettingsContext.Provider value={{ paneId, activeSection }}>
     <section ref={shell} className="settings-shell" data-narrow={narrow || undefined} data-expanded={expanded} aria-label="偏好设置">
-      <header ref={controls} className="settings-navigation-heading" data-pane-sticky><button ref={toggle} type="button" className="settings-navigation-toggle" aria-label={`设置分类：${current.title}`} title={expanded ? '收起设置分类' : '展开设置分类'} aria-expanded={expanded} aria-controls={navigationId} onClick={() => onExpandedChange(!expanded)}><span>{current.title}</span><ChevronDown size={15} aria-hidden="true" /></button></header>
-      <aside ref={navigation} className="settings-navigation" hidden={!expanded}>
-        <nav id={navigationId} className="settings-navigation-items" aria-label="设置分类" hidden={!expanded} inert={!expanded} onKeyDown={event => { if (event.key === 'Escape' && narrow && expanded) { event.preventDefault(); event.stopPropagation(); onExpandedChange(false); toggle.current?.focus(); } }}>
-          {SETTINGS_GROUPS.map(group => <div className="settings-navigation-group" role="group" aria-label={group.title} key={group.title}>
-            <span className="settings-navigation-group-title" aria-hidden="true">{group.title}</span>
-            {group.sections.map(key => <button type="button" key={key} aria-current={activeSection === key ? 'page' : undefined} aria-controls={panelId(paneId, key)} onClick={() => activate(key)}>{SETTINGS_SECTIONS[key].title}</button>)}
-          </div>)}
-        </nav>
-      </aside>
+      <div ref={directory} className="settings-directory" data-pane-sticky={narrow ? '' : undefined} onKeyDown={event => {
+        if (event.key !== 'Escape' || !narrow || !expanded) return;
+        event.preventDefault();
+        event.stopPropagation();
+        dismissDirectory();
+      }} onBlur={event => {
+        if (narrow && expanded && event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) onExpandedChange(false);
+      }}>
+        <header ref={controls} className="settings-navigation-heading" data-pane-sticky={narrow ? undefined : ''}><button ref={toggle} type="button" className="settings-navigation-toggle" aria-label={`设置分类：${current.title}`} title={expanded ? '收起设置分类' : '展开设置分类'} aria-expanded={expanded} aria-controls={navigationId} onClick={() => onExpandedChange(!expanded)}><span>{current.title}</span><ChevronDown size={15} aria-hidden="true" /></button></header>
+        <aside ref={navigation} className="settings-navigation" hidden={!expanded}>
+          <nav id={navigationId} className="settings-navigation-items" aria-label="设置分类" hidden={!expanded} inert={!expanded}>
+            {SETTINGS_GROUPS.map(group => <div className="settings-navigation-group" role="group" aria-label={group.title} key={group.title}>
+              <span className="settings-navigation-group-title" aria-hidden="true">{group.title}</span>
+              {group.sections.map(key => <button type="button" key={key} aria-current={activeSection === key ? 'page' : undefined} aria-controls={panelId(paneId, key)} onClick={() => activate(key)}>{SETTINGS_SECTIONS[key].title}</button>)}
+            </div>)}
+          </nav>
+        </aside>
+      </div>
       <div className="settings-content">{children}</div>
     </section>
   </SettingsContext.Provider>;

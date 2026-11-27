@@ -148,7 +148,7 @@
 
 @media (prefers-contrast: more), (forced-colors: active) {
   :root :is(.command-palette, .floating-menu, .shortcut-help),
-  .desktop-workspace :is(.workspace-help, .workspace-shortcut-help, .pane-outline-list[data-overlay=true], .check-error, .modal, .library-detail-drawer),
+  .desktop-workspace :is(.workspace-help, .workspace-shortcut-help, .pane-outline-list[data-overlay=true], .settings-shell[data-narrow=true] .settings-navigation, .check-error, .modal, .library-detail-drawer),
   .desktop-workspace .sidebar-flyout > .sidebar {
     box-shadow: none;
     border-color: var(--control-line);
@@ -162,7 +162,7 @@
     box-shadow: none;
   }
 
-  .desktop-workspace :is(.segmented button.selected, .unified-types button[aria-pressed=true]):not(:focus-visible) {
+  .desktop-workspace :is(.segmented button.selected, .unified-types button[aria-pressed=true], .settings-navigation-group > button[aria-current=page]):not(:focus-visible) {
     outline: 1px solid currentColor;
     outline-offset: -2px;
   }
@@ -174,7 +174,7 @@
     outline-offset: -2px;
   }
 
-  .desktop-workspace :is(.segmented button.selected, .unified-types button[aria-pressed=true]):not(:focus-visible) {
+  .desktop-workspace :is(.segmented button.selected, .unified-types button[aria-pressed=true], .settings-navigation-group > button[aria-current=page]):not(:focus-visible) {
     outline-color: Highlight;
   }
 }
@@ -187,7 +187,7 @@
 
 @media (prefers-contrast: no-preference) and (forced-colors: none) {
   :root[data-motion=light] :is(.floating-menu, .shortcut-help)[data-ready=true],
-  :root[data-motion=light] .desktop-workspace :is(.modal, .library-detail-drawer, .workspace-help, .pane-outline-list[data-overlay=true], .sidebar-flyout > .sidebar) {
+  :root[data-motion=light] .desktop-workspace :is(.modal, .library-detail-drawer, .workspace-help, .pane-outline-list[data-overlay=true], .settings-shell[data-narrow=true] .settings-navigation, .sidebar-flyout > .sidebar) {
     animation: arm-anchored-panel-enter var(--motion-duration) ease-out;
   }
 }

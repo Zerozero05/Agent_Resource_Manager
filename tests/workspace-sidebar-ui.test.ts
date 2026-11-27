@@ -1,7 +1,7 @@
 import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { act, createElement, useRef, useState } from 'react';
+import { act, createElement, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { JSDOM } from 'jsdom';
 import ts from 'typescript';
@@ -75,11 +75,12 @@ test('one real portal sidebar stays outside hidden Home and does not activate Ho
   assert.deepEqual(activations, []); assert.equal(host.querySelector('aside'), side); assert(side.textContent?.includes('保留侧栏状态 1')); assert.equal(host.querySelectorAll('.workspace-page:not([hidden])').length, 2); assert(renders < 8, 'stable host must not repeatedly register and rerender');
 });
 
-test('grouped settings keep legacy anchors, mount panels on demand and restore narrow navigation focus', async t => {
+test('settings restored on initial mount keep legacy anchors, drafts and narrow navigation focus', async t => {
   const { SettingsLayout, SettingsSection } = await loadTsx('../src/SettingsLayout.tsx');
   t.mock.method(dom.window.HTMLElement.prototype, 'clientWidth', function (this: HTMLElement) {
     return this.classList.contains('settings-shell') ? 620 : 0;
   }, { getter: true });
+  const bubbledKeys: string[] = [];
   const mocks = {
     ResizeObserver: class { observe() {} disconnect() {} },
     MutationObserver: dom.window.MutationObserver,
@@ -94,24 +95,33 @@ test('grouped settings keep legacy anchors, mount panels on demand and restore n
     }
   });
   function Harness() {
-    const scopeRef = useRef<HTMLDivElement>(null);
-    const [show, setShow] = useState(false), [expanded, setExpanded] = useState(true);
+    const [expanded, setExpanded] = useState(true);
     const [active, setActive] = useState<SettingsSectionKey>('general');
-    return createElement('div', { ref: scopeRef, 'data-pane-scroll': '' },
-      !show ? createElement('button', { onClick: () => setShow(true) }, '打开设置') :
-        createElement(SettingsLayout, { paneId: 'home', scopeRef, expanded, onExpandedChange: setExpanded, activeSection: active, onActiveSectionChange: setActive },
-          createElement(SettingsSection, { sectionKey: 'general' }, createElement('h2', null, '常规设置'), createElement('input')),
-          createElement(SettingsSection, { sectionKey: 'github' }, createElement('h2', null, 'GitHub 访问凭据'), createElement('h2', { 'data-outline-key': 'settings:github-sources', 'data-outline-label': '仓库来源' }, 'GitHub 来源')),
-        ));
+    return createElement('div', { 'data-pane-scroll': '', onKeyDown: (event: React.KeyboardEvent) => bubbledKeys.push(event.key) },
+      createElement(SettingsLayout, { paneId: 'home', expanded, onExpandedChange: setExpanded, activeSection: active, onActiveSectionChange: setActive },
+        createElement(SettingsSection, { sectionKey: 'general' }, createElement('h2', null, '常规设置'), createElement('input')),
+        createElement(SettingsSection, { sectionKey: 'github' }, createElement('h2', null, 'GitHub 访问凭据'), createElement('h2', { 'data-outline-key': 'settings:github-sources', 'data-outline-label': '仓库来源' }, 'GitHub 来源')),
+      ));
   }
   const view = createRoot(host); unmount = () => view.unmount();
   await act(async () => view.render(createElement(Harness)));
-  await click(host.querySelector('button')!);
   const nav = host.querySelector('nav[aria-label="设置分类"]')!;
   const toggle = host.querySelector<HTMLButtonElement>('.settings-navigation-toggle')!;
   const general = host.querySelector<HTMLElement>('#settings-home-general')!;
   const github = host.querySelector<HTMLElement>('#settings-home-github')!;
   const button = (title: string) => Array.from(nav.querySelectorAll('button')).find(node => node.textContent === title)!;
+  const scroll = host.querySelector<HTMLElement>('[data-pane-scroll]')!;
+  assert.equal(host.querySelector('[data-pane-sticky]')?.className, 'settings-directory');
+  scroll.scrollTop = 320;
+  toggle.focus();
+  const escape = new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+  await act(async () => { toggle.dispatchEvent(escape); });
+  assert.equal(escape.defaultPrevented, true);
+  assert.deepEqual(bubbledKeys, []);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(document.activeElement, toggle);
+  assert.equal(scroll.scrollTop, 320);
+  await click(toggle);
   assert.deepEqual(Array.from(nav.querySelectorAll('[role="group"]'), group => group.getAttribute('aria-label')), ['应用', '运行与连接', '数据与排查']);
   assert.equal(button('常规').getAttribute('aria-current'), 'page');
   assert.equal(github.querySelector('h2:not([data-settings-fallback])'), null);
@@ -131,4 +141,8 @@ test('grouped settings keep legacy anchors, mount panels on demand and restore n
   await click(button('常规'));
   assert.equal(general.querySelector('input'), draft);
   assert.equal(draft.value, '未保存路径');
+  assert.equal(scroll.scrollTop, 320);
+  await click(toggle);
+  await act(async () => { draft.dispatchEvent(new dom.window.MouseEvent('pointerdown', { bubbles: true })); });
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
 });

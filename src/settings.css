@@ -1,6 +1,7 @@
 .settings-shell{--settings-scroll-padding:0px;--settings-navigation-height:0px;--settings-control-radius:10px;--settings-panel-radius:14px;display:grid;grid-template-columns:10rem minmax(0,1fr);align-items:start;column-gap:36px;row-gap:16px;width:100%;max-width:1040px;margin:0 auto;min-width:0;position:relative}
 .settings-shell[data-expanded=false]{grid-template-columns:minmax(0,1fr)}
 .desktop-workspace .main[data-view=settings]>.page-header,.desktop-workspace .main[data-view=settings]>.settings-shell{width:100%;max-width:1040px;margin-inline-start:max(0px,calc((100% - 1040px - var(--workspace-sidebar-expansion,0px)) / 2));margin-inline-end:auto}
+.settings-directory{display:contents}
 .settings-navigation{position:sticky;top:calc(var(--settings-navigation-height) - var(--settings-scroll-padding) + 16px);min-width:0;padding:4px 0 16px;background:var(--page);z-index:3}
 .settings-shell[data-navigation-fits=false] .settings-navigation{position:static}
 .settings-navigation-heading{grid-column:1/-1;position:sticky;top:calc(-1 * var(--settings-scroll-padding));z-index:4;display:flex;align-items:center;gap:16px;min-width:0;padding:0 0 10px;background:var(--page);color:var(--text)}
@@ -97,7 +98,18 @@
 .settings-danger-zone>.button{justify-self:end;color:var(--red);border-color:var(--red)}
 .settings-content .settings-danger-zone>.form-actions{padding:0;border:0}
 .settings-shell[data-narrow=true]{grid-template-columns:minmax(0,1fr)}
-.settings-shell[data-narrow=true] .settings-navigation{position:static;padding:0 0 10px;border-bottom:1px solid var(--line)}
+.settings-shell[data-narrow=true] .settings-directory{
+  display:block;position:sticky;inset-block-start:calc(-1 * var(--settings-scroll-padding));z-index:4;min-width:0
+}
+.settings-shell[data-narrow=true] .settings-navigation-heading{position:static}
+.settings-shell[data-narrow=true] .settings-navigation{
+  position:absolute;inset-block-start:100%;inset-inline-start:0;
+  inline-size:min(33rem,100%);
+  max-block-size:min(28rem,max(0px,calc(var(--settings-viewport-height, 100dvh) - var(--settings-navigation-height) - 24px)));
+  margin:0;padding:10px;overflow:auto;overscroll-behavior:contain;
+  border:1px solid var(--control-line);border-radius:var(--settings-panel-radius);
+  background:var(--surface-raised);box-shadow:inset 0 1px var(--arm-control-edge),var(--arm-control-shadow);
+}
 .settings-shell[data-narrow=true] .settings-navigation-items{grid-template-columns:repeat(auto-fit,minmax(min(8.5rem,100%),1fr));gap:12px}
 .settings-shell[data-narrow=true] .settings-content{padding-top:0}
 @container settings-content (max-width:560px){

@@ -13,6 +13,7 @@
 - [可访问性](https://developer.apple.com/design/human-interface-guidelines/accessibility.md)：保留键盘、对比度和辅助设置。样式由项目自身实现，未复制苹果界面、素材、图标或 SDK。
 - 2026-11-25 补读 [WWDC26 iOS 27 材质更新](https://developer.apple.com/videos/play/wwdc2026/102/?time=1363)、[侧栏](https://developer.apple.com/design/human-interface-guidelines/sidebars.md)、[设置](https://developer.apple.com/design/human-interface-guidelines/settings.md)、[自适应布局](https://developer.apple.com/design/human-interface-guidelines/layout.md)及[反馈](https://developer.apple.com/design/human-interface-guidelines/feedback.md)。应用到操作菜单和快捷键浮层的实色边缘、菜单入场反馈与展开状态。Windows 版本保留鼠标、键盘和原有布局，以现有主题及辅助显示设置控制效果。
 - 2026-11-25 复核 Apple 正式版记录（27.2.1），在线阅读 [分段控件](https://developer.apple.com/design/human-interface-guidelines/segmented-controls.md)、[材质](https://developer.apple.com/design/human-interface-guidelines/materials.md)、[动效](https://developer.apple.com/design/human-interface-guidelines/motion.md)与 [Meet Liquid Glass](https://developer.apple.com/videos/play/wwdc2025/219/) 的相关章节。沿用同组选择的一致选中态、内容与操作层分离、短促可中断的反馈。在管理器原有导航、对话框和快捷键面板中以 CSS 实现，未采用 Apple 代码、素材或平台专属交互。
+- 2026-11-27 再次核对正式版 27.2.1，补读 [侧栏](https://developer.apple.com/design/human-interface-guidelines/sidebars?changes=_6_7)、[分栏](https://developer.apple.com/design/human-interface-guidelines/split-views)、[工具栏](https://developer.apple.com/design/human-interface-guidelines/toolbars?changes=_2) 和 [动效](https://developer.apple.com/design/human-interface-guidelines/motion?changes=l_9_3)。窄窗设置沿用固定入口、清楚的当前分类和短促淡入。项目原有主题、键盘操作及访问设置继续决定实际显示。
 
 <a id="desktop-design-refresh-20261124"></a>
 
