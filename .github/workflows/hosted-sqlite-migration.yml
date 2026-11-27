@@ -1,0 +1,500 @@
+name: Verify native SQLite migration and persisted settings
+on: create
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: verify-native-sqlite-migration-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  CANDIDATE_SOURCE: '2d98541c5300ee06671a276e0f71f66021a98f13'
+  CANDIDATE_BRANCH: 'codex/skill-document-presentation-20261125'
+  CANDIDATE_RUN_ID: '46007835197'
+  CANDIDATE_JOB_ID: '140535403108'
+  CANDIDATE_ARTIFACT_ID: '15202832544'
+  CANDIDATE_ARCHIVE_SHA256: '68f7be28aa305411bc125cbe933cc041ff2fce9cbc3f8579286505312d7c0479'
+  CANDIDATE_SHA256: 'a8dd20db4b8e2f7c7b9a88778af1d42cc60099d9c95ec02f0acb52f6c532f893'
+  CANDIDATE_BUILD_INFO_SHA256: '2f6b5e69e20c903382a15dbc3956757fad3ba9ca0545403c88f1cee32e6bbe54'
+  CANDIDATE_VERSION: '0.3.0-dev.1'
+  LEGACY_VERSION: '0.2.11'
+  LEGACY_SETUP_SHA256: 'd1a439fe476d05736c21bb6ee8c59e0ae0bbdaae54943106b5ec3a0b5dbf76aa'
+  LEGACY_EXE_SHA256: '1ca90747eca2ac3229762928d05036724229e910463c28be40925e9b2fb2092f'
+jobs:
+  migration:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-sqlite-settings-core-2d98541-20261127' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Require explicit candidate pins and an isolated interactive Windows runner
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne 'Zerozero05/Agent_Resource_Manager' -or
+              $env:CANDIDATE_SOURCE -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:CANDIDATE_BRANCH -cnotmatch '^codex/[A-Za-z0-9_/-]+$' -or
+              $env:CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or
+              $env:CANDIDATE_JOB_ID -cnotmatch '^[1-9][0-9]*$' -or
+              $env:CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or
+              $env:CANDIDATE_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:CANDIDATE_BUILD_INFO_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Pin the exact independently verified candidate before using the runner.'
+          }
+          if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
+              -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+              -not (Test-Path -LiteralPath 'D:\' -PathType Container)) {
+            throw 'An isolated GitHub-hosted interactive Windows session with a D drive is required.'
+          }
+          if (Get-Process -Name 'agent-resource-manager','skill-manager' -ErrorAction SilentlyContinue) {
+            throw 'Another manager is already running. Nothing will be closed or reused.'
+          }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.CANDIDATE_SOURCE }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify workflow and runner inputs, then extract two pinned executables
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $productCommit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $productCommit -cne $env:CANDIDATE_SOURCE) {
+            throw 'The checked-out migration scripts do not match the exact candidate commit.'
+          }
+          $changes = @(git diff --name-only $productCommit $env:GITHUB_SHA --)
+          if ($LASTEXITCODE -ne 0 -or $changes.Count -ne 1 -or $changes[0] -cne '.github/workflows/hosted-sqlite-migration.yml') {
+            throw 'The test branch must differ from the candidate by the migration workflow only.'
+          }
+
+          $artifactName = "Agent_Resource_Manager_v$($env:CANDIDATE_VERSION)_windows_x64_candidate_$productCommit"
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or
+              $run.head_sha -cne $productCommit -or $run.head_branch -cne $env:CANDIDATE_BRANCH -or
+              $run.run_attempt -ne 1 -or $run.path -cne '.github/workflows/check.yml' -or $run.event -cne 'push') {
+            throw 'The exact successful Windows candidate run is unavailable.'
+          }
+          $job = gh api "repos/$env:GITHUB_REPOSITORY/actions/jobs/$env:CANDIDATE_JOB_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $job.id -ne $env:CANDIDATE_JOB_ID -or $job.run_id -ne $run.id -or
+              $job.status -cne 'completed' -or $job.conclusion -cne 'success') { throw 'The exact Windows build job did not succeed.' }
+          $asset = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:CANDIDATE_ARTIFACT_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $asset.expired -ne $false -or $asset.name -cne $artifactName -or
+              $asset.workflow_run.id -ne $run.id -or $asset.digest -cne "sha256:$env:CANDIDATE_ARCHIVE_SHA256") {
+            throw 'The candidate artifact does not belong to the exact independently pinned build.'
+          }
+
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip/7z.exe'
+          if (-not (Test-Path -LiteralPath $sevenZip -PathType Leaf)) { throw 'The runner is missing its preinstalled 7-Zip.' }
+          $owned = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-sqlite-migration-bin') -ErrorAction Stop
+          $audit = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'arm-sqlite-migration-audit') -ErrorAction Stop
+          $archivePath = Join-Path $owned.FullName 'candidate.zip'
+          $candidate = Join-Path $owned.FullName 'agent-resource-manager.exe'
+          $buildInfoPath = Join-Path $owned.FullName 'BUILD_INFO.json'
+          $legacyName = "Skill_Manager_v$($env:LEGACY_VERSION)_windows_x64_setup.exe"
+          $legacySetup = Join-Path $owned.FullName $legacyName
+          try {
+            $headers = @{
+              Authorization = "Bearer $env:GH_TOKEN"
+              Accept = 'application/vnd.github+json'
+              'X-GitHub-Api-Version' = '2022-11-28'
+            }
+            Invoke-WebRequest -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:CANDIDATE_ARTIFACT_ID/zip" -Headers $headers -OutFile $archivePath
+            if ((Get-FileHash -LiteralPath $archivePath).Hash.ToLowerInvariant() -cne $env:CANDIDATE_ARCHIVE_SHA256) {
+              throw 'Downloaded candidate archive differs from the exact SHA256.'
+            }
+            gh release download "v$env:LEGACY_VERSION" --repo $env:GITHUB_REPOSITORY --pattern $legacyName --dir $owned.FullName
+            if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $legacySetup).Hash.ToLowerInvariant() -cne $env:LEGACY_SETUP_SHA256) {
+              throw 'The published legacy setup differs from the exact SHA256.'
+            }
+          } finally {
+            $headers = $null
+            $env:GH_TOKEN = $null
+          }
+          $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
+          try {
+            foreach ($path in @($candidate, $buildInfoPath)) {
+              $matches = @($archive.Entries | Where-Object { $_.FullName -ceq [IO.Path]::GetFileName($path) })
+              if ($matches.Count -ne 1) { throw "Expected exactly one root entry for $([IO.Path]::GetFileName($path))." }
+              [IO.Compression.ZipFileExtensions]::ExtractToFile($matches[0], $path, $false)
+            }
+          } finally { $archive.Dispose() }
+          $originalBuildInfoSha256 = (Get-FileHash -LiteralPath $buildInfoPath).Hash.ToLowerInvariant()
+          if ($originalBuildInfoSha256 -cne $env:CANDIDATE_BUILD_INFO_SHA256) { throw 'Original BUILD_INFO.json digest differs.' }
+          $buildInfo = Get-Content -LiteralPath $buildInfoPath -Raw | ConvertFrom-Json
+          if ((Get-FileHash -LiteralPath $candidate).Hash.ToLowerInvariant() -cne $env:CANDIDATE_SHA256 -or
+              $buildInfo.executableSha256 -cne $env:CANDIDATE_SHA256 -or $buildInfo.sourceCommit -cne $productCommit -or
+              $buildInfo.workflowRunId -ne $run.id -or $buildInfo.workflowRunAttempt -ne 1 -or
+              $buildInfo.repository -cne $env:GITHUB_REPOSITORY -or $buildInfo.version -cne $env:CANDIDATE_VERSION -or
+              (Get-Item -LiteralPath $candidate).VersionInfo.ProductVersion -cne $env:CANDIDATE_VERSION) {
+            throw 'The extracted candidate program and build metadata do not match the pinned run.'
+          }
+          $buildInfo | Add-Member -NotePropertyName sourceIdentity -NotePropertyValue $productCommit
+          $buildInfo | Add-Member -NotePropertyName buildMode -NotePropertyValue 'release'
+          $buildInfo | Add-Member -NotePropertyName originalBuildInfoSha256 -NotePropertyValue $originalBuildInfoSha256
+          $buildInfo | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $owned.FullName 'BUILD_INFO.native-validation.json') -Encoding utf8NoBOM
+
+          $legacyRoot = Join-Path $owned.FullName 'legacy'
+          & $sevenZip e $legacySetup '-ir!skill-manager.exe' "-o$legacyRoot" -aos
+          $legacy = Join-Path $legacyRoot 'skill-manager.exe'
+          if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $legacy).Hash.ToLowerInvariant() -cne $env:LEGACY_EXE_SHA256 -or
+              (Get-Item -LiteralPath $legacy).VersionInfo.ProductVersion -cne $env:LEGACY_VERSION) {
+            throw 'The extracted old program does not match the published baseline.'
+          }
+          [ordered]@{
+            candidateSource = $productCommit; candidateRun = $run.id; candidateArtifact = $asset.id
+            candidateArchiveSha256 = $env:CANDIDATE_ARCHIVE_SHA256; candidateExeSha256 = $env:CANDIDATE_SHA256
+            originalBuildInfoSha256 = $buildInfo.originalBuildInfoSha256
+            legacySetupSha256 = $env:LEGACY_SETUP_SHA256; legacyExeSha256 = $env:LEGACY_EXE_SHA256
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $audit.FullName 'provenance.json') -Encoding utf8NoBOM
+      - name: Exercise real old and new executables on a fresh synthetic database
+        run: |
+          $owned = Join-Path $env:RUNNER_TEMP 'arm-sqlite-migration-bin'
+          $audit = Join-Path $env:RUNNER_TEMP 'arm-sqlite-migration-audit'
+          $approved = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          $name = "hosted-sqlite-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $fixture = Join-Path $approved $name
+          if (Test-Path -LiteralPath $fixture) { throw 'The exact synthetic fixture directory already exists.' }
+          [IO.Directory]::CreateDirectory($approved) | Out-Null
+          $data = Join-Path $fixture 'data'
+          $legacy = Join-Path $owned 'legacy/skill-manager.exe'
+          $candidate = Join-Path $owned 'agent-resource-manager.exe'
+          $buildInfo = Join-Path $owned 'BUILD_INFO.native-validation.json'
+          $receipt = [ordered]@{
+            status = 'failed'; syntheticOnly = $true; stages = @()
+            scope = 'Synthetic old schema and native upgrade on a separate Windows runner. No installer execution or production data.'
+          }
+          function Invoke-MigrationPhase([string]$Phase, [string[]]$Options) {
+            Write-Output "Running migration phase $Phase"
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            & node ./scripts/verify-native-migration.mjs --phase $Phase --variant recovery-downgrade @Options
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) {
+              $driverPath = Join-Path $fixture "$Phase-driver.json"
+              if (Test-Path -LiteralPath $driverPath -PathType Leaf) {
+                $driver = Get-Content -LiteralPath $driverPath -Raw | ConvertFrom-Json
+                [ordered]@{ phase = $Phase; status = $driver.status; type = $driver.errorType; code = $driver.errorCode; operation = $driver.lastOperation; closedNormally = $driver.closedNormally } | ConvertTo-Json -Compress | Write-Output
+              }
+              throw "Native SQLite migration phase $Phase exited $exitCode after $($timer.ElapsedMilliseconds) ms."
+            }
+          }
+
+          $phase = 'prepare'
+          try {
+            $cimTimer = [Diagnostics.Stopwatch]::StartNew()
+            $existing = @(Get-CimInstance Win32_Process -Filter "Name='agent-resource-manager.exe' OR Name='skill-manager.exe'" -Property ProcessId -OperationTimeoutSec 20 -ErrorAction Stop)
+            if ($existing.Count -ne 0) { throw 'An existing manager process was detected before the migration fixture was created.' }
+            Write-Output "Empty CIM manager inventory checked in $($cimTimer.ElapsedMilliseconds) ms. Each native launch will run its own ownership guard."
+            Invoke-MigrationPhase $phase @('--name', $name)
+            $receipt.stages += $phase
+            $fixtureOption = @('--fixture', $fixture)
+            $legacyOptions = $fixtureOption + @('--legacy', $legacy)
+            $candidateOptions = $fixtureOption + @('--candidate', $candidate, '--candidate-build-info', $buildInfo)
+            foreach ($item in @(
+                @{ phase = 'initialize'; options = $legacyOptions; sha = $env:LEGACY_EXE_SHA256 },
+                @{ phase = 'seed'; options = $fixtureOption },
+                @{ phase = 'legacy'; options = $legacyOptions; sha = $env:LEGACY_EXE_SHA256 },
+                @{ phase = 'candidate'; options = $candidateOptions; sha = $env:CANDIDATE_SHA256 })) {
+              $phase = $item.phase
+              Invoke-MigrationPhase $phase $item.options
+              if ($item.sha) {
+                $nativeReceipt = Get-Content -LiteralPath (Join-Path $fixture "$phase-driver.json") -Raw | ConvertFrom-Json
+                if ($nativeReceipt.closedNormally -ne $true -or $nativeReceipt.dataDirectory -ine $data -or
+                    $nativeReceipt.executableSha256 -cne $item.sha) {
+                  throw "Native process identity or normal exit is missing at $phase."
+                }
+              }
+              $receipt.stages += $phase
+            }
+            $phase = 'check-comparisons'
+            $migration = Get-Content -LiteralPath (Join-Path $fixture 'native-migration-comparison.json') -Raw | ConvertFrom-Json
+            if ($migration.passed -ne $true -or $migration.syntheticOnly -ne $true -or
+                $migration.oldExecutableSha256 -cne $env:LEGACY_EXE_SHA256 -or
+                $migration.candidateExecutableSha256 -cne $env:CANDIDATE_SHA256 -or
+                $migration.candidateSourceIdentity -cne $env:CANDIDATE_SOURCE -or
+                $migration.candidateNativeNormalExit -ne $true) {
+              throw 'The native SQLite comparison does not prove migration for the exact candidate.'
+            }
+            $receipt.status = 'passed'
+          } finally {
+            $receipt.lastPhase = $phase
+            $receipt.reports = @(foreach ($name in @(
+                'initialize-driver.json', 'legacy-seed-provenance.json', 'legacy-driver.json',
+                'candidate-driver.json', 'native-migration-comparison.json')) {
+              $path = Join-Path $fixture $name
+              if (Test-Path -LiteralPath $path -PathType Leaf) {
+                $details = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+                [ordered]@{
+                  name = $name; passed = $details.passed; status = $details.status; closedNormally = $details.closedNormally
+                  differentFields = @($details.differences | Where-Object field | ForEach-Object { $_.field })
+                  sha256 = (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant()
+                }
+              }
+            })
+            $receipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $audit 'migration-summary.json') -Encoding utf8NoBOM
+          }
+      - name: Drive settings Save and same-candidate reopening on the migrated database
+        run: |
+          $owned = Join-Path $env:RUNNER_TEMP 'arm-sqlite-migration-bin'
+          $audit = Join-Path $env:RUNNER_TEMP 'arm-sqlite-migration-audit'
+          $approved = 'D:\03_github_projects\Agent_Management\Agent_Resource_Manager\validation\manager-data'
+          $env:ARM_ROUNDTRIP_FIXTURE = Join-Path $approved "hosted-sqlite-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $env:ARM_ROUNDTRIP_EXE = Join-Path $owned 'agent-resource-manager.exe'
+          $env:ARM_ROUNDTRIP_AUDIT = $audit
+          $OutputEncoding = [Text.UTF8Encoding]::new($false)
+          @'
+          import assert from 'node:assert/strict';
+          import { execFile } from 'node:child_process';
+          import { createHash } from 'node:crypto';
+          import { readFile, realpath, writeFile } from 'node:fs/promises';
+          import { join } from 'node:path';
+          import { DatabaseSync } from 'node:sqlite';
+          import { isDeepStrictEqual, promisify } from 'node:util';
+          import { setTimeout as wait } from 'node:timers/promises';
+          import { NativeUiaSession } from './scripts/native-uia-client.mjs';
+          import { compareMigrationState, readMigrationState } from './scripts/migration-fixture.mjs';
+
+          const root = process.env.ARM_ROUNDTRIP_FIXTURE;
+          const executable = process.env.ARM_ROUNDTRIP_EXE;
+          const dataDir = join(root, 'data');
+          const dbPath = join(dataDir, 'manager.sqlite3');
+          const sha256 = process.env.CANDIDATE_SHA256;
+          const source = process.env.CANDIDATE_SOURCE;
+          const auditDir = process.env.ARM_ROUNDTRIP_AUDIT;
+          const receipt = { status: 'failed', syntheticOnly: true, candidateSourceIdentity: source, candidateExecutableSha256: sha256 };
+          const samePath = (a, b) => a.toLowerCase() === b.toLowerCase();
+          const readJson = async path => JSON.parse(await readFile(path, 'utf8'));
+          const digest = async path => createHash('sha256').update(await readFile(path)).digest('hex');
+          const list = value => value == null ? [] : Array.isArray(value) ? value : [value];
+          const visible = item => item.enabled && !item.offscreen;
+          const changedKeys = (before, after) => [...new Set([...Object.keys(before), ...Object.keys(after)])]
+            .filter(key => !isDeepStrictEqual(before[key], after[key])).sort();
+          function editorValue(value, expected) {
+            if (value === expected) return 'matches';
+            if (value === '') return 'blank';
+            return typeof value === 'string' ? 'different' : 'unavailable';
+          }
+
+          async function observe(label, fn) {
+            const deadline = Date.now() + 20000;
+            do {
+              const result = await fn(Math.max(1, deadline - Date.now()));
+              if (result) return result;
+              await wait(100);
+            } while (Date.now() < deadline);
+            throw new Error('Native observation did not finish: ' + label);
+          }
+
+          async function settingsField(app) {
+            await app.call('invokeName', { name: '设置', scope: '主要导航' });
+            const field = await observe('external editor field', async remaining => {
+              const fields = list(await app.call('fields', {}, remaining))
+                .filter(item => visible(item) && item.type === 'ControlType.Edit' && item.name?.startsWith('外部编辑器'));
+              assert.ok(fields.length <= 1, 'The editor field is ambiguous.');
+              return fields[0];
+            });
+            await observe('persisted Settings navigation', () => storedHomeView() === 'settings');
+            return field;
+          }
+
+          function storedHomeView() {
+            const db = new DatabaseSync(dbPath, { readOnly: true, timeout: 200 });
+            try {
+              const row = db.prepare('SELECT payload FROM workspace_state WHERE id=1').get();
+              return row && JSON.parse(row.payload).windows.find(window => window.label === 'main')?.panes.find(pane => pane.id === 'home')?.state.view;
+            } catch (error) {
+              if (error.errcode !== 5 && error.errcode !== 6) throw error;
+              return undefined;
+            } finally { db.close(); }
+          }
+
+          function readPersistedData() {
+            const db = new DatabaseSync(dbPath, { readOnly: true });
+            try {
+              assert.deepEqual(db.prepare('PRAGMA quick_check').all().map(row => Object.values(row)[0]), ['ok']);
+              const { stateRevision, ...appState } = JSON.parse(db.prepare('SELECT payload FROM app_state WHERE id=1').get().payload);
+              const tasks = db.prepare('SELECT id, payload FROM task_history ORDER BY id').all()
+                .map(row => ({ id: row.id, payload: JSON.parse(row.payload) }));
+              return { appState, stateRevision: stateRevision ?? 0, tasks };
+            } finally { db.close(); }
+          }
+
+          function stableTask({ id, payload: { result, cancellable, resultAvailable, resultExpired, ...payload } }) {
+            return { id, payload };
+          }
+
+          async function restoreLibrary(app) {
+            await app.call('invokeName', { name: 'Skills', scope: '主要导航' });
+            await observe('library before normal quit', async remaining =>
+              list(await app.call('state', { name: '搜索 Skill' }, remaining)).some(item => visible(item) && item.type === 'ControlType.Edit'));
+            await observe('persisted Skills navigation before quit', () => storedHomeView() === 'skills');
+          }
+
+          // The generic state observer does not report values. Reuse the
+          // read-only UIA pattern from the settings diagnostic preview,
+          // restricted to the one reported editor field and owned window.
+          async function readEditorField(app, name) {
+            const { pid, creationFileTime, windowHandle } = app.identity;
+            const identity = Buffer.from(JSON.stringify({ pid, creationFileTime, windowHandle, name })).toString('base64');
+            const command = [
+              "$ErrorActionPreference='Stop'",
+              "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)",
+              'Add-Type -AssemblyName UIAutomationClient',
+              'Add-Type -AssemblyName UIAutomationTypes',
+              "$target=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + identity + "'))|ConvertFrom-Json",
+              '$process=Get-Process -Id $target.pid',
+              "if($process.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() -cne $target.creationFileTime){throw 'Owned process identity changed.'}",
+              '$window=[Windows.Automation.AutomationElement]::FromHandle([IntPtr]([long]$target.windowHandle))',
+              "if($window.Current.ProcessId -ne $target.pid){throw 'Owned window identity changed.'}",
+              '$filters=[Windows.Automation.Condition[]]@([Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,[string]$target.name),[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Edit),[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::IsOffscreenProperty,$false))',
+              '$match=$window.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.AndCondition]::new($filters))',
+              "if($match.Count -ne 1){throw 'Expected one visible owned editor field.'}",
+              '$value=$match[0].GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value',
+              '[pscustomobject]@{value=$value;noInput=$true}|ConvertTo-Json -Compress',
+            ].join('\n');
+            const { stdout } = await promisify(execFile)('pwsh.exe', [
+              '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64'),
+            ], { windowsHide: true, timeout: 20000, maxBuffer: 64 * 1024,
+              env: { ...process.env, TEMP: join(root, 'driver-temp'), TMP: join(root, 'driver-temp') },
+            });
+            const result = JSON.parse(stdout);
+            assert.equal(result.noInput, true);
+            return result.value;
+          }
+
+          async function runCandidate(phase, body) {
+            const reportPath = join(root, 'candidate-settings-' + phase + '-driver.json');
+            let app;
+            try {
+              app = await NativeUiaSession.launch({ executable, dataDir, reportPath, sha256, accessibilityInput: true });
+            } catch (error) {
+              const report = await readJson(reportPath).catch(() => null);
+              if (report) receipt[phase] = { status: report.status, type: report.errorType, code: report.errorCode, operation: report.lastOperation, closedNormally: report.closedNormally };
+              throw error;
+            }
+            const { pid, creationFileTime } = app.identity;
+            receipt[phase] = { pid, creationFileTime };
+            try {
+              assert.equal(app.identity.executableSha256, sha256);
+              assert.ok(samePath(app.identity.dataDirectory, dataDir));
+              await body(app);
+            } finally {
+              const { driverReport } = await app.quit();
+              assert.ok(samePath(driverReport.dataDirectory, dataDir));
+              assert.equal(driverReport.executableSha256, sha256);
+              assert.equal(driverReport.productVersion, process.env.CANDIDATE_VERSION);
+              assert.equal(driverReport.closedNormally, true);
+              Object.assign(receipt[phase], { closedNormally: true, reportSha256: await digest(reportPath) });
+            }
+          }
+
+          try {
+            const priorSummary = join(auditDir, 'migration-summary.json');
+            assert.equal((await readJson(priorSummary)).status, 'passed');
+            assert.equal(await digest(executable), sha256);
+            const migrationPath = join(root, 'native-migration-comparison.json');
+            const migration = await readJson(migrationPath);
+            assert.equal(migration.passed, true);
+            assert.equal(migration.candidateExecutableSha256, sha256);
+            assert.equal(migration.candidateSourceIdentity, source);
+            assert.equal(migration.candidateNativeNormalExit, true);
+            receipt.migrationSummarySha256 = await digest(priorSummary);
+            receipt.migrationReportSha256 = await digest(migrationPath);
+            for (const path of [root, dataDir, dbPath]) assert.ok(samePath(await realpath(path), path), 'Unexpected fixture redirection.');
+            const baseline = await readMigrationState(root);
+            assert.deepEqual(baseline, migration.state);
+            const persisted = readPersistedData();
+            assert.equal(baseline.settings.editorPath, '');
+            assert.equal(baseline.ignoredLocalPaths.length, 1);
+            const originals = [...baseline.originalFiles];
+            const ignoredPath = join(baseline.ignoredLocalPaths[0], 'SKILL.md');
+            originals.push({ path: ignoredPath, sha256: await digest(ignoredPath) });
+            const editorPath = join(root, 'synthetic-editor-setting.exe');
+            const expected = { ...baseline, settings: { ...baseline.settings, editorPath } };
+            const expectedAppState = { ...persisted.appState, settings: { ...persisted.appState.settings, editorPath } };
+            const priorTaskIds = new Set(persisted.tasks.map(task => task.id));
+            const verifyDb = async () => {
+              const actual = await readMigrationState(root);
+              const compared = compareMigrationState(expected, actual);
+              const state = readPersistedData();
+              let originalFilesMatch = true;
+              for (const original of originals) {
+                assert.ok(samePath(await realpath(original.path), original.path), 'Unexpected fixture file redirection.');
+                if (await digest(original.path) !== original.sha256) originalFilesMatch = false;
+              }
+              const saves = state.tasks.filter(row => row.payload.action === 'set_settings' && !priorTaskIds.has(row.id));
+              const projectionChanges = changedKeys(expected, actual);
+              const appStateChanges = changedKeys(expectedAppState, state.appState);
+              const settingChanges = changedKeys(expectedAppState.settings, state.appState.settings);
+              const revisionKept = Number.isSafeInteger(state.stateRevision) && state.stateRevision >= persisted.stateRevision;
+              const libraryViewSaved = storedHomeView() === 'skills';
+              const durableSave = isDeepStrictEqual(saves.map(row => [row.id, row.payload.status]), [[receipt.saveTaskId, 'succeeded']]);
+              const originalTasksMatch = isDeepStrictEqual(state.tasks.filter(row => priorTaskIds.has(row.id)).map(stableTask), persisted.tasks.map(stableTask));
+              const strictChanges = compared.differences.map(item => item.field);
+              return {
+                passed: projectionChanges.length === 0 && appStateChanges.length === 0 && revisionKept && libraryViewSaved && durableSave && originalFilesMatch && originalTasksMatch,
+                migratedFields: compared.verifiedFields, strictChanges, orderingOnly: strictChanges.filter(field => !projectionChanges.includes(field)),
+                projectionChanges, appStateChanges, settingChanges, editorValue: editorValue(state.appState.settings.editorPath, editorPath),
+                revisionKept, libraryViewSaved, durableSave, originalFilesMatch, originalTasksMatch,
+                originalTaskRows: persisted.tasks.length, sqliteQuickCheck: 'ok',
+              };
+            };
+
+            await runCandidate('save', async app => {
+              const { name } = await settingsField(app);
+              assert.equal((await app.call('setField', { name, value: editorPath })).value, editorPath);
+              const prior = new Set((await app.call('tasks')).tasks.map(task => task.id));
+              await app.call('invokeName', { name: '保存设置' });
+              await observe('settings success feedback', async remaining =>
+                list(await app.call('state', { name: '设置已保存。' }, remaining)).some(item => !item.offscreen));
+              receipt.visibleSuccess = true;
+              receipt.saveTaskId = await observe('single succeeded settings task', async remaining => {
+                const tasks = (await app.call('tasks', {}, remaining)).tasks.filter(task => task.action === 'set_settings' && !prior.has(task.id));
+                assert.ok(tasks.length <= 1, 'Save must create at most one new settings task.');
+                if (tasks[0]?.status === 'succeeded') return tasks[0].id;
+                assert.ok(!tasks.length || ['queued', 'running'].includes(tasks[0].status), 'The settings task did not succeed.');
+              });
+              const { task } = await app.call('task', { taskId: receipt.saveTaskId });
+              assert.equal(task.status, 'succeeded');
+              receipt.saveTaskEditorValue = editorValue(task.result?.settings?.editorPath ?? task.result?.stateSnapshot?.settings?.editorPath, editorPath);
+              await restoreLibrary(app);
+            });
+            receipt.verifiedAfterSave = await verifyDb();
+
+            await runCandidate('reopen', async app => {
+              assert.notDeepEqual([app.identity.pid, app.identity.creationFileTime], [receipt.save.pid, receipt.save.creationFileTime]);
+              const { name } = await settingsField(app);
+              receipt.reopenedEditorValue = editorValue(await readEditorField(app, name), editorPath);
+              await restoreLibrary(app);
+            });
+            receipt.verifiedAfterReopen = await verifyDb();
+            receipt.originalFixtureFilesVerified = originals.length;
+            assert.ok(
+              receipt.verifiedAfterSave.passed && receipt.verifiedAfterReopen.passed
+                && receipt.reopenedEditorValue === 'matches'
+                && ['matches', 'unavailable'].includes(receipt.saveTaskEditorValue),
+              'Save or reopen observations differ from the migrated fixture. See the synthetic key-level receipt.',
+            );
+            receipt.status = 'passed';
+          } catch (error) {
+            receipt.error = String(error);
+            throw error;
+          } finally {
+            await writeFile(join(auditDir, 'settings-roundtrip-summary.json'), JSON.stringify(receipt, null, 2), { flag: 'wx' });
+            console.log(JSON.stringify({ ...receipt, error: undefined }));
+          }
+          '@ | node --input-type=module -
+          if ($LASTEXITCODE -ne 0) { throw 'The native migrated settings round trip failed.' }
+      - name: Upload only synthetic audit summaries
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        with:
+          name: Agent_Resource_Manager_sqlite_migration_${{ github.run_id }}_${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/arm-sqlite-migration-audit/provenance.json
+            ${{ runner.temp }}/arm-sqlite-migration-audit/migration-summary.json
+            ${{ runner.temp }}/arm-sqlite-migration-audit/settings-roundtrip-summary.json
+          if-no-files-found: warn
+          retention-days: 14
