@@ -60,12 +60,13 @@ public sealed class HostedMotionNotifications : IDisposable {
     private IntPtr hwnd;
     private Exception error;
 
-    private static void RequireHosted() {
+    private static void RequireHosted(bool observationOnly = false) {
         if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
             Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") != "github-hosted" ||
             Environment.GetEnvironmentVariable("RUNNER_OS") != "Windows" ||
             Environment.GetEnvironmentVariable("ImageOS") != "win25-vs2026" ||
-            Environment.GetEnvironmentVariable("ImageVersion") != "20261116.315.1" ||
+            (Environment.GetEnvironmentVariable("ImageVersion") != "20261116.315.1" &&
+             !(observationOnly && Environment.GetEnvironmentVariable("ImageVersion") == "20261123.321.1")) ||
             !Environment.UserInteractive || Process.GetCurrentProcess().SessionId == 0)
             throw new InvalidOperationException("Require the approved interactive GitHub-hosted Windows image.");
     }
@@ -114,7 +115,7 @@ public sealed class HostedMotionNotifications : IDisposable {
     }
 
     public static bool AnimationsEnabled() {
-        RequireHosted();
+        RequireHosted(observationOnly: true);
         if (!GetSetting(0x1042, 0, out int value, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
         return value != 0;
     }

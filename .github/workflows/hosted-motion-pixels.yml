@@ -11,7 +11,7 @@ env:
   CANDIDATE_SHA256: 'b95ad24619e1d00e8d100777739afd70323fb827e272b31ef549124bd0063e97'
 jobs:
   motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-early-release-20261128' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-early-release-probe-20261128' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:
