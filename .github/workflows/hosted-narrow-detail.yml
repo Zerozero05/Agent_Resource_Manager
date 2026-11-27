@@ -4,17 +4,17 @@ permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '45459930763'
+  CANDIDATE_RUN_ID: '46070315655'
   CANDIDATE_BRANCH: 'codex/skill-document-presentation-20261125'
-  CANDIDATE_SOURCE: 'c81fda47073b92938a45da1bfd5afd8b6e8fa4ce'
-  CANDIDATE_ARTIFACT: 'Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_c81fda47073b92938a45da1bfd5afd8b6e8fa4ce'
-  CANDIDATE_ARTIFACT_ID: '14954871336'
-  CANDIDATE_SHA256: '1b882dd3021cfc8075e3ede312e17c545223ced4498e80692ca706b8b2f872c7'
-  CANDIDATE_ARCHIVE_SHA256: 'cabe04552e9d1f1aeb13c438713d4c30e01a74feda484b9fba7bd91cbbb96d62'
-  CANDIDATE_BUILD_INFO_SHA256: 'b95b7bce39d11803fd2b6c0a1ae273e485b2eba4a0d243aac735113455ecf3dd'
+  CANDIDATE_SOURCE: '9f2158912349197f12f117407fc49aae29d5d7e5'
+  CANDIDATE_ARTIFACT: 'Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_9f2158912349197f12f117407fc49aae29d5d7e5'
+  CANDIDATE_ARTIFACT_ID: '15234197948'
+  CANDIDATE_SHA256: '2daf4e3fc0eff8aff012d809442cdd31b4acea947e0815f4db23dfe5b7658294'
+  CANDIDATE_ARCHIVE_SHA256: '563dc18432042be0abf5bed822d76ea21753581486540e7397add641130d999d'
+  CANDIDATE_BUILD_INFO_SHA256: 'e0b44cbec4b5fa8253c687a8701de8d0859cb22fce0c60f648e85035a760fa18'
 jobs:
   compact:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-narrow-detail-c81fda4-20261125' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-narrow-detail-9f21589-20261128' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 12
     defaults:
