@@ -17,6 +17,33 @@ use std::{
 };
 
 const HISTORY_LIMIT: usize = 100;
+const LARGE_TASK_RESULT_BYTES: usize = 64 * 1024;
+
+#[cfg(windows)]
+fn optimize_process_heap() -> bool {
+    use windows_sys::Win32::System::{
+        Memory::{GetProcessHeap, HeapOptimizeResources, HeapSetInformation},
+        SystemServices::{
+            HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION, HEAP_OPTIMIZE_RESOURCES_INFORMATION,
+        },
+    };
+    let info = HEAP_OPTIMIZE_RESOURCES_INFORMATION {
+        Version: HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION,
+        Flags: 0,
+    };
+    // A null handle would select all heaps. Only touch this process's default heap.
+    unsafe {
+        let heap = GetProcessHeap();
+        !heap.is_null()
+            && HeapSetInformation(
+                heap,
+                HeapOptimizeResources,
+                (&raw const info).cast(),
+                std::mem::size_of_val(&info),
+            ) != 0
+    }
+}
+
 const CANCELLED: &str = "任务已取消";
 type Dispatch = fn(&mut Manager, &Value) -> Result<Value, String>;
 type EventSink = Arc<dyn Fn(Value) + Send + Sync>;
@@ -33,7 +60,7 @@ struct TaskResult {
 impl TaskResult {
     fn new(value: &Value) -> Self {
         let bytes = serde_json::to_vec(value).expect("serializable task result");
-        if bytes.len() >= 64 * 1024 {
+        if bytes.len() >= LARGE_TASK_RESULT_BYTES {
             let mut encoder =
                 flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
             if encoder.write_all(&bytes).is_ok() {
@@ -393,6 +420,8 @@ pub(crate) struct TaskSystem {
     wake: Condvar,
     events: Mutex<Option<EventSink>>,
     closing: AtomicBool,
+    #[cfg(windows)]
+    heap_release_pending: AtomicBool,
     resource_automation_running: AtomicBool,
     history_lock: Mutex<CommittedHistory>,
     #[cfg(test)]
@@ -449,6 +478,8 @@ impl TaskSystem {
             wake: Condvar::new(),
             events: Mutex::new(None),
             closing: AtomicBool::new(false),
+            #[cfg(windows)]
+            heap_release_pending: AtomicBool::new(false),
             resource_automation_running: AtomicBool::new(false),
             history_lock: Mutex::new(CommittedHistory::default()),
             #[cfg(test)]
@@ -654,7 +685,20 @@ impl TaskSystem {
             .manager
             .lock()
             .map_err(|_| "Manager state lock failed")?;
-        crate::resource_runtime::release_idle(&manager)
+        let result = crate::resource_runtime::release_idle(&manager)?;
+        drop(manager);
+        #[cfg(windows)]
+        if result["paused"] == false
+            && self.heap_release_pending.load(Ordering::Acquire)
+            && self
+                .jobs
+                .try_lock()
+                .is_ok_and(|jobs| jobs.values().all(|job| job.task.terminal()))
+            && self.heap_release_pending.swap(false, Ordering::AcqRel)
+        {
+            optimize_process_heap();
+        }
+        Ok(result)
     }
 
     /// Read scheduler policy every tick; only active skill watches need path data.
@@ -1305,6 +1349,8 @@ impl TaskSystem {
     }
 
     fn finish(&self, id: &str, outcome: Result<Value, String>, request: &Value, cancelled: bool) {
+        #[cfg(windows)]
+        let mut schedule_heap_release = false;
         // Encode outside the registry lock so status reads never wait for it.
         let stored = outcome
             .as_ref()
@@ -1436,6 +1482,15 @@ impl TaskSystem {
                     job.task.progress = result_progress(value);
                     if job.task.action == "check_now" {
                         job.completion_stamp = CheckCompletionStamp::from_result(value);
+                        #[cfg(windows)]
+                        {
+                            schedule_heap_release = !cancelled
+                                && job.task.status == "succeeded"
+                                && stored.as_ref().is_ok_and(|result| {
+                                    result.compressed
+                                        || result.bytes.len() >= LARGE_TASK_RESULT_BYTES
+                                });
+                        }
                     }
                 }
                 Err(error) => {
@@ -1460,6 +1515,7 @@ impl TaskSystem {
             }
             job.completion.clone()
         };
+        drop(outcome);
         if let Err(error) = self.persist_visible(id) {
             self.change(id, |task| {
                 task.error = Some(format!("操作结果已保留在当前会话；历史保存失败：{error}"));
@@ -1467,6 +1523,10 @@ impl TaskSystem {
         }
         self.emit(id);
         self.prune();
+        #[cfg(windows)]
+        if schedule_heap_release {
+            self.heap_release_pending.store(true, Ordering::Release);
+        }
         *completion.0.lock().expect("task completion lock") = Some(stored);
         completion.1.notify_all();
     }
@@ -3802,6 +3862,101 @@ fn result_progress(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn large_check_heap_release_coalesces_until_maintenance_is_idle() {
+        let (_directory, service) = fixture();
+        let pending = || service.heap_release_pending.load(Ordering::Acquire);
+        let finish = |id: &str, request: Value, result: Result<Value, String>, cancelled: bool| {
+            let job = retention_job(
+                id,
+                request["action"].as_str().unwrap(),
+                Arc::new(TaskResult::new(&Value::Null)),
+                vec!["skill:one".into()],
+            );
+            service.jobs.lock().unwrap().insert(id.into(), job);
+            service.finish(id, result, &request, cancelled);
+        };
+        let check = json!({"action":"check_now"});
+        let success =
+            json!({"checkSummary":{"errors":0},"unchanged":"x".repeat(LARGE_TASK_RESULT_BYTES)});
+        service.release_idle_resources().unwrap();
+        assert!(!pending());
+        finish(
+            "small",
+            check.clone(),
+            Ok(json!("x".repeat(LARGE_TASK_RESULT_BYTES - 3))),
+            false,
+        );
+        finish(
+            "other",
+            json!({"action":"audit_skills"}),
+            Ok(success.clone()),
+            false,
+        );
+        finish("failed", check.clone(), Err("test failure".into()), false);
+        finish("cancelled", check.clone(), Err(CANCELLED.into()), true);
+        let mut partial_result = success.clone();
+        partial_result["failed"] = json!(1);
+        finish("partial", check.clone(), Ok(partial_result), false);
+        assert!(!pending());
+        finish(
+            "directory",
+            json!({"action":"check_now","rootIds":["one"]}),
+            Ok(success.clone()),
+            false,
+        );
+        assert!(pending());
+        assert_eq!(service.get("directory", true).unwrap()["result"], success);
+        finish(
+            "directory-again",
+            json!({"action":"check_now","rootIds":["one"]}),
+            Ok(success.clone()),
+            false,
+        );
+        service.release_idle_resources().unwrap();
+        assert!(!pending());
+        {
+            let mut manager = service.manager.lock().unwrap();
+            manager.state.skills[0]["description"] = success["unchanged"].clone();
+            manager.save().unwrap();
+        }
+        let selected = service.execute(json!({"action":"check_now","skillId":"one","localOnly":true,"skipLocalDiscovery":true}), crate::dispatch_local).unwrap();
+        assert_eq!(selected["skills"][0]["description"], success["unchanged"]);
+        assert!(pending());
+        service.manager.lock().unwrap().basic_mode = true;
+        assert_eq!(service.release_idle_resources().unwrap()["paused"], true);
+        assert!(pending());
+        service.manager.lock().unwrap().basic_mode = false;
+        service
+            .execute(
+                json!({"action":"set_maintenance","expectedRevision":0,"pause":"manual"}),
+                crate::dispatch_local,
+            )
+            .unwrap();
+        assert_eq!(service.release_idle_resources().unwrap()["paused"], true);
+        assert!(pending());
+        service
+            .execute(
+                json!({"action":"set_maintenance","expectedRevision":1,"pause":"resume"}),
+                crate::dispatch_local,
+            )
+            .unwrap();
+        service.change("small", |task| task.status = "running".into());
+        service.release_idle_resources().unwrap();
+        assert!(pending());
+        service.change("small", |task| task.status = "succeeded".into());
+        service.release_idle_resources().unwrap();
+        assert!(!pending());
+        service.release_idle_resources().unwrap();
+        assert!(!pending());
+        assert!(
+            optimize_process_heap(),
+            "{}",
+            std::io::Error::last_os_error()
+        );
+    }
 
     #[test]
     fn built_in_check_tasks_read_one_catalog_snapshot_and_keep_the_full_result() {
