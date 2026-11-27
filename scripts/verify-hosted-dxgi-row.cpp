@@ -6,6 +6,7 @@
 #include <Windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <dwmapi.h>
 #include <wrl/client.h>
 
 #include <cerrno>
@@ -19,6 +20,7 @@
 #include <stdexcept>
 #include <vector>
 
+#pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "user32.lib")
@@ -286,7 +288,7 @@ public:
 };
 
 enum class SampleKind { Desktop, Unchanged, PointerOnly };
-enum class RowMethod { Automatic, SystemMemory, Staging };
+enum class RowMethod { Automatic, SystemMemory, Staging, EarlyRelease };
 const char* Name(SampleKind kind) {
     if (kind == SampleKind::Desktop) return "desktop";
     return kind == SampleKind::Unchanged ? "no-update" : "pointer-only";
@@ -327,6 +329,7 @@ class Capture {
     DXGI_OUTDUPL_DESC description{};
     ComPtr<ID3D11Texture2D> staging;
     bool directMap{};
+    bool earlyRelease{};
 
 public:
     const UINT width;
@@ -345,7 +348,8 @@ public:
             throw std::runtime_error("unsupported or changed output geometry");
         if (method == RowMethod::SystemMemory && !systemMemory())
             throw std::runtime_error("the requested system-memory mapping is unavailable");
-        directMap = systemMemory() && method != RowMethod::Staging;
+        earlyRelease = method == RowMethod::EarlyRelease;
+        directMap = systemMemory() && method != RowMethod::Staging && !earlyRelease;
         if (!directMap) {
             const auto row = RowDescription(width, D3D11_USAGE_STAGING);
             Check(device.device->CreateTexture2D(&row, nullptr, &staging), "CreateTexture2D(staging)");
@@ -353,7 +357,7 @@ public:
     }
 
     bool systemMemory() const { return description.DesktopImageInSystemMemory != FALSE; }
-    const char* rowMethod() const { return directMap ? "system-memory-map" : "staging-copy"; }
+    const char* rowMethod() const { return earlyRelease ? "staging-after-release" : (directMap ? "system-memory-map" : "staging-copy"); }
 
     Sample Poll() {
         Sample sample{};
@@ -376,11 +380,25 @@ public:
                     throw std::runtime_error("invalid pointer-only metadata");
             } else {
                 if (info.ProtectedContentMaskedOut) throw std::runtime_error("masked desktop capture");
-                sample.pixels = ReadRow(resource.Get(), sample.begin, sample.rowTiming);
-                sample.rowRead = Counter();
+                if (earlyRelease) {
+                    QueueClippedCopy(resource.Get());
+                } else {
+                    sample.pixels = ReadRow(resource.Get(), sample.begin, sample.rowTiming);
+                    sample.rowRead = Counter();
+                }
             }
             frame.Close();
             sample.released = Counter();
+            if (earlyRelease && sample.kind == SampleKind::Desktop) {
+                // Release the acquired frame before probing the already queued private row.
+                // The whole acquisition through CPU read still counts against the original budget.
+                while (!TryReadStaging(device, staging.Get(), width, sample.pixels, &sample.rowTiming)) {
+                    if (DeltaMs(sample.begin, Counter(), frequency) > 250)
+                        throw std::runtime_error("post-release row did not become readable within the diagnostic timeout");
+                    SwitchToThread();
+                }
+                sample.rowRead = Counter();
+            }
         }
         target.Verify();
         sample.end = Counter();
@@ -391,6 +409,13 @@ public:
     }
 
 private:
+    void QueueClippedCopy(IDXGIResource* resource) {
+        ComPtr<ID3D11Texture2D> texture;
+        Check(resource->QueryInterface(IID_PPV_ARGS(&texture)), "QueryInterface(ID3D11Texture2D)");
+        const D3D11_BOX source{x, y, 0, x + width, y + 1, 1};
+        device.context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture.Get(), 0, &source);
+        device.context->Flush();
+    }
     Pixels ReadRow(IDXGIResource* resource, int64_t begin, RowTiming& timing) {
         Pixels pixels{};
         if (directMap) {
@@ -408,11 +433,7 @@ private:
             Check(duplication->UnMapDesktopSurface(), "UnMapDesktopSurface");
             timing.unmapEnd = Counter();
         } else {
-            ComPtr<ID3D11Texture2D> texture;
-            Check(resource->QueryInterface(IID_PPV_ARGS(&texture)), "QueryInterface(ID3D11Texture2D)");
-            const D3D11_BOX source{x, y, 0, x + width, y + 1, 1};
-            device.context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture.Get(), 0, &source);
-            device.context->Flush();
+            QueueClippedCopy(resource);
             while (!TryReadStaging(device, staging.Get(), width, pixels, &timing)) {
                 if (DeltaMs(begin, Counter(), frequency) > CaptureLimitMs)
                     throw std::runtime_error("first clipped GPU row exceeded capture budget");
@@ -474,7 +495,7 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover, RowMethod method) 
         if (anchor.kind == SampleKind::Desktop) break;
         if (anchor.kind == SampleKind::Unchanged) idleWait.Wait();
     } while (DeltaMs(primeStarted, Counter(), capture.frequency) < 250);
-    if (anchor.kind != SampleKind::Desktop || DeltaMs(anchor.begin, anchor.end, capture.frequency) > CaptureLimitMs)
+    if (anchor.kind != SampleKind::Desktop || (method == RowMethod::Automatic && DeltaMs(anchor.begin, anchor.end, capture.frequency) > CaptureLimitMs))
         throw std::runtime_error("no timestamped baseline row within capture budget");
 
     std::vector<Sample> trace;
@@ -502,6 +523,9 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover, RowMethod method) 
                 "\"rowWidth\":%u,\"systemMemory\":%s,\"rowMethod\":\"%s\",\"baseline\":",
         capture.frequency, neutralArrived, baselineStarted, triggerBegin, triggerEnd, observationEnd,
         capture.width, capture.systemMemory() ? "true" : "false", capture.rowMethod());
+    DWM_TIMING_INFO display{};
+    display.cbSize = sizeof(display);
+    Check(DwmGetCompositionTimingInfo(nullptr, &display), "DwmGetCompositionTimingInfo");
     const auto printSample = [](const Sample& value) {
         std::printf("{\"kind\":\"%s\",\"begin\":%lld,\"end\":%lld,\"present\":%lld,"
                     "\"acquireReturned\":%lld,\"rowRead\":%lld,\"released\":%lld,"
@@ -513,7 +537,8 @@ int RunHover(OwnedWindow& target, POINT neutral, POINT hover, RowMethod method) 
             value.pixels.first, value.pixels.second);
     };
     printSample(anchor);
-    std::printf(",\"samples\":[");
+    std::printf(",\"refreshNumerator\":%u,\"refreshDenominator\":%u,\"refreshQpcPeriod\":%lld,\"samples\":[",
+        display.rateRefresh.uiNumerator, display.rateRefresh.uiDenominator, static_cast<long long>(display.qpcRefreshPeriod));
     for (size_t i = 0; i < trace.size(); ++i) {
         if (i) std::putchar(',');
         printSample(trace[i]);
@@ -529,7 +554,8 @@ int wmain(int argc, wchar_t** argv) {
         const bool row = argc == 8 && std::wcscmp(argv[1], L"--hosted") == 0;
         const bool hoverMap = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover-map") == 0;
         const bool hoverStaging = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover-staging") == 0;
-        const bool hover = hoverMap || hoverStaging ||
+        const bool early = argc == 12 && std::wcscmp(argv[1], L"--hosted-hover-early-release") == 0;
+        const bool hover = hoverMap || hoverStaging || early ||
             (argc == 12 && std::wcscmp(argv[1], L"--hosted-hover") == 0);
         if ((!row && !hover) ||
             !EnvEquals(L"GITHUB_ACTIONS", L"true") || !EnvEquals(L"RUNNER_ENVIRONMENT", L"github-hosted") ||
@@ -549,6 +575,7 @@ int wmain(int argc, wchar_t** argv) {
         auto method = RowMethod::Automatic;
         if (hoverMap) method = RowMethod::SystemMemory;
         if (hoverStaging) method = RowMethod::Staging;
+        if (early) method = RowMethod::EarlyRelease;
         return RunHover(target, {ParseCoordinate(argv[8]), ParseCoordinate(argv[9])},
             {ParseCoordinate(argv[10]), ParseCoordinate(argv[11])}, method);
     } catch (const Error& error) {

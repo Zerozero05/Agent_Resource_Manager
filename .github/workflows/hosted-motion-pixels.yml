@@ -1,4 +1,4 @@
-name: Compare Windows motion frame read paths
+name: Measure clipped GPU row read after DXGI frame release
 on: create
 permissions:
   contents: read
@@ -11,7 +11,7 @@ env:
   CANDIDATE_SHA256: 'b95ad24619e1d00e8d100777739afd70323fb827e272b31ef549124bd0063e97'
 jobs:
   motion:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-row-method-2314ea8-20261121' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-motion-early-release-20261128' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 8
     defaults:
@@ -28,8 +28,8 @@ jobs:
               -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
             throw 'The capability probe requires an isolated interactive GitHub-hosted Windows VM.'
           }
-          if ($env:ImageOS -cne 'win25-vs2026' -or $env:ImageVersion -cne '20261116.315.1') {
-            throw "The hosted Windows image ($env:ImageOS $env:ImageVersion) differs from the successful DXGI capability image."
+          if ([string]::IsNullOrWhiteSpace($env:ImageOS) -or [string]::IsNullOrWhiteSpace($env:ImageVersion)) {
+            throw 'The hosted Windows runner did not identify its image.'
           }
           Write-Host "Hosted Windows image: $env:ImageOS $env:ImageVersion"
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
@@ -85,7 +85,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         with:
-          name: Agent_Resource_Manager_dxgi_motion_row_methods_${{ github.run_id }}_${{ github.run_attempt }}
+          name: Agent_Resource_Manager_dxgi_motion_early_release_${{ github.run_id }}_${{ github.run_attempt }}
           path: ${{ runner.temp }}/arm-motion-pixels-evidence/motion-pixels.json
           if-no-files-found: warn
           retention-days: 14

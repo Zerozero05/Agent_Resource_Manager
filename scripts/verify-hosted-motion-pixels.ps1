@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
-    $env:ImageOS -cne 'win25-vs2026' -or $env:ImageVersion -cne '20261116.315.1' -or
+    [string]::IsNullOrWhiteSpace($env:ImageOS) -or [string]::IsNullOrWhiteSpace($env:ImageVersion) -or
     -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
     throw 'This can run only in a fresh interactive GitHub-hosted Windows VM.'
 }
@@ -344,7 +344,8 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
             if ($sample.begin -gt $sample.acquireReturned -or $sample.acquireReturned -gt $sample.mapBegin -or
                 $sample.mapBegin -gt $sample.mapEnd -or $sample.mapEnd -gt $sample.unmapBegin -or
                 $sample.unmapBegin -gt $sample.unmapEnd -or $sample.unmapEnd -gt $sample.rowRead -or
-                $sample.rowRead -gt $sample.released -or $sample.released -gt $sample.end) {
+                ($raw.rowMethod -ceq 'staging-after-release' -and ($sample.released -lt $sample.acquireReturned -or $sample.released -gt $sample.mapBegin -or $sample.rowRead -gt $sample.end)) -or
+                ($raw.rowMethod -cne 'staging-after-release' -and ($sample.rowRead -gt $sample.released -or $sample.released -gt $sample.end))) {
                 throw 'The desktop row timing stages were not ordered.'
             }
             $trial.timing.desktopSamples++
@@ -362,8 +363,8 @@ console.log(JSON.stringify(await createPerformanceFixture(process.argv[2], 'moti
         $report.phase = 'row-method-calibration'
         Select-Motion '轻动效'
         Start-Sleep -Milliseconds 550
-        $methods = @{ 'system-memory-map'='--hosted-hover-map'; 'staging-copy'='--hosted-hover-staging' }
-        foreach ($method in @('system-memory-map', 'staging-copy', 'staging-copy', 'system-memory-map')) {
+        $methods = @{ 'system-memory-map'='--hosted-hover-map'; 'staging-after-release'='--hosted-hover-early-release' }
+        foreach ($method in @('system-memory-map', 'staging-after-release', 'staging-after-release', 'system-memory-map')) {
             if ($button.Current.IsOffscreen -or $button.Current.BoundingRectangle -ne $geometry -or
                 $session.WindowIdentity().foregroundHandle -ne $session.Handle -or
                 [HostedMotionNotifications]::AnimationsEnabled() -ne $initialState) {
