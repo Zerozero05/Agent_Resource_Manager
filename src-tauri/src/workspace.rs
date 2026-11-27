@@ -892,6 +892,36 @@ impl WorkspaceSystem {
         }
         Ok(())
     }
+    fn update_pane(&self, r: &mut Registry, label: &str, request: &Value) -> Result<bool, String> {
+        let id = identifier(request, "paneId")?;
+        if r.owner(&id) != Some(label) {
+            return Err("页面已移至其他窗口".into());
+        }
+        let panes = &r.window(label)?.panes;
+        let index = panes
+            .iter()
+            .position(|p| p["id"] == id)
+            .ok_or("页面已关闭")?;
+        let mut next = panes[index].clone();
+        if let Some(title) = request["title"].as_str() {
+            next["title"] = json!(title);
+        }
+        if let Some(state) = request["state"].as_object() {
+            for (k, v) in state {
+                next["state"][k] = v.clone();
+            }
+        }
+        let next = pane(&next, label, false)?;
+        if next == panes[index] {
+            return Ok(false);
+        }
+        let old = std::mem::replace(&mut r.window_mut(label)?.panes[index], next);
+        if let Err(error) = self.persist(r) {
+            r.window_mut(label)?.panes[index] = old;
+            return Err(error);
+        }
+        Ok(true)
+    }
     fn emit(&self, app: &tauri::AppHandle) {
         if let Ok(r) = self.registry.lock() {
             let _ = app.emit("workspace-changed", r.payload("")["workspace"].clone());
@@ -1401,32 +1431,7 @@ impl WorkspaceSystem {
                 r.payload(label)
             }
             "workspace_update_pane" => {
-                let id = identifier(request, "paneId")?;
-                if r.owner(&id) != Some(label) {
-                    return Err("页面已移至其他窗口".into());
-                }
-                let before = r.layout.clone();
-                let window = r.window_mut(label)?;
-                let current = window
-                    .panes
-                    .iter_mut()
-                    .find(|p| p["id"] == id)
-                    .ok_or("页面已关闭")?;
-                let mut next = current.clone();
-                if let Some(title) = request["title"].as_str() {
-                    next["title"] = json!(title);
-                }
-                if let Some(state) = request["state"].as_object() {
-                    for (k, v) in state {
-                        next["state"][k] = v.clone();
-                    }
-                }
-                *current = pane(&next, label, false)?;
-                if let Err(e) = self.persist(&mut r) {
-                    r.layout = before;
-                    return Err(e);
-                }
-                changed = true;
+                changed = self.update_pane(&mut r, label, request)?;
                 r.payload(label)
             }
             "workspace_activate" => {
@@ -2384,6 +2389,41 @@ mod tests {
             .execute(json!({"action":"resource_list"}), crate::dispatch)
             .unwrap_err()
             .contains("关闭"));
+    }
+    #[test]
+    fn pane_updates_only_persist_and_notify_for_changes_to_the_normalized_pane() {
+        let (dir, workspace) = fixture();
+        let mut r = workspace.registry.lock().unwrap();
+        let revision = r.layout.revision;
+        let first = json!({"paneId":"home","state":{"view":"skills","scrollTop":20}});
+        assert!(workspace.update_pane(&mut r, "main", &first).unwrap());
+        assert_eq!(r.layout.revision, revision + 1);
+        let saved = r.restore();
+        assert_eq!(
+            workspace.service.workspace_state().unwrap(),
+            Some(saved.clone())
+        );
+
+        let db = rusqlite::Connection::open(dir.path().join("manager.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_pane_write BEFORE INSERT ON workspace_state BEGIN SELECT RAISE(ABORT,'unexpected pane write'); END").unwrap();
+        let repeated = json!({"paneId":"home","state":{"view":"skills","scrollTop":20.0,"documentPath":null,"discarded":"private"}});
+        assert!(!workspace.update_pane(&mut r, "main", &repeated).unwrap());
+        assert!(workspace
+            .update_pane(&mut r, "workspace-child", &repeated)
+            .is_err());
+        let rename = json!({"paneId":"home","title":"New title"});
+        assert!(workspace.update_pane(&mut r, "main", &rename).is_err());
+        assert_eq!(r.restore(), saved);
+        assert_eq!(workspace.service.workspace_state().unwrap(), Some(saved));
+
+        db.execute_batch("DROP TRIGGER reject_pane_write").unwrap();
+        assert!(workspace.update_pane(&mut r, "main", &rename).unwrap());
+        assert_eq!(r.layout.revision, revision + 2);
+        assert_eq!(r.window("main").unwrap().panes[0]["title"], "New title");
+        assert_eq!(
+            workspace.service.workspace_state().unwrap(),
+            Some(r.restore())
+        );
     }
     #[test]
     fn basic_mode_workspace_does_not_start_maintenance_or_persist_session_layout() {
