@@ -435,44 +435,81 @@ public sealed class NativeUiMeasurement : IDisposable {
       bodySha256=DocumentPixelHash(reference.BodyPixels)};
   }
   public object OpenDocumentPixels(int index) {
-    if(!AccessibilityInput||ConcurrentObservation||index!=0||documentReference==null)
-      throw new InvalidOperationException("Expected a frozen fixture reference and synchronous accessibility input.");
-    const string title="Perf Skill 0000";
-    AutomationElement scope=Named("可横向滚动的 Skill 列表",null,false);
-    if(scope==null) throw new InvalidOperationException("Skill table is unavailable.");
-    AutomationElement button=Button(title,scope);
-    if(MatchesDocumentFrame(documentReference,out bool bodyBefore,out _)||bodyBefore)
-      throw new InvalidOperationException("The exact Markdown body already matched before any measurement input.");
-    double hit=0,previousMismatch=0,reconfirmed=0;
-    long hitUtc=0;
-    int captureCount=0;
-    string[] firstHashes=null,repeatedHashes=null;
-    var sample=(Dictionary<string,object>)Measure("document",()=>Click(button),()=>DocumentReady(title),time=> {
-      while(time.ElapsedMilliseconds<2500) {
-        captureCount++;
-        if(MatchesDocumentFrame(documentReference,out _,out var matchHashes)) {
-          if(hit==0) {
-            hit=time.Elapsed.TotalMilliseconds;
-            hitUtc=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            firstHashes=matchHashes;
+    if (!AccessibilityInput || ConcurrentObservation || index != 0 || documentReference == null)
+      throw new InvalidOperationException("Expected the fixed visible document reference and original synchronous input.");
+    const string title = "Perf Skill 0000";
+    var scope = Named("可横向滚动的 Skill 列表", null, false);
+    if (scope == null) throw new InvalidOperationException("The owned Skill table is unavailable.");
+    var button = Button(title, scope);
+    var reference = documentReference;
+    if (MatchesDocumentFrame(reference, out bool bodyBefore, out _) || bodyBefore)
+      throw new InvalidOperationException("The original Markdown pixels already match before dispatch.");
+    using var armed = new ManualResetEventSlim(false);
+    using var go = new ManualResetEventSlim(false);
+    var reads = new List<object>();
+    var predicates = new List<object>();
+    long origin = 0, dispatchReturned = 0, mismatch = 0, first = 0, firstUtc = 0, second = 0, lastTrue = 0;
+    int abort = 0;
+    string[] firstHashes = null, repeatedHashes = null;
+    Exception captureError = null;
+    var observer = new Thread(() => {
+      try {
+        armed.Set();
+        if (!go.Wait(5000)) throw new TimeoutException("No synchronized input start for the passive observer.");
+        while (Volatile.Read(ref abort) == 0 && (Stopwatch.GetTimestamp() - origin) < 3 * Stopwatch.Frequency) {
+          long start = Stopwatch.GetTimestamp();
+          bool matched = MatchesDocumentFrame(reference, out _, out var hashes);
+          long end = Stopwatch.GetTimestamp();
+          reads.Add(new { start, end, matched });
+          if (matched && first != 0) { second = end; repeatedHashes = hashes; return; }
+          if (matched) {
+            first = end;
+            firstUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            firstHashes = hashes;
+          } else {
+            first = 0;
+            mismatch = end;
           }
-          else {
-            reconfirmed=time.Elapsed.TotalMilliseconds;
-            repeatedHashes=matchHashes;
-            return;
-          }
+          Thread.Sleep(16);
         }
-        else {
-          hit=0;
-          previousMismatch=time.Elapsed.TotalMilliseconds;
-        }
-        Thread.Sleep(4);
-      }
-      throw new InvalidOperationException("The exact visible Markdown body and controls did not match and reconfirm within 2500 ms.");
-    });
-    sample["observationMode"]="pixels-then-semantic-confirmation";
-    sample["pixels"]=new {firstMatchUpperMs=hit, firstMatchAtUtcMs=hitUtc, previousMismatchCompletedMs=previousMismatch,
-      captureCount, reconfirmedAtMs=reconfirmed, firstCaptureSha256s=firstHashes, repeatedCaptureSha256s=repeatedHashes};
+        if (Volatile.Read(ref abort) == 0) throw new TimeoutException("Native pixels did not reconfirm in the fixed interval.");
+      } catch (Exception error) { captureError = error; }
+    }) { IsBackground = true, Name = "Owned document pixels" };
+    observer.Start();
+    Dictionary<string,object> sample;
+    bool semanticDone = false;
+    try {
+      if (!armed.Wait(5000)) throw new TimeoutException("The native pixel observer did not arm.");
+      sample = (Dictionary<string,object>)Measure("document", () => {
+        origin = Stopwatch.GetTimestamp();
+        go.Set();
+        Click(button);
+        dispatchReturned = Stopwatch.GetTimestamp();
+      }, () => {
+        long start = Stopwatch.GetTimestamp();
+        bool ready = DocumentReady(title);
+        long end = Stopwatch.GetTimestamp();
+        predicates.Add(new { start, end, ready });
+        if (ready) lastTrue = end;
+        return ready;
+      });
+      semanticDone = true;
+    } finally {
+      if (!semanticDone) Interlocked.Exchange(ref abort, 1);
+      go.Set();
+      if (!observer.Join(6000)) throw new TimeoutException("Owned pixel capture did not exit in time.");
+    }
+    if (captureError != null) throw new InvalidOperationException("Passive native capture failed.", captureError);
+    Identity(true);
+    double Milliseconds(long stamp) => (stamp - origin) * 1000.0 / Stopwatch.Frequency;
+    sample["observationMode"] = "same-input-passive-pixels-and-original-semantic";
+    sample["semanticFinishedAtUtcMs"] = sample["finishedAtUtcMs"];
+    sample["finishedAtUtcMs"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    sample["clock"] = new { frequency = Stopwatch.Frequency, origin, dispatchReturned, semanticConfirmed = lastTrue, predicates };
+    sample["pixels"] = new { firstMatchUpperMs = Milliseconds(first), firstMatchAtUtcMs = firstUtc,
+      previousMismatchCompletedMs = mismatch == 0 ? 0 : Milliseconds(mismatch), firstQpc = first, repeatedQpc = second,
+      reconfirmedAtMs = Milliseconds(second), captureCount = reads.Count, reads,
+      firstCaptureSha256s = firstHashes, repeatedCaptureSha256s = repeatedHashes };
     return sample;
   }
   object Measure(string category,Action input,Func<bool> expected,Action<Stopwatch> afterDispatch=null){

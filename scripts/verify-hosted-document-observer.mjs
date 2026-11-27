@@ -9,12 +9,12 @@ import { assertNoUserManager, NativeUiaSession } from './native-uia-client.mjs';
 import { createPerformanceFixture } from './performance-fixture.mjs';
 import { ownedForeground } from './performance-policy.mjs';
 
-const sourceCommit = 'c81fda47073b92938a45da1bfd5afd8b6e8fa4ce';
-const candidateRunId = '45459930763';
-const branch = 'codex/hosted-document-observer-c81fda4-20261125';
+const sourceCommit = '9f2158912349197f12f117407fc49aae29d5d7e5';
+const candidateRunId = '46070315655';
+const branch = 'codex/hosted-same-action-document-9f21589-20261128';
 const fixtureParent = 'D:\\03_github_projects\\Agent_Management\\Agent_Resource_Manager\\validation\\manager-data';
-const maxTrials = 20;
-const samplesPerArm = 6;
+const maxTrials = 12;
+const samplesPerArm = 2;
 const armOrder = ['uia', 'pixels', 'pixels', 'uia'];
 const index = 0;
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -141,7 +141,7 @@ async function waitCheck(app, id, predicate, timeoutMs, initial) {
 function validateSample(sample, identity, arm, reference) {
   assert.equal(sample.category, 'document');
   assert.equal(sample.condition, 'native-accessibility-input-to-painted-result');
-  assert.equal(sample.observationMode, arm === 'uia' ? 'synchronous-input-then-observation' : 'pixels-then-semantic-confirmation');
+  assert.equal(sample.observationMode, arm === 'uia' ? 'synchronous-input-then-observation' : 'same-input-passive-pixels-and-original-semantic');
   assert.equal(sample.pid, identity.pid);
   assert.equal(sample.creationFileTime, identity.creationFileTime);
   assert.equal(sample.windowHandle, identity.windowHandle);
@@ -151,9 +151,31 @@ function validateSample(sample, identity, arm, reference) {
   if (arm === 'pixels') {
     const { firstMatchUpperMs, firstMatchAtUtcMs, captureCount, reconfirmedAtMs, firstCaptureSha256s, repeatedCaptureSha256s } = sample.pixels;
     assert.ok(Number.isFinite(firstMatchUpperMs) && firstMatchUpperMs > 0 && Number.isFinite(reconfirmedAtMs) &&
-      reconfirmedAtMs > firstMatchUpperMs && reconfirmedAtMs < sample.durationMs);
+      reconfirmedAtMs > firstMatchUpperMs);
     assert.ok(Number.isSafeInteger(firstMatchAtUtcMs) && firstMatchAtUtcMs >= sample.startedAtUtcMs && firstMatchAtUtcMs <= sample.finishedAtUtcMs);
     assert.ok(Number.isSafeInteger(captureCount) && captureCount >= 2);
+    const { clock, pixels } = sample;
+    assert.ok(Number.isSafeInteger(clock.frequency) && clock.frequency > 0);
+    const ticks = [clock.origin, clock.dispatchReturned, clock.semanticConfirmed, pixels.firstQpc, pixels.repeatedQpc];
+    assert.ok(ticks.every(Number.isSafeInteger) && clock.origin < clock.dispatchReturned && clock.dispatchReturned <= clock.semanticConfirmed);
+    assert.ok(clock.origin <= pixels.firstQpc && pixels.firstQpc < pixels.repeatedQpc);
+    const sinceInput = stamp => (stamp - clock.origin) * 1000 / clock.frequency;
+    assert.ok(Math.abs(sinceInput(pixels.firstQpc) - firstMatchUpperMs) < .001);
+    assert.ok(Math.abs(sinceInput(pixels.repeatedQpc) - reconfirmedAtMs) < .001);
+    assert.ok(Number.isFinite(sample.dwmPresentationWaitMs) && sample.dwmPresentationWaitMs > 0);
+    assert.ok(clock.predicates.length >= 2 && clock.predicates.at(-1).ready && clock.predicates.at(-2).ready);
+    assert.equal(clock.predicates.at(-1).end, clock.semanticConfirmed);
+    for (const [i, query] of clock.predicates.entries()) {
+      assert.ok(query.start >= (i ? clock.predicates[i - 1].end : clock.dispatchReturned) && query.end >= query.start);
+    }
+    assert.ok(pixels.reads.length === captureCount && pixels.reads.at(-1).matched && pixels.reads.at(-2).matched);
+    assert.equal(pixels.reads.at(-2).end, pixels.firstQpc);
+    assert.equal(pixels.reads.at(-1).end, pixels.repeatedQpc);
+    for (const [i, read] of pixels.reads.entries()) {
+      assert.ok(read.start >= (i ? pixels.reads[i - 1].end : clock.origin) && read.end >= read.start);
+    }
+    assert.ok(pixels.reads[0].start < clock.semanticConfirmed, 'Both observers must be armed on the same input.');
+    assert.ok(sample.semanticFinishedAtUtcMs <= sample.finishedAtUtcMs);
     const expectedHashes = [reference.titleSha256, reference.tabSha256, reference.bodySha256];
     assert.deepEqual(firstCaptureSha256s, expectedHashes);
     assert.deepEqual(repeatedCaptureSha256s, expectedHashes);
@@ -219,20 +241,20 @@ async function run() {
   await mkdir(evidenceDirectory);
   assert.ok(samePath(await realpath(evidenceDirectory), evidenceDirectory));
   const report = {
-    format: 'agent-resource-manager-hosted-document-body-observer-v2',
+    format: 'agent-resource-manager-same-action-document-observer-v1',
     status: 'incomplete',
     provenance: {
       sourceCommit, candidateSha256, candidateRunId, candidateJobId, candidateArtifactId, candidateArchiveSha256,
       originalBuildInfoSha256, buildInfoSha256: digest(buildInfoBytes),
       diagnosticCommit: env.GITHUB_SHA, hostedRunId: env.GITHUB_RUN_ID, imageOs: env.ImageOS, imageVersion: env.ImageVersion,
     },
-    scope: 'One fixed warmed synthetic document at its normal initial scroll position, one exact global check per trial, two observers in one native session.',
+    scope: 'One fixed warmed synthetic document at its normal initial scroll position, one exact global check per trial; original UIA alone versus a passive screen crop alongside original UIA on the same invocation.',
     limitations: [
       'The pixel endpoint bounds the first observed exact match of a distinctive visible Markdown crop and both document controls. It does not time all Markdown content.',
       'Calibration reports visible candidates without scrolling. If no distinctive body crop is visible, the diagnostic ends before any measured check.',
       'A previous mismatch completion time is an observation timestamp, not a proven lower bound for presentation.',
-      'The pixel probe separately requires the original semantic predicate and repeat confirmation. Only samples fully inside a successful check are admitted.',
-      'Six warmed trials per observer do not establish a P95, cold opening, or result under other viewport or workload conditions. The original 200 ms criterion remains separate.',
+      'The original UIA query sequence and double DWM flush run while an independent passive observer checks the same three screen crops. Only samples fully inside a successful check are admitted.',
+      'Two warmed trials per arm do not establish a P95, cold opening, or result under other viewport or workload conditions. The original 200 ms criterion remains separate.',
     ],
     plan: { index, samplesPerArm, maxTrials, armOrder },
     attempts: [],
@@ -296,7 +318,7 @@ async function run() {
     await save();
 
     const seenChecks = new Set();
-    const deadline = Date.now() + 180000;
+    const deadline = Date.now() + 75000;
     for (let trial = 0; trial < maxTrials && Date.now() < deadline; trial++) {
       const preferred = armOrder[trial % armOrder.length];
       const other = preferred === 'uia' ? 'pixels' : 'uia';
@@ -327,7 +349,7 @@ async function run() {
       }
       await save();
     }
-    assert.deepEqual(report.groupCounts, { uia: samplesPerArm, pixels: samplesPerArm }, 'The bounded run did not collect six fully overlapped samples per observer.');
+    assert.deepEqual(report.groupCounts, { uia: samplesPerArm, pixels: samplesPerArm }, 'The bounded run did not collect two fully overlapped samples per arm.');
     report.status = 'measurements-collected';
   } catch (error) {
     report.error = error.message;
@@ -383,8 +405,9 @@ async function run() {
     };
     report.results = {
       originalUiaMs: summarize(admitted.filter(attempt => attempt.arm === 'uia').map(attempt => attempt.sample.durationMs)),
+      semanticConfirmedMinusPixelUpperMs: summarize(admitted.filter(a=>a.arm==='pixels').map(({sample:s})=>(s.clock.semanticConfirmed-s.pixels.firstQpc)*1000/s.clock.frequency)),
       firstVisibleMarkdownAndControlsUpperMs: summarize(admitted.filter(attempt => attempt.arm === 'pixels').map(attempt => attempt.sample.pixels.firstMatchUpperMs)),
-      pixelObserverWithSemanticConfirmationMs: summarize(admitted.filter(attempt => attempt.arm === 'pixels').map(attempt => attempt.sample.durationMs)),
+      sameInputOriginalSemanticMs: summarize(admitted.filter(attempt => attempt.arm === 'pixels').map(attempt => attempt.sample.durationMs)),
     };
     report.finishedAt = new Date().toISOString();
     await save();
