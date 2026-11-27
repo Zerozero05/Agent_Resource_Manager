@@ -37,8 +37,10 @@ impl TaskResult {
             let mut encoder =
                 flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
             if encoder.write_all(&bytes).is_ok() {
-                if let Ok(packed) = encoder.finish() {
+                if let Ok(mut packed) = encoder.finish() {
                     if packed.len() < bytes.len() {
+                        // The history keeps this payload after the encoder is gone.
+                        packed.shrink_to_fit();
                         return Self {
                             bytes: packed,
                             compressed: true,
@@ -4267,6 +4269,8 @@ mod tests {
         let payload = TaskResult::new(&large);
         assert!(payload.compressed);
         assert!(payload.bytes.len() < serde_json::to_vec(&large).unwrap().len() / 4);
+        #[cfg(windows)]
+        assert_eq!(payload.bytes.capacity(), payload.bytes.len());
         assert_eq!(payload.read().unwrap(), large);
         assert_eq!(payload.read().unwrap(), large);
     }
