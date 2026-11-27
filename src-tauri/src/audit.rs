@@ -318,6 +318,55 @@ mod tests {
         tempfile::tempdir_in(root).unwrap()
     }
     #[test]
+    fn readonly_selection_stays_cached_when_the_recommended_scope_grows() {
+        let folder = fixture();
+        let root = folder.path();
+        fs::write(root.join("SKILL.md"), "---\nname: fixture\n---\nHello.\n").unwrap();
+        let mut record = local::draft(root).unwrap();
+        record["readOnly"] = json!(true);
+        assert!(refresh_local_audit(
+            &mut record,
+            Some(&local::files(root).unwrap())
+        ));
+        fs::create_dir(root.join("references")).unwrap();
+        fs::write(root.join("references/rules.md"), "Rules.").unwrap();
+        fs::write(
+            root.join("SKILL.md"),
+            "---\nname: fixture\n---\nRead [rules](references/rules.md).\n",
+        )
+        .unwrap();
+        let updated = local::files(root).unwrap();
+        assert!(refresh_local_audit(&mut record, Some(&updated)));
+        assert_eq!(record["runtimeAudit"]["status"], "passed");
+        assert_eq!(record["runtimeFiles"], json!(["SKILL.md"]));
+        assert_eq!(
+            record["runtimeAudit"]["proposedScope"],
+            json!(["SKILL.md", "references/rules.md"])
+        );
+        record["runtimeAudit"]["checkedAt"] = json!("2026-10-01T00:00:00Z");
+        let previous = record.clone();
+        assert!(!refresh_local_audit(&mut record, Some(&updated)));
+        assert_eq!(record, previous);
+        record["runtimeAudit"]["scopeHashes"]["references/rules.md"] = json!("stale");
+        assert!(refresh_local_audit(&mut record, Some(&updated)));
+        assert_eq!(
+            record["runtimeAudit"]["scopeHashes"]["references/rules.md"],
+            updated["references/rules.md"]
+        );
+        fs::write(root.join("references/rules.md"), "Revised rules.").unwrap();
+        let revised = local::files(root).unwrap();
+        assert_ne!(
+            updated["references/rules.md"],
+            revised["references/rules.md"]
+        );
+        assert!(refresh_local_audit(&mut record, Some(&revised)));
+        assert_eq!(
+            record["runtimeAudit"]["scopeHashes"]["references/rules.md"],
+            revised["references/rules.md"]
+        );
+        assert!(!refresh_local_audit(&mut record, Some(&revised)));
+    }
+    #[test]
     fn analyzer_upgrade_recomputes_unchanged_old_evidence_and_retires_only_composite_binding() {
         let fixture = fixture();
         let root = fixture.path().join("skill");

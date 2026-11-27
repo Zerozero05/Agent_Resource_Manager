@@ -2003,18 +2003,30 @@ pub(crate) fn runtime_audit_needs_invalidation(
         .flatten()
         .filter_map(|path| path.as_str())
         .collect();
-    let audited: BTreeSet<_> = skill["runtimeAudit"]["proposedScope"]
+    let audit = &skill["runtimeAudit"];
+    // Read-only registrations retain their original selection even when the
+    // analyzer finds additional required files. Hashes cover the proposed scope.
+    let recorded_selection = if skill["readOnly"] == true {
+        &audit["preservedScope"]
+    } else {
+        &audit["proposedScope"]
+    };
+    let audited: BTreeSet<_> = recorded_selection
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|path| path.as_str())
         .collect();
-    skill["runtimeAudit"]["analyzerVersion"] != RUNTIME_ANALYZER_VERSION
+    audit["analyzerVersion"] != RUNTIME_ANALYZER_VERSION
         || scope != audited
-        || scope.iter().any(|path| {
-            current.get(*path).map(String::as_str)
-                != skill["runtimeAudit"]["scopeHashes"][*path].as_str()
-        })
+        || audit["proposedScope"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|path| {
+                current.get(path).map(String::as_str) != audit["scopeHashes"][path].as_str()
+            })
 }
 
 pub fn invalidate_runtime_audit(skill: &mut Value, current: &BTreeMap<String, String>) -> bool {
