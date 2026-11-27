@@ -1,20 +1,20 @@
-name: Verify three native workloads on one hosted Windows machine (c81fda4)
+name: Verify three native workloads on one hosted Windows machine (6239e8e)
 on: create
 permissions:
   contents: read
   actions: read
 env:
-  CANDIDATE_RUN_ID: '45459930763'
-  CANDIDATE_JOB_ID: '138679414127'
-  CANDIDATE_SOURCE: c81fda47073b92938a45da1bfd5afd8b6e8fa4ce
-  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_c81fda47073b92938a45da1bfd5afd8b6e8fa4ce
-  CANDIDATE_ARTIFACT_ID: '14954871336'
-  CANDIDATE_SHA256: '1b882dd3021cfc8075e3ede312e17c545223ced4498e80692ca706b8b2f872c7'
-  CANDIDATE_ARCHIVE_SHA256: 'cabe04552e9d1f1aeb13c438713d4c30e01a74feda484b9fba7bd91cbbb96d62'
-  CANDIDATE_BUILD_INFO_SHA256: 'b95b7bce39d11803fd2b6c0a1ae273e485b2eba4a0d243aac735113455ecf3dd'
+  CANDIDATE_RUN_ID: '46078368860'
+  CANDIDATE_JOB_ID: '140771331287'
+  CANDIDATE_SOURCE: 6239e8ed54714105cc5da455a3c0d2be1cd9eed2
+  CANDIDATE_ARTIFACT: Agent_Resource_Manager_v0.3.0-dev.1_windows_x64_candidate_6239e8ed54714105cc5da455a3c0d2be1cd9eed2
+  CANDIDATE_ARTIFACT_ID: '15236642433'
+  CANDIDATE_SHA256: 'eb3793edb58330369059705d7c3c57fdc22dce09fad0da840a94411f10ba5692'
+  CANDIDATE_ARCHIVE_SHA256: '7bc6a8884b90d2a7712c48083c0d81cab88a1ea42f841e2afd11faa9490d5c43'
+  CANDIDATE_BUILD_INFO_SHA256: '341c450380b378b005bf0d769fb90d9ecb30434cc21ef4e8d0a16cea1fb11493'
 jobs:
   measure:
-    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-combined-c81fda4-20261125' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-combined-6239e8e-20261128' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
     runs-on: windows-latest
     timeout-minutes: 50
     defaults:
