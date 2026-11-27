@@ -194,6 +194,7 @@ v0.2.7通过351项Rust测试、136项Node测试、TypeScript／Vite、格式与C
 
 | 版本 | 日期 | 主要变更 |
 | --- | --- | --- |
+| 自动导入目录（开发中） | 2026-11-28 | 1、加快多个 Skill 分别登记时的监视目录筛选。已登记共同父目录时，仍只监视该父目录。[详情](CHANGELOG.md#auto-import-watch-paths-20261128) |
 | 工作区与自动检查（开发中） | 2026-11-28 | 1、重复保存相同的页面位置时，跳过写盘和窗口通知。[详情](CHANGELOG.md#workspace-and-automatic-comparison-20261128)<br>2、自动复查直接比对管理记录，减少大技能库的临时内存占用。[详情](CHANGELOG.md#workspace-and-automatic-comparison-20261128)<br>3、Windows 在大结果检查后利用任务空闲时机释放临时内存。[详情](CHANGELOG.md#workspace-and-automatic-comparison-20261128) |
 | Skill 详情与本地检查（开发中） | 2026-11-28 | 1、在独立 Skill 详情中首次打开「来源与连接」时才加载管理面板，切换标签时保留未保存的别名。[详情](CHANGELOG.md#skill-detail-and-local-checks-20261128)<br>2、说明正文与附图读取当前 Skill 和所需来源，避免复制整个技能库。[详情](CHANGELOG.md#skill-detail-and-local-checks-20261128)<br>3、打开文件和定位外部依赖映射时，滚动遵循当前动效设置。[详情](CHANGELOG.md#skill-detail-and-local-checks-20261128)<br>4、重复核对本地 Skill 时，已有审计仍有效即可复用，减少临时内存分配。只读 Skill 的文件选择和检查时间也能保留。[详情](CHANGELOG.md#skill-detail-and-local-checks-20261128) |
 | 退出时记住位置（开发中） | 2026-11-27 | 1、切换页面、客户端或说明文档后立即退出，会保存刚刚看到的位置。[详情](CHANGELOG.md#restore-window-navigation-20261127)<br>2、多窗口分别保存各自的布局和草稿。[详情](CHANGELOG.md#restore-window-navigation-20261127) |

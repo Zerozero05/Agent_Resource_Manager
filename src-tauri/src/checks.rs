@@ -3,7 +3,7 @@
 use crate::{local_roots::path_key, tasks::TaskSystem};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
     sync::{mpsc, Arc},
     time::{Duration, Instant, SystemTime},
@@ -39,13 +39,13 @@ fn watched_paths(config: &Value) -> Vec<PathBuf> {
         .collect();
     paths.sort_by_key(|path| path.components().count());
     let mut roots = Vec::new();
-    let separator = if cfg!(windows) { "\\" } else { "/" };
+    let mut root_keys = HashSet::new();
     for path in paths {
         let key = path_key(&path);
-        if !roots.iter().any(|root: &PathBuf| {
-            let root = path_key(root);
-            key == root || key.starts_with(&(root + separator))
-        }) {
+        let covered = key
+            .rmatch_indices(std::path::MAIN_SEPARATOR)
+            .any(|(end, _)| root_keys.contains(&key[..end]));
+        if !covered && root_keys.insert(key) {
             roots.push(path);
         }
     }
@@ -315,5 +315,43 @@ mod tests {
             ),
             vec![json!("a")]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn watch_roots_preserve_windows_spelling_order_and_separator_boundaries() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (
+                &[
+                    r"D:/Apps/技巧",
+                    r"\\?\d:\apps\技巧",
+                    r"D:\Apps\技巧\child",
+                    r"D:/Apps/技巧-b",
+                ],
+                &[r"D:/Apps/技巧", r"D:/Apps/技巧-b"],
+            ),
+            (
+                &[r"\\host\share\a", r"//HOST/share/a/b", r"\\host\share\ab"],
+                &[r"\\host\share\a", r"\\host\share\ab"],
+            ),
+            (
+                &[r"\\?\UNC\host\share", r"\\?\UNC\HOST\share\item"],
+                &[r"\\?\UNC\host\share"],
+            ),
+            (&[r"D:\", r"D:\skill", r"D:\\child"], &[r"D:\", r"D:\skill"]),
+            (
+                &[r"folder\", r"folder\child", r"folder\\extra"],
+                &[r"folder\", r"folder\child"],
+            ),
+        ];
+        for &(inputs, expected) in cases {
+            let skills: Vec<_> = inputs
+                .iter()
+                .map(|path| json!({"localPath":path}))
+                .collect();
+            let roots = watched_paths(&json!({"skills":skills}));
+            let spelling: Vec<_> = roots.iter().map(|path| path.to_str().unwrap()).collect();
+            assert_eq!(spelling, expected);
+        }
     }
 }
