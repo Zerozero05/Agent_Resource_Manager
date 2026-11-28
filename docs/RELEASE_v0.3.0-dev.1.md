@@ -1,5 +1,19 @@
 # v0.3.0-dev.1
 
+<a id="preview-20261128"></a>
+
+## Windows 便携预览（2026-11-28）
+
+`124fbdf` 优化自动导入目录筛选，适合使用多个独立 Skill 目录的用户。本地 Windows x64 便携版已核对四个包内文件，后台接口实测可发现 41 项工具并正常退出。程序需要 Microsoft Edge WebView2 Runtime。[源码](https://github.com/Zerozero05/Agent_Resource_Manager/tree/124fbdf1e0d863c09819021ff32cc922f22ed5ef) · [目录筛选测量](../CHANGELOG.md#auto-import-watch-paths-20261128)
+
+直接父版本 `6239e8e` 的实测使用 1,000 个 Skill 和 100 个工具的隔离数据。
+
+| 项目 | 结果 |
+| --- | --- |
+| 检查、下载和更新期间的交互 | 1,200 次；12 组 P95 为 266.10–352.35 ms，最长 430.02 ms。12 组均在有限容忍范围，原 P95 ≤ 200 ms 目标仍有差距。[原始记录](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/46080698580) |
+| 连续运行 | 30 分 12 秒，31 次检查，66 轮操作。空闲 CPU 与中位内存增长通过。尾段内存波动 41.86 MiB 超过 32 MiB，增长速度 1.46 MiB/分钟超过 0.50 MiB/分钟。[原始记录](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/46081451289) |
+| 窄窗和文字显示 | 960 × 650 下搜索、首条结果和详情均可操作，正常退出。系统减少动效和不同缩放实体双屏移动保留待验。[窄窗记录](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/46080681756) |
+
 ## 65b14b9 候选验收（2026-11-21）
 
 Windows x64 开发候选 `090dc7a9` 对应源码 `65b14b9`。

@@ -4,11 +4,9 @@ Windows-first desktop manager for local and GitHub Agent Skills and independent 
 
 **开发预览：v0.3.0-dev.1，尚未公开发行。** 在现有 Skill 管理基础上增加工具登记、受管动作、安装包文件预览、分级卸载、配置导入导出、维护窗口、场景和统一快捷入口。资源保持原位，GUI 与本地 MCP 共用后台；现有功能与数据继续保留。[开发预览说明](docs/RELEASE_v0.3.0-dev.1.md)
 
-efbd候选的100次本地文档原生交互P95为141.3951ms、最大270.7571ms，原200ms P95目标通过；既有6c的1061.8325ms慢样本保留在历史记录。真实中文输入已通过。最新30分钟检查完成61次采样，没有程序异常，但内存收敛未达原定标准；不能将本地P95当作远端速度或完整性能通过。[当前验证范围](CHANGELOG.md#tool-directory-relocation-20261117)
+当前 Windows 便携预览对应 `124fbdf`。1,000 个 Skill 各自登记目录时，自动导入的一次目录筛选中位耗时从 70.80 ms 降到 0.82 ms。试用已有管理器时，先从右上角「？」选择「完全退出管理器」，再从试用目录启动。[当前预览源码](https://github.com/Zerozero05/Agent_Resource_Manager/tree/124fbdf1e0d863c09819021ff32cc922f22ed5ef) · [本轮更新](CHANGELOG.md#auto-import-watch-paths-20261128)
 
-新候选进一步减少说明读取的前置工作：按固定提交仅读取沿途目录和目标文档，不再先列出全仓库；下载、更新和差异核对仍使用完整清单。相关协议、链接安全和回退检查通过，修复后的真实加载延迟及完整内存收敛仍待验证。[本轮修改](CHANGELOG.md#documentation-path-read-20261113)
-
-完整开发源码已同步到 [codex/agent-resource-manager 分支](https://github.com/Zerozero05/Agent_Resource_Manager/tree/codex/agent-resource-manager)，正式分支和既有发行保留。GitHub构建检查与本机原生验收分别记录，源码同步不代表完整验收或新版本发行。[源码与检查记录](CHANGELOG.md#source-ci-exit-20261112)
+上一候选 `6239e8e` 在检查、下载和更新期间完成了 1,200 次真实操作，最长 430.02 ms。12 组均达到允许的小幅超时标准，原定 200 ms 目标及 30 分钟内存稳定性还有差距。[实测明细与适用版本](docs/RELEASE_v0.3.0-dev.1.md#preview-20261128)
 
 程序、管理数据、缓存和导出的位置可在设置中查看和调整。全新 v0.3 便携包的管理数据位于包根目录的 `data` 子目录。既有 Skill 与工具保留原位置。本机路径示例见下方使用说明。
 
