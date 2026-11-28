@@ -8,6 +8,11 @@
 
 本地 Windows x64 便携版已核对四个包内文件，后台接口实测可发现 41 项工具并正常退出。程序需要 Microsoft Edge WebView2 Runtime。[源码](https://github.com/Zerozero05/Agent_Resource_Manager/tree/98304b5efd2d6d9a9f6dcf1b7118e27ee554ae69) · [目录筛选测量](../CHANGELOG.md#auto-import-watch-paths-20261128)
 
+同一提交的云端 Windows x64 构建通过 784 项前端和 980 项 Rust 测试，另有 17 项 Rust 测试标记忽略。两个独立 Windows 环境验证了以下安装流程，使用相同的云端程序文件。本地便携包和本地安装包由同一源码独立构建。[Windows CI](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/46139577764)
+
+- 全新安装走完图形向导。安装后的程序无参数启动，主窗口可操作，帮助菜单可打开，从「完全退出管理器」正常退出。[图形安装与首次启动](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/46142304967)
+- 安装 v0.2.11 后升级到此候选，再执行卸载，三个操作均成功。桌面及开始菜单快捷方式指向新程序，升级与卸载后四个合成数据文件均保留。[升级及卸载](https://github.com/Zerozero05/Agent_Resource_Manager/actions/runs/46141935360)
+
 前一轮候选 `6239e8e` 的实测使用 1,000 个 Skill 和 100 个工具的隔离数据。
 
 | 项目 | 结果 |
