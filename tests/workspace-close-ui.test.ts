@@ -46,13 +46,13 @@ const host = document.getElementById('root')!;
 let unmount = () => {};
 let restoreClock = () => {};
 afterEach(async () => { await act(async () => unmount()); unmount = () => {}; restoreClock(); restoreClock = () => {}; });
-async function mount(failSave = false, options: { snapshot?: Record<string, unknown>; workspace?: WindowWorkspace; basicMode?: boolean; readPaneRuntime?: (paneId: string) => Record<string, unknown>; openPane?: (pane: WorkspacePane) => Promise<WorkspaceNavigation>; taskResult?: (attempt: number) => { snapshot?: Record<string, unknown>; error?: string } } = {}) {
+async function mount(failSave = false, options: { snapshot?: Record<string, unknown>; workspace?: WindowWorkspace; basicMode?: boolean; beforeListen?: (name: string) => Promise<void> | undefined; readPaneRuntime?: (paneId: string) => Record<string, unknown>; openPane?: (pane: WorkspacePane) => Promise<WorkspaceNavigation>; taskResult?: (attempt: number) => { snapshot?: Record<string, unknown>; error?: string } } = {}) {
   const calls: Record<string, unknown>[] = [], listeners = new Map<string, (event: unknown) => void>();
   const taskCalls: { action: string; args: Record<string, unknown>; foreground: boolean }[] = [];
   const readReplies: (() => Promise<unknown> | unknown)[] = [];
   let managerSnapshot = options.snapshot || { skills: [], sources: [], connections: [], settings: {}, stateRevision: 1 };
   const workspace = { revision: 1, windows: [options.workspace || { label: 'main', activePaneId: 'home', panes: [{ id: 'home', kind: 'home', state: {} }] }] };
-  const reply = { windowLabel: 'main', workspace, closing: false, nativeCloseRequested: false };
+  const reply = { windowLabel: workspace.windows[0].label, workspace, closing: false, nativeCloseRequested: false };
   let destroyed = 0;
   const fixture = {
     panes: [] as WorkspacePane[],
@@ -66,8 +66,8 @@ async function mount(failSave = false, options: { snapshot?: Record<string, unkn
       if (result?.error) throw new Error(result.error);
       return managerSnapshot;
     } },
-    window: { label: 'main', onCloseRequested: async (callback: (event: unknown) => void) => { listeners.set('native-close', callback); return () => listeners.delete('native-close'); }, setTheme: async () => {}, scaleFactor: async () => 1, outerPosition: async () => ({ x: 0, y: 0 }), innerSize: async () => ({ width: 1280, height: 850 }), isMaximized: async () => false, destroy: async () => { destroyed++; } },
-    listen: async (name: string, callback: (event: unknown) => void) => { listeners.set(name, callback); return () => listeners.delete(name); },
+    window: { label: options.workspace?.label ?? 'main', onCloseRequested: async (callback: (event: unknown) => void) => { listeners.set('native-close', callback); return () => listeners.delete('native-close'); }, setTheme: async () => {}, scaleFactor: async () => 1, outerPosition: async () => ({ x: 0, y: 0 }), innerSize: async () => ({ width: 1280, height: 850 }), isMaximized: async () => false, destroy: async () => { destroyed++; } },
+    listen: async (name: string, callback: (event: unknown) => void) => { if (options.beforeListen) await options.beforeListen(name); listeners.set(name, callback); return () => listeners.delete(name); },
     invoke: async (command: string, args: { request: Record<string, unknown> }) => {
       assert.equal(command, 'manager_request'); const request = args.request; calls.push(request);
       switch (request.action) {
@@ -96,6 +96,33 @@ async function mount(failSave = false, options: { snapshot?: Record<string, unkn
 }
 const button = (text: string) => Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(node => node.textContent === text)!;
 const click = async (node: Element) => act(async () => { node.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+
+for (const label of ['main', 'detached']) {
+  test(`opening the ${label} window reads the catalogue once and accepts later revisions`, async () => {
+    const workspace: WindowWorkspace = { label, activePaneId: 'home', panes: [{ id: 'home', kind: 'home', state: {} }] };
+    const fixture = await mount(false, { workspace });
+    const reads = () => fixture.calls.filter(call => call.action === 'get_state').length;
+    assert.equal(reads(), 1);
+    await act(async () => fixture.updateSnapshot({ skills: [], sources: [], connections: [], stateRevision: 2, settings: { marker: 'updated' } }));
+    assert.equal(reads(), 2);
+    assert.equal(fixture.session().managerSnapshot.settings?.marker, 'updated');
+  });
+}
+
+for (const event of ['state-changed', 'read-context-changed']) {
+  test(`a late ${event} subscription catches missed updates without delaying initial display`, async () => {
+    let connect!: () => void;
+    const gate = new Promise<void>(resolve => { connect = resolve; });
+    const snapshot = { skills: [], sources: [], connections: [], stateRevision: 1, readGeneration: 1 };
+    const fixture = await mount(false, { snapshot, beforeListen: name => name === event ? gate : undefined });
+    assert.equal(fixture.session().managerSnapshot.stateRevision, 1);
+    assert.equal(fixture.listeners.has(event), false);
+    fixture.setSnapshot({ ...snapshot, ...(event === 'state-changed' ? { stateRevision: 2 } : { readGeneration: 2 }), settings: { marker: 'before-listener' } });
+    await act(async () => { connect(); });
+    assert.equal(fixture.session().managerSnapshot.settings?.marker, 'before-listener');
+    assert.equal(fixture.calls.filter(call => call.action === 'get_state').length, 2);
+  });
+}
 
 test('home sidebar registration reaches the outer toolbar without changing saved navigation or business bridges', async () => {
   const fixture = await mount(); const before = fixture.calls.length;

@@ -423,7 +423,7 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
 
   useEffect(() => {
     mounted.current = true; if (!isTauri()) { setError('请在 Skill Manager 桌面程序中打开'); return; }
-    let disposed = false, ipcAvailable = true, repeatSnapshot = false;
+    let disposed = false, ipcAvailable = true, repeatSnapshot = false, initialStateReadStarted = false;
     let observedBackendClose = false;
     const inFlightCloseRounds = new Set<string>();
     const flushedCloseRounds = new Map<string, { ok: boolean; error?: string }>();
@@ -464,6 +464,13 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
       }
       updatePolling();
     };
+    const readWorkspace = async (lightweight: boolean) => {
+      const reply = await retryBridgeRead(() => api<WorkspaceReply>('workspace_get'), { active });
+      if (!active()) return;
+      if (!lightweight) await acceptWorkspace(reply.workspace);
+      acceptCloseState(reply);
+      ipcAvailable = true;
+    };
     const reconcile = (afterSubscription = false, controlOnly = false): Promise<void> => {
       if (!active()) return Promise.resolve();
       if (snapshot) { repeatSnapshot ||= afterSubscription; return snapshot; }
@@ -472,11 +479,7 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
           repeatSnapshot = false;
           const lightweight = controlOnly || closingRef.current || document.visibilityState === 'hidden';
           if (!lightweight && !closingRef.current) await refreshState();
-          const reply = await retryBridgeRead(() => api<WorkspaceReply>('workspace_get'), { active });
-          if (!active()) return;
-          if (!lightweight) await acceptWorkspace(reply.workspace);
-          acceptCloseState(reply);
-          ipcAvailable = true;
+          await readWorkspace(lightweight);
         } while (repeatSnapshot && active());
       })().finally(() => { snapshot = undefined; });
       return snapshot;
@@ -493,10 +496,10 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
     const add = (register: () => Promise<() => void>, closeControl = false) => {
       const subscription = new RecoverableSubscription(register, {
         active,
-        onReady: () => { if (ipcAvailable) void reconcile(true).catch(report); updatePolling(); },
+        onReady: () => { if (initialStateReadStarted && ipcAvailable) void reconcile(true).catch(report); updatePolling(); },
         onUnavailable: () => updatePolling(),
       });
-      subscriptions.push(subscription); if (closeControl) closeSubscriptions.add(subscription); void subscription.recover();
+      subscriptions.push(subscription); if (closeControl) closeSubscriptions.add(subscription);
     };
     add(() => listen<WorkspaceNavigation>('workspace-changed', event => { void acceptWorkspace(event.payload); }));
     add(() => listen<{ stateRevision: number }>('state-changed', event => { if (event.payload.stateRevision > managerRevision.current) void refreshState().catch(report); }));
@@ -507,14 +510,25 @@ export default function WorkspaceApp({ startup = { basicMode: false } }: { start
     add(() => listen('workspace-native-close-request', () => { if (ready.current) void reconcile(true).catch(report); }), true);
     add(() => listen('workspace-request-quit', () => { if (ready.current) void closeWindow('quit', true); }), true);
     add(() => getCurrentWindow().onCloseRequested(event => { event.preventDefault(); if (ready.current) void reconcile(true).catch(report); }), true);
-    void reconcile().then(async () => {
+    // Open the layout while listeners connect. A responsive layout also lets the
+    // catalogue load when a listener is delayed. Late registrations still reconcile.
+    const subscriptionsReady = Promise.all(subscriptions.map(item => item.recover()));
+    const initialLayout = readWorkspace(closingRef.current || document.visibilityState === 'hidden');
+    const initialState = Promise.race([subscriptionsReady, initialLayout.catch(() => {})]).then(() => {
+      if (!active()) return;
+      initialStateReadStarted = true;
+      if (!closingRef.current && document.visibilityState !== 'hidden') return refreshState();
+    });
+    void Promise.all([initialLayout, initialState]).then(async () => {
       if (!active()) return;
       ready.current = true;
       if (!((current.current.transfers || []) as Transfer[]).some(item => item.targetWindowLabel === label)) {
         // Registration is a write. A failed acknowledgement is not replayed.
         const result = await api<WorkspaceReply>('workspace_ready'); await acceptWorkspace(result.workspace);
       }
-      await reconcile(true);
+      // Registration can deliver a pending close or transfer. Its navigation
+      // handshake does not itself change the resource catalogue.
+      if (active()) await readWorkspace(closingRef.current || document.visibilityState === 'hidden');
     }).catch(report);
     const focus = () => {
       if (!active() || document.visibilityState === 'hidden') return;
