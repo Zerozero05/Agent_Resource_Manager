@@ -4,9 +4,11 @@
 
 ## Windows 便携预览（2026-11-28）
 
-`124fbdf` 优化自动导入目录筛选，适合使用多个独立 Skill 目录的用户。本地 Windows x64 便携版已核对四个包内文件，后台接口实测可发现 41 项工具并正常退出。程序需要 Microsoft Edge WebView2 Runtime。[源码](https://github.com/Zerozero05/Agent_Resource_Manager/tree/124fbdf1e0d863c09819021ff32cc922f22ed5ef) · [目录筛选测量](../CHANGELOG.md#auto-import-watch-paths-20261128)
+`98304b5` 包含自动导入目录优化，并减少首次打开工作台时的重复读取。使用同一份 1,000 条技能数据、分别五次启动的生产前端对照中，完整目录从每次读三份降至一份，合计少传约 3.48 MB。该对照使用模拟的桌面通信。[首次读取实测](../CHANGELOG.md#workspace-startup-read-20261128)
 
-直接父版本 `6239e8e` 的实测使用 1,000 个 Skill 和 100 个工具的隔离数据。
+本地 Windows x64 便携版已核对四个包内文件，后台接口实测可发现 41 项工具并正常退出。程序需要 Microsoft Edge WebView2 Runtime。[源码](https://github.com/Zerozero05/Agent_Resource_Manager/tree/98304b5efd2d6d9a9f6dcf1b7118e27ee554ae69) · [目录筛选测量](../CHANGELOG.md#auto-import-watch-paths-20261128)
+
+前一轮候选 `6239e8e` 的实测使用 1,000 个 Skill 和 100 个工具的隔离数据。
 
 | 项目 | 结果 |
 | --- | --- |

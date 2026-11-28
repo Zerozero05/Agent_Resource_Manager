@@ -4,9 +4,9 @@ Windows-first desktop manager for local and GitHub Agent Skills and independent 
 
 **开发预览：v0.3.0-dev.1，尚未公开发行。** 在现有 Skill 管理基础上增加工具登记、受管动作、安装包文件预览、分级卸载、配置导入导出、维护窗口、场景和统一快捷入口。资源保持原位，GUI 与本地 MCP 共用后台；现有功能与数据继续保留。[开发预览说明](docs/RELEASE_v0.3.0-dev.1.md)
 
-当前 Windows 便携预览对应 `124fbdf`。1,000 个 Skill 各自登记目录时，自动导入的一次目录筛选中位耗时从 70.80 ms 降到 0.82 ms。试用已有管理器时，先从右上角「？」选择「完全退出管理器」，再从试用目录启动。[当前预览源码](https://github.com/Zerozero05/Agent_Resource_Manager/tree/124fbdf1e0d863c09819021ff32cc922f22ed5ef) · [本轮更新](CHANGELOG.md#auto-import-watch-paths-20261128)
+当前 Windows 便携预览对应 `98304b5`。打开工作台时，健康连接下完整技能库只需读取一次。1,000 个 Skill 各自登记目录时，自动导入的一次目录筛选中位耗时从 70.80 ms 降到 0.82 ms。试用已有管理器时，先从右上角「？」选择「完全退出管理器」，再从试用目录启动。[当前预览源码](https://github.com/Zerozero05/Agent_Resource_Manager/tree/98304b5efd2d6d9a9f6dcf1b7118e27ee554ae69) · [本轮更新](CHANGELOG.md#auto-import-watch-paths-20261128)
 
-上一候选 `6239e8e` 在检查、下载和更新期间完成了 1,200 次真实操作，最长 430.02 ms。12 组均达到允许的小幅超时标准，原定 200 ms 目标及 30 分钟内存稳定性还有差距。[实测明细与适用版本](docs/RELEASE_v0.3.0-dev.1.md#preview-20261128)
+已完成整机性能测量的候选 `6239e8e` 在检查、下载和更新期间完成了 1,200 次真实操作，最长 430.02 ms。12 组均达到允许的小幅超时标准，原定 200 ms 目标及 30 分钟内存稳定性还有差距。[实测明细与适用版本](docs/RELEASE_v0.3.0-dev.1.md#preview-20261128)
 
 程序、管理数据、缓存和导出的位置可在设置中查看和调整。全新 v0.3 便携包的管理数据位于包根目录的 `data` 子目录。既有 Skill 与工具保留原位置。本机路径示例见下方使用说明。
 
