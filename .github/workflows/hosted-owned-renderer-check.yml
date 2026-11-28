@@ -1,0 +1,46 @@
+name: Compare embedded WebView2 counters on isolated Windows
+on: create
+permissions:
+  contents: read
+jobs:
+  profile:
+    if: ${{ github.ref_type == 'branch' && github.ref_name == 'codex/hosted-owned-renderer-6239e8e-20261128' && github.repository == 'Zerozero05/Agent_Resource_Manager' }}
+    runs-on: windows-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+      - name: Verify the product parent and prepare diagnostic-only front end
+        run: |
+          if((git rev-parse HEAD^) -cne '6239e8ed54714105cc5da455a3c0d2be1cd9eed2' -or (git rev-parse HEAD) -cne $env:GITHUB_SHA){throw 'Unexpected diagnostic provenance.'}
+          npm install --global pnpm@11.25.0
+          if($LASTEXITCODE -ne 0){throw 'Dependency tool failed.'}
+          pnpm install --frozen-lockfile
+          if($LASTEXITCODE -ne 0){throw 'Locked installation failed.'}
+          pnpm build
+          if($LASTEXITCODE -ne 0){throw 'Frontend build failed.'}
+      - name: Build diagnostic-only native executable
+        run: |
+          rustup update stable --no-self-update
+          if($LASTEXITCODE -ne 0){throw 'Toolchain setup failed.'}
+          cargo build --locked --release --manifest-path src-tauri/Cargo.toml --features custom-protocol
+          if($LASTEXITCODE -ne 0){throw 'Diagnostic build failed.'}
+      - name: Measure one pair using real native checks and private WebView counters
+        timeout-minutes: 11
+        run: ./scripts/run-owned-renderer-probe.ps1
+      - name: Preserve numeric synthetic evidence only
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: Agent_Resource_Manager_owned_renderer_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arm-owned-renderer-evidence/
+          if-no-files-found: warn
+          retention-days: 14

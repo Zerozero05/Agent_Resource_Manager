@@ -663,6 +663,53 @@ mod settings_tests {
 }
 
 #[tauri::command]
+#[cfg(windows)]
+async fn renderer_probe(window: tauri::WebviewWindow, operation: String, data: Option<Value>) -> Result<Value, String> {
+    use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
+    use windows::core::HSTRING;
+    if std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true") || std::env::var("RUNNER_ENVIRONMENT").as_deref() != Ok("github-hosted") || window.label() != "main" {
+        return Err("Hosted synthetic main window required".into());
+    }
+    let variant = std::env::var("ARM_RENDERER_PROBE_VARIANT").map_err(|e| e.to_string())?;
+    if variant != "navigation" && variant != "check" { return Err("Unknown diagnostic group".into()); }
+    let root = PathBuf::from(r"D:\arm-renderer-probe-6239").join(&variant);
+    let args: Vec<_> = std::env::args_os().collect();
+    let data_dir = resolve_data_dir(&args, None, Err("Explicit synthetic data required".into()))?;
+    if data_dir != root.join("data") || !root.join("fixture-owner.json").is_file() { return Err("Wrong synthetic data directory".into()); }
+    if operation == "start" { return Ok(json!({"variant":variant,"pid":std::process::id()})); }
+    if operation == "report" {
+        use std::io::Write;
+        let value = data.ok_or("No sample")?;
+        let stage = value["stage"].as_str().ok_or("No stage")?;
+        if !["baseline","pair2","pair4","pair6","final","failure"].contains(&stage) { return Err("Unknown sample stage".into()); }
+        let bytes = serde_json::to_vec(&value).map_err(|e|e.to_string())?;
+        if bytes.len()>64*1024 { return Err("Oversize probe report".into()); }
+        let part = root.join(format!("probe-{stage}.part"));
+        let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(&part).map_err(|e|e.to_string())?;
+        file.write_all(&bytes).map_err(|e|e.to_string())?; drop(file);
+        std::fs::rename(part, root.join(format!("probe-{stage}.json"))).map_err(|e|e.to_string())?;
+        return Ok(Value::Null);
+    }
+    let method = match operation.as_str() {
+        "heap" => "Runtime.getHeapUsage",
+        "dom" => "Memory.getDOMCounters",
+        "collect" => "HeapProfiler.collectGarbage",
+        _ => return Err("Unsupported diagnostic measurement".into()),
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String,String>>();
+    window.with_webview(move |view| {
+        let done = tx.clone();
+        let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |status, result| {
+            let _ = done.send(status.map(|_| result).map_err(|e|e.to_string())); Ok(())
+        }));
+        let issued = unsafe { view.controller().CoreWebView2().and_then(|web| web.CallDevToolsProtocolMethod(&HSTRING::from(method), &HSTRING::from("{}"), &handler)) };
+        if let Err(e) = issued { let _ = tx.send(Err(e.to_string())); }
+    }).map_err(|e|e.to_string())?;
+    let raw = tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(std::time::Duration::from_secs(8))).await.map_err(|e|e.to_string())?.map_err(|e|e.to_string())??;
+    serde_json::from_str(&raw).map_err(|e|e.to_string())
+}
+
+#[tauri::command]
 async fn manager_request(
     state: tauri::State<'_, Arc<tasks::TaskSystem>>,
     workspace: tauri::State<'_, Arc<workspace::WorkspaceSystem>>,
@@ -1380,7 +1427,7 @@ pub fn run() -> u8 {
         .manage(workspace.clone())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![manager_request])
+        .invoke_handler(tauri::generate_handler![manager_request, renderer_probe])
         .setup(move |app| {
             use tauri::Emitter;
             let handle = app.handle().clone();

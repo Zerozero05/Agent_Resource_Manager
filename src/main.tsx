@@ -27,3 +27,4 @@ async function start() {
   }
 }
 void start();
+void import('./owned-renderer-probe').then(probe => probe.run());
